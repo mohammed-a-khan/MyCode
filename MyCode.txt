@@ -1,1 +1,397 @@
-test
+285 - 331
+private static findProjectRoot(start: string): string {
+        // Walk up to 12 levels looking for project markers.
+        // Hard markers (build files) return immediately — most authoritative.
+        // Soft markers (resources/, src/main/java, testng.xml, qaf-config*) are
+        // recorded; the highest soft-marker ancestor wins if no hard marker
+        // is found. This handles "code dump" legacy projects without pom.xml
+        // (e.g. <root>/LegacySeleniumCodeForConversion/resources/<env>/...).
+        let cur = start;
+        let softMarkerAncestor: string | null = null;
+        const HARD_MARKERS = ['pom.xml', 'build.gradle', 'build.gradle.kts', 'package.json'];
+        const SOFT_MARKER_DIRS = ['resources', 'resource'];
+        const SOFT_MARKER_FILES = /^(testng|qaf-config|cucumber\.runtime|application)[-_a-z0-9]*\.(xml|properties)$/i;
+        for (let i = 0; i < 12; i++) {
+            // 1. Hard build-file markers — return immediately.
+            for (const c of HARD_MARKERS) {
+                if (fs.existsSync(path.join(cur, c))) return cur;
+            }
+            // 2. .csproj / .sln files — C# project markers.
+            try {
+                const ents = fs.readdirSync(cur);
+                if (ents.some((e) => e.endsWith('.csproj') || e.endsWith('.sln'))) return cur;
+                // 3. Soft marker: <cur>/resources/ or <cur>/resource/ directory.
+                //    Common in QAF / TestNG projects that ship data files under
+                //    resources/<env>/testdata/. Record the HIGHEST such ancestor
+                //    seen — `softMarkerAncestor` only overwrites going up.
+                for (const dirName of SOFT_MARKER_DIRS) {
+                    if (ents.includes(dirName)) {
+                        try {
+                            if (fs.statSync(path.join(cur, dirName)).isDirectory()) {
+                                softMarkerAncestor = cur;
+                            }
+                        } catch { /* ignore */ }
+                    }
+                }
+                // 4. Soft marker: testng.xml / qaf-config*.xml / cucumber.runtime.xml
+                //    living directly in this directory.
+                if (ents.some((e) => SOFT_MARKER_FILES.test(e))) {
+                    softMarkerAncestor = cur;
+                }
+            } catch { /* ignore */ }
+            const parent = path.dirname(cur);
+            if (parent === cur) break;
+            cur = parent;
+        }
+        if (softMarkerAncestor) return softMarkerAncestor;
+        return start;
+    }
+
+----------------------------------------------------------------------------
+141 - 196
+
+/**
+ * Find a data file by basename anywhere reachable from `root` (no env-segment
+ * filter). Used as a softer fallback when env-pathed search fails (e.g. a
+ * project that drops all data files under a single `testdata/` folder without
+ * per-env subfolders).
+ */
+function findFileByBasename(
+    root: string,
+    targetBaseName: string,
+    maxDepth = 12,
+): string | null {
+    const targetLower = targetBaseName.toLowerCase();
+    const queue: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }];
+    while (queue.length > 0) {
+        const { dir, depth } = queue.shift()!;
+        if (depth > maxDepth) continue;
+        let entries: import('fs').Dirent[];
+        try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+        catch { continue; }
+        for (const e of entries) {
+            const full = path.join(dir, e.name);
+            if (e.isFile() && e.name.toLowerCase() === targetLower) {
+                return full;
+            }
+            if (e.isDirectory() && !e.name.startsWith('.') &&
+                e.name !== 'node_modules' && e.name !== 'dist' && e.name !== 'build') {
+                queue.push({ dir: full, depth: depth + 1 });
+            }
+        }
+    }
+    return null;
+}
+
+/**
+ * When the inferred workspaceRoot is too deep (project-root detection
+ * missed the real ancestor that contains `resources/`), walk UP from
+ * `start` and return the highest ancestor that has either a `resources/`
+ * or `resource/` directory. If none seen within `maxLevels`, return `start`.
+ */
+function findResourcesAncestor(start: string, maxLevels = 8): string {
+    let cur = start;
+    let highest = start;
+    for (let i = 0; i < maxLevels; i++) {
+        try {
+            const ents = fs.readdirSync(cur);
+            if (ents.includes('resources') || ents.includes('resource')) {
+                highest = cur;
+            }
+        } catch { /* ignore */ }
+        const parent = path.dirname(cur);
+        if (parent === cur) break;
+        cur = parent;
+    }
+    return highest;
+}
+
+function getStr(p: Record<string, unknown>, k: string): string | undefined {
+    const v = p[k];
+    return typeof v === 'string' ? v : undefined;
+}
+
+
+
+
+
+4169
+-----
+
+.handler(async (params: Record<string, unknown>) => {
+        const runId = String(params.runId ?? '');
+        const ctx = getCtx(runId);
+        if (!ctx) return errorResult(`unknown runId '${runId}'`, runId);
+        const annotationValue = getStr(params, 'annotationValue');
+        if (!annotationValue) return errorResult('annotationValue required', runId);
+
+        // Load inventory to learn workspace root + known data file paths.
+        const inventoryRaw = ctx.readPhaseArtifact('discover', 'inventory.json');
+        if (!inventoryRaw) {
+            return errorResult('no inventory — run csaa_discover before csaa_resolve_data_file', runId);
+        }
+        let inv: LegacyInventory;
+        try { inv = JSON.parse(inventoryRaw); }
+        catch { return errorResult('inventory.json is corrupt — re-run csaa_discover', runId); }
+
+        // Determine env list.
+        let envList: string[] = [];
+        const envParam = getStr(params, 'environments');
+        if (envParam) {
+            envList = envParam.split(',').map((s) => s.trim()).filter(Boolean);
+        } else {
+            // Look at directory names under resources/ in the inventory.
+            const envSet = new Set<string>();
+            for (const c of inv.propertiesFiles ?? []) {
+                const m = (c as string).match(/[\/\\]resources[\/\\]([^\/\\]+)[\/\\]/i);
+                if (m && m[1] !== 'sit' && m[1] !== 'dev' && m[1] !== 'uat' && m[1] !== 'qa' && m[1] !== 'prod') {
+                    // ignore weird folders; below we add the common defaults
+                }
+                if (m) envSet.add(m[1]);
+            }
+            envList = envSet.size > 0 ? [...envSet] : ['sit'];
+        }
+
+        // Workspace root: the inventory's rootPath. If a `resources/` (or
+        // `resource/`) ancestor lives higher up the tree than the inferred
+        // root (common when project-root detection lands deep inside the
+        // src/ subtree), walk up and search from there too — never give up
+        // just because the build-file marker was misplaced.
+        const inferredRoot = inv.rootPath;
+        if (!inferredRoot || !fs.existsSync(inferredRoot)) {
+            return errorResult(`inventory rootPath '${inferredRoot}' missing on disk`, runId);
+        }
+        const workspaceRoot = inferredRoot;
+        const widerRoot = findResourcesAncestor(inferredRoot, 8);
+
+        // Expand placeholders for each env, then resolve.
+        const placeholderRe = /\$\{(?:environment\.name|env|envName)\}/gi;
+        const resolved: Array<{
+            env: string;
+            relativePath: string;
+            absolutePath: string;
+            exists: boolean;
+            fileSize?: number;
+            resolutionStrategy?: string;
+        }> = [];
+        const baseName = path.basename(annotationValue);
+        // Build alternate basenames covering common extension swaps (.xls →
+        // .xlsx / .xml / .csv). Legacy code often annotates one extension
+        // while the file on disk has another.
+        const baseStem = baseName.replace(/\.[a-z0-9]+$/i, '');
+        const altExts = ['.xls', '.xlsx', '.xml', '.csv', '.tsv', '.json', '.yaml', '.yml'];
+        const altBasenames = [
+            baseName,
+            ...altExts.map((e) => baseStem + e).filter((b) => b.toLowerCase() !== baseName.toLowerCase()),
+        ];
+        const fallbacksTried = new Set<string>();
+
+        for (const env of envList) {
+            const expanded = annotationValue.replace(placeholderRe, env);
+            // 1. Direct join against the inferred root.
+            const direct = path.resolve(workspaceRoot, expanded);
+            if (fs.existsSync(direct)) {
+                resolved.push({
+                    env,
+                    relativePath: expanded,
+                    absolutePath: direct,
+                    exists: true,
+                    fileSize: fs.statSync(direct).size,
+                    resolutionStrategy: 'direct',
+                });
+                continue;
+            }
+            // 1b. Direct join against the wider (resources-ancestor) root —
+            //     catches the case where inferredRoot sits inside src/.
+            if (widerRoot !== workspaceRoot) {
+                const widerDirect = path.resolve(widerRoot, expanded);
+                if (fs.existsSync(widerDirect)) {
+                    resolved.push({
+                        env,
+                        relativePath: path.relative(widerRoot, widerDirect),
+                        absolutePath: widerDirect,
+                        exists: true,
+                        fileSize: fs.statSync(widerDirect).size,
+                        resolutionStrategy: 'direct-via-resources-ancestor',
+                    });
+                    continue;
+                }
+            }
+            // 2. BFS env-segment walk from inferred root (and wider root if
+            //    different). Tries each alternate extension before giving up.
+            const cacheKey = `${env}::${baseName}`;
+            if (fallbacksTried.has(cacheKey)) {
+                resolved.push({ env, relativePath: expanded, absolutePath: direct, exists: false });
+                continue;
+            }
+            fallbacksTried.add(cacheKey);
+            let found: string | null = null;
+            let strategy = '';
+            for (const tryName of altBasenames) {
+                found = findFileWithEnvInPath(workspaceRoot, tryName, env);
+                if (found) { strategy = `bfs-env-segment(${tryName})`; break; }
+                if (widerRoot !== workspaceRoot) {
+                    found = findFileWithEnvInPath(widerRoot, tryName, env);
+                    if (found) { strategy = `bfs-env-segment-via-ancestor(${tryName})`; break; }
+                }
+            }
+            // 3. Last resort: basename-only walk (no env segment). Some
+            //    projects ship a single shared data file without per-env
+            //    subdirectories.
+            if (!found) {
+                for (const tryName of altBasenames) {
+                    found = findFileByBasename(widerRoot, tryName);
+                    if (found) { strategy = `bfs-basename(${tryName})`; break; }
+                }
+            }
+            if (found) {
+                const reportRoot = widerRoot !== workspaceRoot ? widerRoot : workspaceRoot;
+                resolved.push({
+                    env,
+                    relativePath: path.relative(reportRoot, found),
+                    absolutePath: found,
+                    exists: true,
+                    fileSize: fs.statSync(found).size,
+                    resolutionStrategy: strategy,
+                });
+            } else {
+                resolved.push({
+                    env,
+                    relativePath: expanded,
+                    absolutePath: direct,
+                    exists: false,
+                });
+            }
+        }
+
+        // Also check inventory.dataFiles for any match — sometimes the
+        // annotation pattern differs from the actual on-disk name (e.g.
+        // TestData.xls vs Test_Data.xls). Surface candidates.
+        const inventoryCandidates: Array<{ path: string; basename: string }> = [];
+        const targetStem = baseName.toLowerCase().replace(/\.[a-z0-9]+$/, '');
+        for (const d of inv.dataFiles ?? []) {
+            const p = String(d);
+            const b = path.basename(p).toLowerCase();
+            const bStem = b.replace(/\.[a-z0-9]+$/, '');
+            // Exact match, OR either name contains the other's stem, OR
+            // they share a long common prefix (≥5 chars or ≥60% of the
+            // shorter). Catches OrdersDataFile.xls vs OrdersData.xls in
+            // either direction.
+            const prefixLen = commonPrefixLen(bStem, targetStem);
+            const minLen = Math.min(bStem.length, targetStem.length);
+            const enoughPrefix = prefixLen >= 5 || (minLen > 0 && prefixLen / minLen >= 0.6);
+            if (b === baseName.toLowerCase() ||
+                bStem.includes(targetStem) || targetStem.includes(bStem) ||
+                enoughPrefix) {
+                inventoryCandidates.push({ path: p, basename: path.basename(p) });
+            }
+        }
+
+        const foundCount = resolved.filter((r) => r.exists).length;
+        return jsonResult(
+            {
+                state: 'RUNNING',
+                runId,
+                annotationValue,
+                workspaceRoot,
+                requestedEnvs: envList,
+                resolved,
+                inventoryCandidates,
+                foundCount,
+                missingCount: resolved.length - foundCount,
+            },
+            foundCount > 0
+                ? `Resolved ${foundCount}/${resolved.length} env(s) for "${baseName}". Pass any of the absolute paths to csaa_read_legacy_data.`
+                : `No env resolved "${baseName}". Inventory has ${inventoryCandidates.length} similar file(s) — try those, or escalate as a high-severity gap.`,
+        );
+    })
+    .build();
+
+
+
+
+
+
+4667
+-------
+// Cache miss → resolve and extract on the fly.
+        const inventoryRaw = ctx.readPhaseArtifact('discover', 'inventory.json');
+        if (!inventoryRaw) {
+            return errorResult('no inventory — run csaa_discover first', runId);
+        }
+        const inv = JSON.parse(inventoryRaw) as LegacyInventory;
+        const helpers = (inv.helpers ?? []).map((h) => ({
+            className: path.basename(h as string, path.extname(h as string)),
+            path: h as string,
+        }));
+        const pages = (inv.pages ?? []).map((p) => ({
+            className: path.basename(p as string, path.extname(p as string)),
+            path: p as string,
+        }));
+        // ALSO search every Java/C# source file in the inventory by basename
+        // — the classifier may have tagged the file as 'unknown' (e.g. a
+        // utility class whose filename doesn't end in Helper/Util/Utility/
+        // Support and isn't under a helpers/utils/utilities/support/common
+        // directory). Match by class name == file basename (case-sensitive).
+        const sourceFiles = (inv.files ?? [])
+            .filter((f) => typeof f === 'object' && f !== null && 'extension' in f &&
+                ((f as { extension?: string }).extension === '.java' ||
+                 (f as { extension?: string }).extension === '.cs'))
+            .map((f) => ({
+                className: path.basename((f as { path: string }).path, path.extname((f as { path: string }).path)),
+                path: (f as { path: string }).path,
+            }));
+        const all = [...helpers, ...pages, ...sourceFiles];
+        let found = all.find((x) => x.className === helperClass);
+        // Final safety net: walk the project tree (and its 8-level parent
+        // chain) looking for <helperClass>.java / .cs on disk. Catches the
+        // case where the helper file lives OUTSIDE the inferred project
+        // root altogether — e.g. project root detection landed deep inside
+        // src/ and never indexed sibling utility directories.
+        if (!found) {
+            const widerRoot = findResourcesAncestor(inv.rootPath ?? process.cwd(), 8);
+            const onDisk = findFileByBasename(widerRoot, `${helperClass}.java`)
+                ?? findFileByBasename(widerRoot, `${helperClass}.cs`);
+            if (onDisk) {
+                found = { className: helperClass, path: onDisk };
+            }
+        }
+        if (!found) {
+            return jsonResult(
+                {
+                    state: 'AWAITING_LLM_RETRY',
+                    runId,
+                    error: `helper class '${helperClass}' not found in inventory (${inv.helpers?.length ?? 0} helpers + ${inv.pages?.length ?? 0} pages + ${sourceFiles.length} other source files scanned) nor on disk within 8 parent directories`,
+                    suggestion: 'Verify the class name spelling exactly. If the file lives outside the project tree (e.g. a sibling utility module), call csaa_discover again with rootPath pointing at the common ancestor.',
+                },
+                `Helper class '${helperClass}' not in inventory.`,
+            );
+        }
+        const hSig = CSLegacySignatureExtractor.extractHelperSignature(
+            found.path, helperClass, helperMethod,
+        );
+        if (!hSig) {
+            return jsonResult(
+                {
+                    state: 'AWAITING_LLM_RETRY',
+                    runId,
+                    error: `method '${helperMethod}' not found in ${found.path}`,
+                    suggestion: 'Open the file and verify the exact method name (case-sensitive).',
+                },
+                `Method '${helperMethod}' not found in ${helperClass}.`,
+            );
+        }
+        return jsonResult(
+            {
+                state: 'RUNNING',
+                runId,
+                helperClass,
+                helperMethod,
+                filePath: hSig.filePath,
+                actionCount: hSig.actions.length,
+                actions: hSig.actions,
+            },
+            `Expanded ${helperClass}.${helperMethod}: ${hSig.actions.length} leaf action(s).`,
+        );
+    })
+    .build();
