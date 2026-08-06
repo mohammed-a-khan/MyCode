@@ -1,0 +1,55 @@
+# Example GitHub Actions workflow for automated Copilot metrics collection.
+#
+# To activate: copy this file to .github/workflows/copilot-metrics.yml and
+# configure the repository settings listed below. It is kept OUT of
+# .github/workflows here on purpose so nothing runs until you opt in.
+#
+# Required repository configuration:
+#   Secret   COPILOT_METRICS_TOKEN  token with Copilot metrics read access
+#                                   (from an org admin / service account)
+#   Variable COPILOT_METRICS_ORG    organization slug
+#   Variable COPILOT_METRICS_TEAMS  comma-separated team slugs (one per LOB)
+
+name: Collect Copilot metrics
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # daily at 06:00 UTC; API retains 28 days, so weekly is the minimum safe cadence
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install toolkit dependencies
+        working-directory: copilot-lob-metrics
+        run: npm ci
+
+      - name: Collect metrics
+        working-directory: copilot-lob-metrics
+        env:
+          GH_TOKEN: ${{ secrets.COPILOT_METRICS_TOKEN }}
+          GH_ORG: ${{ vars.COPILOT_METRICS_ORG }}
+          GH_TEAM_SLUGS: ${{ vars.COPILOT_METRICS_TEAMS }}
+        run: npm run collect
+
+      - name: Generate report
+        working-directory: copilot-lob-metrics
+        run: npm run report -- --days 28 --out report.md
+
+      - name: Commit updated data and report
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add copilot-lob-metrics/data copilot-lob-metrics/report.md
+          git diff --cached --quiet || git commit -m "chore: update Copilot metrics snapshot"
+          git push
