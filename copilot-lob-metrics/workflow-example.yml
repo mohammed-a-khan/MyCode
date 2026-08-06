@@ -5,16 +5,20 @@
 # .github/workflows here on purpose so nothing runs until you opt in.
 #
 # Required repository configuration:
-#   Secret   COPILOT_METRICS_TOKEN  token with Copilot metrics read access
-#                                   (from an org admin / service account)
+#   Secret   COPILOT_METRICS_TOKEN  fine-grained PAT with "Organization
+#                                   Copilot metrics: read" (or classic
+#                                   read:org), from an authorized account
 #   Variable COPILOT_METRICS_ORG    organization slug
 #   Variable COPILOT_METRICS_TEAMS  comma-separated team slugs (one per LOB)
+#
+# Note: the committed data/raw files contain per-user IDs and logins —
+# only use this workflow in a private repository.
 
 name: Collect Copilot metrics
 
 on:
   schedule:
-    - cron: "0 6 * * *" # daily at 06:00 UTC; API retains 28 days, so weekly is the minimum safe cadence
+    - cron: "0 6 * * *" # daily at 06:00 UTC; the collector backfills the last 10 days, so occasional missed runs are fine
   workflow_dispatch: {}
 
 permissions:
@@ -39,11 +43,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.COPILOT_METRICS_TOKEN }}
           GH_ORG: ${{ vars.COPILOT_METRICS_ORG }}
-          GH_TEAM_SLUGS: ${{ vars.COPILOT_METRICS_TEAMS }}
         run: npm run collect
 
       - name: Generate report
         working-directory: copilot-lob-metrics
+        env:
+          GH_TEAM_SLUGS: ${{ vars.COPILOT_METRICS_TEAMS }}
         run: npm run report -- --days 28 --out report.md
 
       - name: Commit updated data and report
