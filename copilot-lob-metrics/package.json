@@ -7,6 +7,7 @@
   "scripts": {
     "collect": "tsx src/collect-metrics.ts",
     "report": "tsx src/generate-report.ts",
+    "dashboard": "tsx src/generate-dashboard.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

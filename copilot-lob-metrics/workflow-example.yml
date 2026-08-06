@@ -45,11 +45,21 @@ jobs:
           GH_ORG: ${{ vars.COPILOT_METRICS_ORG }}
         run: npm run collect
 
-      - name: Generate report
+      - name: Generate report and dashboard
         working-directory: copilot-lob-metrics
         env:
           GH_TEAM_SLUGS: ${{ vars.COPILOT_METRICS_TEAMS }}
-        run: npm run report -- --days 28 --out report.md
+        run: |
+          npm run report -- --days 28 --out report.md
+          npm run dashboard -- --days 28 --out dashboard.html
+
+      - name: Upload dashboard artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: copilot-dashboard
+          path: |
+            copilot-lob-metrics/dashboard.html
+            copilot-lob-metrics/report.md
 
       - name: Commit updated data and report
         run: |

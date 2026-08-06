@@ -90,7 +90,9 @@ Verified requirements
 | File | Purpose |
 |---|---|
 | `src/collect-metrics.ts` | For each day in the window, fetches the three report envelopes, downloads the signed NDJSON links, and stores raw rows under `data/raw/{users,user-teams,org}/YYYY-MM-DD.ndjson`. Idempotent — existing days are skipped. |
-| `src/generate-report.ts` | Performs the documented per-day join, aggregates per team over the window, and emits a Markdown report: LOB comparison table, org context totals, per-team language breakdowns. |
+| `src/generate-report.ts` | Emits a Markdown report: LOB comparison table, org context totals, per-team language breakdowns. |
+| `src/generate-dashboard.ts` | Emits a **self-contained HTML dashboard** (no external assets/CDNs — works offline and behind restrictive proxies): stat tiles, LOC-added-by-team bars, daily trend lines with hover tooltips and a table view, comparison table, per-team language breakdowns. Light and dark theme follow the viewer's OS setting. |
+| `src/aggregate.ts` | Shared join/aggregation logic used by both generators. |
 | `src/types.ts` | TypeScript types for the report envelope and NDJSON row shapes. |
 | `workflow-example.yml` | GitHub Actions workflow to automate collection + reporting (copy into `.github/workflows/` to activate). |
 
@@ -111,6 +113,9 @@ npm run collect               # add -- --days 30 to backfill further
 
 # 2. Report over the collected history (default window: last 28 joinable days)
 npm run report -- --days 28 --out report.md
+
+# 3. HTML dashboard for the LOB head (self-contained, share the file directly)
+npm run dashboard -- --days 28 --out dashboard.html
 ```
 
 **Privacy note:** the raw per-user NDJSON files contain individual user IDs
