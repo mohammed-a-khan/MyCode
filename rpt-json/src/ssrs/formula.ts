@@ -1,0 +1,1568 @@
+/**
+ * Translates Crystal Reports formulas (Crystal syntax) into SSRS expressions (VB.NET syntax).
+ *
+ * The translator parses the formula into a small syntax tree and emits an equivalent
+ * expression. Anything without a faithful equivalent (variables, multi-statement formulas,
+ * unknown functions, print-state functions) is reported in `issues` for manual review.
+ */
+
+import { isBasicSyntax, translateBasic } from './basic.ts';
+
+export interface FormulaContext {
+  /** Dataset field name for a database field, or undefined if unknown. */
+  field(table: string, column: string): string | undefined;
+  /** Translated expression (without "=") of another formula, or undefined if unknown. */
+  formula(name: string): string | undefined;
+  /** SSRS parameter name for a Crystal parameter. */
+  parameter(name: string): string;
+  /** SSRS group scope for a Crystal group field ("Table.Field"), used by aggregates. */
+  groupScope?(fieldRef: string): string | undefined;
+  /** Expression for a running total ({#name}), or undefined if unknown. */
+  runningTotal?(name: string): string | undefined;
+  /** VB name of a Crystal custom function (a formula written as "Function (...)"), or undefined. */
+  customFunction?(name: string): string | undefined;
+  /** For a range parameter: the SSRS parameters holding its start and end. */
+  parameterRange?(name: string): { start: string; end: string } | undefined;
+  /** Whether a parameter accepts several values. */
+  parameterMultiple?(name: string): boolean;
+  /** Expression for the next record's value of a database field (Crystal Next()), or undefined. */
+  nextValue?(fieldRef: string): string | undefined;
+  /** Value type ("date", "dateTime", "string", ...) of a database field, if known. */
+  fieldType?(fieldRef: string): string | undefined;
+}
+
+export interface Translation {
+  /** SSRS expression including the leading "=". */
+  expression: string;
+  issues: string[];
+  /** VB function for the report's Code block, when the formula needed statements. */
+  code?: string;
+  /** Class-level variables (Global/Shared Crystal variables) the code uses: name -> VB type. */
+  members?: Record<string, string>;
+  /** Shared VB helper functions the code or expression calls (see CODE_HELPERS). */
+  helpers?: string[];
+}
+
+// ---- tokens ----------------------------------------------------------------------------
+
+type Token =
+  | { kind: 'number'; value: string }
+  | { kind: 'string'; value: string }
+  | { kind: 'date'; value: string }
+  | { kind: 'field'; value: string }
+  | { kind: 'ident'; value: string }
+  | { kind: 'op'; value: string }
+  | { kind: 'eof'; value: '' };
+
+const OPERATORS = [':=', '<>', '<=', '>=', '=', '<', '>', '+', '-', '*', '/', '\\', '^', '&', '%', '(', ')', '[', ']', ',', ';', ':'];
+
+function tokenize(source: string): Token[] {
+  const tokens: Token[] = [];
+  let i = 0;
+  while (i < source.length) {
+    const c = source[i];
+    if (/\s/.test(c)) {
+      i++;
+    } else if (source.startsWith('//', i)) {
+      while (i < source.length && source[i] !== '\n') i++;
+    } else if (c === '"' || c === "'") {
+      let value = '';
+      i++;
+      for (;;) {
+        if (i >= source.length) throw new Error('unterminated string');
+        if (source[i] === c) {
+          if (source[i + 1] === c) {
+            value += c;
+            i += 2;
+            continue;
+          }
+          i++;
+          break;
+        }
+        value += source[i++];
+      }
+      tokens.push({ kind: 'string', value });
+    } else if (c === '{') {
+      const end = source.indexOf('}', i);
+      if (end < 0) throw new Error('unterminated field reference');
+      tokens.push({ kind: 'field', value: source.slice(i + 1, end) });
+      i = end + 1;
+    } else if (c === '#') {
+      const end = source.indexOf('#', i + 1);
+      if (end < 0) throw new Error('unterminated date literal');
+      tokens.push({ kind: 'date', value: source.slice(i + 1, end) });
+      i = end + 1;
+    } else if (/[0-9]/.test(c) || (c === '.' && /[0-9]/.test(source[i + 1] ?? ''))) {
+      const m = /^([0-9]+\.?[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?/.exec(source.slice(i))!;
+      tokens.push({ kind: 'number', value: m[0] });
+      i += m[0].length;
+    } else if (/[A-Za-z_$]/.test(c)) {
+      const m = /^[A-Za-z_$][A-Za-z0-9_$]*/.exec(source.slice(i))!;
+      tokens.push({ kind: 'ident', value: m[0] });
+      i += m[0].length;
+    } else {
+      const op = OPERATORS.find((o) => source.startsWith(o, i));
+      if (!op) throw new Error(`unexpected character "${c}"`);
+      tokens.push({ kind: 'op', value: op });
+      i += op.length;
+    }
+  }
+  tokens.push({ kind: 'eof', value: '' });
+  return tokens;
+}
+
+// ---- syntax tree -----------------------------------------------------------------------
+
+export type Node =
+  | { t: 'literal'; vb: string }
+  | { t: 'field'; ref: string }
+  | { t: 'name'; name: string }
+  | { t: 'call'; name: string; args: Node[] }
+  | { t: 'unary'; op: string; arg: Node }
+  | { t: 'binary'; op: string; left: Node; right: Node }
+  | { t: 'if'; cond: Node; then: Node; else?: Node }
+  | { t: 'in'; value: Node; list: Node[]; negate: boolean }
+  | { t: 'range'; value: Node; from: Node; to: Node; negate: boolean }
+  | { t: 'select'; value: Node; cases: { match: Node[]; result: Node }[]; otherwise?: Node }
+  | { t: 'array'; items: Node[] }
+  | { t: 'index'; base: Node; from: Node; to?: Node }
+  | { t: 'rangeValue'; from: Node; to: Node };
+
+/** Statements of a multi-statement formula. */
+type Stmt =
+  | { s: 'decl'; scope: string; vtype: string; array: boolean; range?: boolean; name: string; init?: Node }
+  | { s: 'redim'; name: string; size: Node; preserve: boolean }
+  | { s: 'select'; value: Node; cases: { match: Node[]; body: Stmt[] }[]; otherwise?: Stmt[] }
+  | { s: 'assign'; name: string; index?: Node; value: Node }
+  | { s: 'expr'; expr: Node }
+  | { s: 'if'; cond: Node; then: Stmt[]; else?: Stmt[] }
+  | { s: 'for'; name: string; from: Node; to: Node; step?: Node; body: Stmt[] }
+  | { s: 'while'; cond: Node; body: Stmt[]; post: boolean }
+  | { s: 'exit'; what: string }
+  | { s: 'timing'; word: string };
+
+interface Program {
+  params?: { name: string; vtype: string; array: boolean; range: boolean; optional?: Node }[];
+  body: Stmt[];
+}
+
+const VB_TYPES: Record<string, string> = {
+  numbervar: 'Double', currencyvar: 'Decimal', stringvar: 'String', booleanvar: 'Boolean',
+  datevar: 'Date', timevar: 'Date', datetimevar: 'Date', numbervarrange: 'Object', datevarrange: 'Object',
+};
+const TIMING_WORDS = ['whileprintingrecords', 'whilereadingrecords', 'beforereadingrecords', 'evaluateafter'];
+
+const KEYWORD = (value: string) => value.toLowerCase();
+
+/** Variable declarations ("NumberVar x := ...") without a Local/Global/Shared scope keyword. */
+const VARIABLE_TYPES = ['numbervar', 'currencyvar', 'stringvar', 'booleanvar', 'datevar', 'timevar', 'datetimevar', 'numbervarrange', 'datevarrange'];
+
+class Parser {
+  private pos = 0;
+  readonly issues: string[] = [];
+  private readonly tokens: Token[];
+
+  constructor(tokens: Token[]) {
+    this.tokens = tokens;
+  }
+
+  private peek(offset = 0): Token {
+    return this.tokens[Math.min(this.pos + offset, this.tokens.length - 1)];
+  }
+  private next(): Token {
+    return this.tokens[this.pos++] ?? this.tokens[this.tokens.length - 1];
+  }
+  private isOp(value: string): boolean {
+    const t = this.peek();
+    return t.kind === 'op' && t.value === value;
+  }
+  private isWord(...words: string[]): boolean {
+    const t = this.peek();
+    return t.kind === 'ident' && words.includes(KEYWORD(t.value));
+  }
+  private expectOp(value: string): void {
+    if (!this.isOp(value)) throw new Error(`expected "${value}" but found "${this.peek().value || 'end of formula'}"`);
+    this.pos++;
+  }
+  private expectWord(word: string): void {
+    if (!this.isWord(word)) throw new Error(`expected "${word}" but found "${this.peek().value || 'end of formula'}"`);
+    this.pos++;
+  }
+
+  /** A formula is a sequence of statements; its value is the last one. */
+  parseFormula(): Node {
+    const statements: Node[] = [];
+    while (this.peek().kind !== 'eof') {
+      if (this.isOp(';')) {
+        this.pos++;
+        continue;
+      }
+      if (this.isWord('local', 'global', 'shared', 'whileprintingrecords', 'whilereadingrecords', 'beforereadingrecords', 'evaluateafter', ...VARIABLE_TYPES)) {
+        this.issues.push(`uses "${this.peek().value}" (variables / evaluation timing) which needs manual conversion, e.g. to custom code or a running total`);
+        while (this.peek().kind !== 'eof' && !this.isOp(';')) this.pos++;
+        continue;
+      }
+      if (this.peek().kind === 'ident' && this.peek(1).kind === 'op' && this.peek(1).value === ':=') {
+        this.issues.push('assigns variables, which needs manual conversion (custom code or a calculated field)');
+        while (this.peek().kind !== 'eof' && !this.isOp(';')) this.pos++;
+        continue;
+      }
+      if (this.isWord('for', 'while', 'do', 'exit', 'function')) {
+        throw new Error(`uses "${this.peek().value}" (loops or custom functions)`);
+      }
+      statements.push(this.parseExpression());
+      if (!this.isOp(';') && this.peek().kind !== 'eof') throw new Error(`unexpected "${this.peek().value}"`);
+    }
+    if (statements.length === 0) return { t: 'literal', vb: 'Nothing' };
+    if (statements.length > 1) this.issues.push('has several statements; only the last one is used as the value');
+    return statements[statements.length - 1];
+  }
+
+  parseExpression(): Node {
+    if (this.isWord('if')) {
+      this.pos++;
+      const cond = this.parseExpression();
+      this.expectWord('then');
+      const then = this.parseExpression();
+      let otherwise: Node | undefined;
+      if (this.isWord('else')) {
+        this.pos++;
+        otherwise = this.parseExpression();
+      }
+      return { t: 'if', cond, then, else: otherwise };
+    }
+    if (this.isWord('select')) return this.parseSelect();
+    return this.parseOr();
+  }
+
+  private parseSelect(): Node {
+    this.expectWord('select');
+    const value = this.parseOr();
+    const cases: { match: Node[]; result: Node }[] = [];
+    let otherwise: Node | undefined;
+    while (this.isWord('case', 'default')) {
+      if (this.isWord('default')) {
+        this.pos++;
+        this.expectOp(':');
+        otherwise = this.parseExpression();
+        continue;
+      }
+      this.pos++;
+      const match = [this.parseCaseItem(value)];
+      while (this.isOp(',')) {
+        this.pos++;
+        match.push(this.parseCaseItem(value));
+      }
+      this.expectOp(':');
+      cases.push({ match, result: this.parseExpression() });
+    }
+    return { t: 'select', value, cases, otherwise };
+  }
+
+  parseCaseItemPublic(value: Node): Node {
+    return this.parseCaseItem(value);
+  }
+
+  private parseCaseItem(value: Node): Node {
+    const from = this.parseAdditive();
+    if (this.isWord('to')) {
+      this.pos++;
+      return { t: 'range', value, from, to: this.parseAdditive(), negate: false };
+    }
+    return { t: 'binary', op: '=', left: value, right: from };
+  }
+
+  private parseOr(): Node {
+    let left = this.parseAnd();
+    while (this.isWord('or', 'xor', 'eqv', 'imp')) {
+      const op = KEYWORD(this.next().value);
+      left = { t: 'binary', op, left, right: this.parseAnd() };
+    }
+    return left;
+  }
+
+  private parseAnd(): Node {
+    let left = this.parseNot();
+    while (this.isWord('and')) {
+      this.pos++;
+      left = { t: 'binary', op: 'and', left, right: this.parseNot() };
+    }
+    return left;
+  }
+
+  private parseNot(): Node {
+    if (this.isWord('not')) {
+      this.pos++;
+      return { t: 'unary', op: 'not', arg: this.parseNot() };
+    }
+    return this.parseComparison();
+  }
+
+  private parseComparison(): Node {
+    let left = this.parseConcat();
+    for (;;) {
+      const t = this.peek();
+      if (t.kind === 'op' && ['=', '<>', '<', '>', '<=', '>='].includes(t.value)) {
+        this.pos++;
+        left = { t: 'binary', op: t.value, left, right: this.parseConcat() };
+      } else if (this.isWord('in') || (this.isWord('not') && this.peek(1).kind === 'ident' && KEYWORD(this.peek(1).value) === 'in')) {
+        const negate = this.isWord('not');
+        this.pos += negate ? 2 : 1;
+        if (this.isOp('[')) {
+          this.pos++;
+          const list: Node[] = [];
+          while (!this.isOp(']')) {
+            list.push(this.parseConcat());
+            if (this.isOp(',')) this.pos++;
+            else break;
+          }
+          this.expectOp(']');
+          left = { t: 'in', value: left, list, negate };
+        } else {
+          const from = this.parseConcat();
+          if (this.isWord('to')) {
+            this.pos++;
+            left = { t: 'range', value: left, from, to: this.parseConcat(), negate };
+          } else {
+            // "x in {?rangeParameter}" or a named range such as LastFullMonth.
+            left = { t: 'call', name: '$inRange', args: [left, from] };
+            if (negate) left = { t: 'unary', op: 'not', arg: left };
+          }
+        }
+      } else if (this.isWord('like', 'startswith')) {
+        const op = KEYWORD(this.next().value);
+        left = { t: 'binary', op, left, right: this.parseConcat() };
+      } else {
+        return left;
+      }
+    }
+  }
+
+  private parseConcat(): Node {
+    let left = this.parseAdditive();
+    while (this.isOp('&')) {
+      this.pos++;
+      left = { t: 'binary', op: '&', left, right: this.parseAdditive() };
+    }
+    return left;
+  }
+
+  private parseAdditive(): Node {
+    let left = this.parseMultiplicative();
+    while (this.isOp('+') || this.isOp('-')) {
+      const op = this.next().value;
+      left = { t: 'binary', op, left, right: this.parseMultiplicative() };
+    }
+    return left;
+  }
+
+  private parseMultiplicative(): Node {
+    let left = this.parseUnary();
+    while (this.isOp('*') || this.isOp('/') || this.isOp('\\') || this.isOp('%') || this.isWord('mod')) {
+      const op = KEYWORD(this.next().value);
+      left = { t: 'binary', op, left, right: this.parseUnary() };
+    }
+    return left;
+  }
+
+  private parseUnary(): Node {
+    if (this.isOp('-') || this.isOp('+')) {
+      const op = this.next().value;
+      const arg = this.parseUnary();
+      return op === '-' ? { t: 'unary', op: '-', arg } : arg;
+    }
+    const base = this.parsePrimary();
+    if (this.isOp('^')) {
+      this.pos++;
+      return { t: 'binary', op: '^', left: base, right: this.parseUnary() };
+    }
+    return base;
+  }
+
+  /** Subscripts: x[i] (array element or character) and s[a to b] (substring). */
+  private postfix(node: Node): Node {
+    while (this.isOp('[')) {
+      this.pos++;
+      const from = this.parseConcat();
+      let to: Node | undefined;
+      if (this.isWord('to')) {
+        this.pos++;
+        to = this.parseConcat();
+      }
+      this.expectOp(']');
+      node = { t: 'index', base: node, from, to };
+    }
+    return node;
+  }
+
+  // ---- statements (multi-statement formulas and custom functions) --------------------------
+
+  private inFunction = false;
+
+  parseProgram(): Program {
+    let params: Program['params'];
+    if (this.isWord('function')) {
+      this.inFunction = true;
+      this.pos++;
+      this.expectOp('(');
+      params = [];
+      while (!this.isOp(')')) {
+        const optional = this.isWord('optional');
+        if (optional) this.pos++;
+        const vtype = KEYWORD(this.next().value);
+        if (!VB_TYPES[vtype]) throw new Error(`unknown parameter type "${vtype}"`);
+        const array = this.isWord('array');
+        if (array) this.pos++;
+        const range = this.isWord('range');
+        if (range) this.pos++;
+        const name = this.next().value;
+        let defaultValue: Node | undefined;
+        if (this.isOp(':=')) {
+          this.pos++;
+          defaultValue = this.parseExpression();
+        }
+        params.push({ name, vtype, array, range, ...(optional || defaultValue ? { optional: defaultValue ?? { t: 'literal', vb: 'Nothing' } } : {}) });
+        if (this.isOp(',')) this.pos++;
+        else break;
+      }
+      this.expectOp(')');
+    }
+    const body = this.parseStatements();
+    if (this.peek().kind !== 'eof') throw new Error(`unexpected "${this.peek().value}"`);
+    return { params, body };
+  }
+
+  /** Declarations found inside a statement (see "NumberVar x > 1"), emitted before it. */
+  private readonly pending: Stmt[] = [];
+
+  private parseStatements(): Stmt[] {
+    const stmts: Stmt[] = [];
+    while (this.peek().kind !== 'eof' && !this.isOp(')')) {
+      if (this.isOp(';')) {
+        this.pos++;
+        continue;
+      }
+      const stmt = this.parseStatement();
+      stmts.push(...this.pending.splice(0), stmt);
+      if (!this.isOp(';') && !this.isOp(')') && this.peek().kind !== 'eof' && !this.isWord('else', 'case', 'default')) {
+        throw new Error(`unexpected "${this.peek().value}"`);
+      }
+      if (this.isWord('else', 'case', 'default')) break;
+    }
+    return stmts;
+  }
+
+  /** A statement, or a parenthesised statement list after then/else/do. */
+  private parseBlock(): Stmt[] {
+    if (this.isOp('(')) {
+      const start = this.pos;
+      try {
+        this.pos++;
+        const stmts = this.parseStatements();
+        this.expectOp(')');
+        if (this.isOp(';') || this.isOp(')') || this.isWord('else', 'while', 'case', 'default') || this.peek().kind === 'eof') return stmts;
+      } catch {
+        // not a block: fall back to an expression statement
+      }
+      this.pos = start;
+    }
+    return [this.parseStatement()];
+  }
+
+  /** An expression, or a range literal "a To b" (assigned to range variables). */
+  private parseValue(): Node {
+    const value = this.parseExpression();
+    if (this.isWord('to')) {
+      this.pos++;
+      return { t: 'rangeValue', from: value, to: this.parseExpression() };
+    }
+    return value;
+  }
+
+  private parseStatement(): Stmt {
+    if (this.isWord(...TIMING_WORDS)) {
+      const word = this.next().value;
+      if (KEYWORD(word) === 'evaluateafter') {
+        this.expectOp('(');
+        this.parseExpression();
+        this.expectOp(')');
+      }
+      return { s: 'timing', word };
+    }
+    if (this.isWord('select')) {
+      this.pos++;
+      const value = this.parseOr();
+      const cases: { match: Node[]; body: Stmt[] }[] = [];
+      let otherwise: Stmt[] | undefined;
+      while (this.isWord('case', 'default')) {
+        if (this.isWord('default')) {
+          this.pos++;
+          this.expectOp(':');
+          otherwise = this.parseBlock();
+          continue;
+        }
+        this.pos++;
+        const match = [this.parseCaseItemPublic(value)];
+        while (this.isOp(',')) {
+          this.pos++;
+          match.push(this.parseCaseItemPublic(value));
+        }
+        this.expectOp(':');
+        cases.push({ match, body: this.parseBlock() });
+      }
+      return { s: 'select', value, cases, otherwise };
+    }
+    if (this.isWord('redim')) {
+      this.pos++;
+      const preserve = this.isWord('preserve');
+      if (preserve) this.pos++;
+      const name = this.next().value;
+      this.expectOp('[');
+      const size = this.parseExpression();
+      this.expectOp(']');
+      return { s: 'redim', name, size, preserve };
+    }
+    if (this.isWord('local', 'global', 'shared') || this.isWord(...VARIABLE_TYPES)) {
+      // Without a scope keyword, variables are global in a formula but local in a custom function.
+      const scope = this.isWord('local', 'global', 'shared') ? KEYWORD(this.next().value) : this.inFunction ? 'local' : 'global';
+      const vtype = KEYWORD(this.next().value);
+      if (!VB_TYPES[vtype]) throw new Error(`unknown variable type "${vtype}"`);
+      const array = this.isWord('array');
+      if (array) this.pos++;
+      const range = this.isWord('range');
+      if (range) this.pos++;
+      const name = this.next().value;
+      let init: Node | undefined;
+      if (this.isOp(':=')) {
+        this.pos++;
+        init = this.parseValue();
+      } else if (!this.isOp(';') && !this.isOp(')') && this.peek().kind !== 'eof' && !this.isWord('else')) {
+        // "NumberVar x > 1": declares x, then the statement is an expression starting with it.
+        this.pos--;
+        this.pending.push({ s: 'decl', scope, vtype, array, range, name });
+        return { s: 'expr', expr: this.parseExpression() };
+      }
+      return { s: 'decl', scope, vtype, array, range, name, init };
+    }
+    if (this.isWord('for')) {
+      this.pos++;
+      const name = this.next().value;
+      this.expectOp(':=');
+      const from = this.parseExpression();
+      this.expectWord('to');
+      const to = this.parseExpression();
+      let step: Node | undefined;
+      if (this.isWord('step')) {
+        this.pos++;
+        step = this.parseExpression();
+      }
+      this.expectWord('do');
+      return { s: 'for', name, from, to, step, body: this.parseBlock() };
+    }
+    if (this.isWord('while')) {
+      this.pos++;
+      const cond = this.parseExpression();
+      this.expectWord('do');
+      return { s: 'while', cond, body: this.parseBlock(), post: false };
+    }
+    if (this.isWord('do')) {
+      this.pos++;
+      const body = this.parseBlock();
+      this.expectWord('while');
+      return { s: 'while', cond: this.parseExpression(), body, post: true };
+    }
+    if (this.isWord('exit')) {
+      this.pos++;
+      return { s: 'exit', what: KEYWORD(this.next().value) };
+    }
+    if (this.isWord('if')) {
+      this.pos++;
+      const cond = this.parseExpression();
+      this.expectWord('then');
+      const then = this.parseBlock();
+      let otherwise: Stmt[] | undefined;
+      if (this.isWord('else')) {
+        this.pos++;
+        otherwise = this.parseBlock();
+      }
+      return { s: 'if', cond, then, else: otherwise };
+    }
+    if (this.peek().kind === 'ident' && this.peek(1).kind === 'op' && this.peek(1).value === ':=') {
+      const name = this.next().value;
+      this.pos++;
+      return { s: 'assign', name, value: this.parseValue() };
+    }
+    if (this.peek().kind === 'ident' && this.peek(1).kind === 'op' && this.peek(1).value === '[') {
+      const start = this.pos;
+      const name = this.next().value;
+      this.pos++;
+      const index = this.parseConcat();
+      if (this.isOp(']') && this.peek(1).kind === 'op' && this.peek(1).value === ':=') {
+        this.pos += 2;
+        return { s: 'assign', name, index, value: this.parseExpression() };
+      }
+      this.pos = start;
+    }
+    return { s: 'expr', expr: this.parseExpression() };
+  }
+
+  private parsePrimary(): Node {
+    const t = this.next();
+    switch (t.kind) {
+      case 'number':
+        return { t: 'literal', vb: t.value.replace(/\.$/, '') };
+      case 'string':
+        return { t: 'literal', vb: vbString(t.value) };
+      case 'date':
+        return { t: 'literal', vb: `CDate(${vbString(t.value)})` };
+      case 'field':
+        return this.postfix({ t: 'field', ref: t.value });
+      case 'op':
+        if (t.value === '(') {
+          const inner = this.parseExpression();
+          this.expectOp(')');
+          return this.postfix(inner);
+        }
+        if (t.value === '[') {
+          const items: Node[] = [];
+          while (!this.isOp(']')) {
+            items.push(this.parseExpression());
+            if (this.isOp(',')) this.pos++;
+            else break;
+          }
+          this.expectOp(']');
+          return { t: 'array', items };
+        }
+        throw new Error(`unexpected "${t.value}"`);
+      case 'ident': {
+        if (this.isOp('(')) {
+          this.pos++;
+          const args: Node[] = [];
+          while (!this.isOp(')')) {
+            args.push(this.parseExpression());
+            if (this.isOp(',')) this.pos++;
+            else break;
+          }
+          this.expectOp(')');
+          return this.postfix({ t: 'call', name: t.value, args });
+        }
+        return this.postfix({ t: 'name', name: t.value });
+      }
+      default:
+        throw new Error('unexpected end of formula');
+    }
+  }
+}
+
+// ---- emitting --------------------------------------------------------------------------
+
+export const vbString = (value: string) => `"${value.replace(/"/g, '""')}"`;
+
+const BINARY_VB: Record<string, string> = {
+  and: 'AndAlso',
+  or: 'OrElse',
+  xor: 'Xor',
+  mod: 'Mod',
+  like: 'Like',
+  '=': '=',
+  '<>': '<>',
+  '<': '<',
+  '>': '>',
+  '<=': '<=',
+  '>=': '>=',
+  '+': '+',
+  '-': '-',
+  '*': '*',
+  '/': '/',
+  '\\': '\\',
+  '^': '^',
+  '&': '&',
+};
+
+/** Functions whose VB equivalent takes the same arguments. */
+export const SAME_ARGS: Record<string, string> = {
+  uppercase: 'UCase', ucase: 'UCase', lowercase: 'LCase', lcase: 'LCase',
+  trim: 'Trim', trimleft: 'LTrim', ltrim: 'LTrim', trimright: 'RTrim', rtrim: 'RTrim',
+  left: 'Left', right: 'Right', mid: 'Mid', length: 'Len', len: 'Len',
+  instr: 'InStr', instrrev: 'InStrRev', replace: 'Replace', strreverse: 'StrReverse', space: 'Space',
+  chr: 'Chr', chrw: 'ChrW', asc: 'Asc', ascw: 'AscW', val: 'Val',
+  tonumber: 'CDbl', cdbl: 'CDbl', cstr: 'CStr', cbool: 'CBool', cdate: 'CDate', ccur: 'CDec', int: 'Int',
+  abs: 'Abs', sgn: 'Sign', sqr: 'Sqrt', sqrt: 'Sqrt', exp: 'Exp', log: 'Log', sin: 'Sin', cos: 'Cos', tan: 'Tan', atn: 'Atan', fix: 'Fix',
+  truncate: 'Fix', round: 'Round',
+  year: 'Year', month: 'Month', day: 'Day', hour: 'Hour', minute: 'Minute', second: 'Second',
+  dateadd: 'DateAdd', datediff: 'DateDiff', datepart: 'DatePart', dayofweek: 'Weekday', weekday: 'Weekday',
+  monthname: 'MonthName', weekdayname: 'WeekdayName', datevalue: 'DateValue', timevalue: 'TimeValue',
+  dateserial: 'DateSerial', timeserial: 'TimeSerial', isnumber: 'IsNumeric', numerictext: 'IsNumeric', lbound: 'LBound',
+  strcmp: 'StrComp', filter: 'Filter',
+  iif: 'IIf', choose: 'Choose', switch: 'Switch', isnumeric: 'IsNumeric', isdate: 'IsDate',
+};
+
+const AGGREGATES: Record<string, string> = {
+  sum: 'Sum', count: 'Count', average: 'Avg', maximum: 'Max', minimum: 'Min',
+  distinctcount: 'CountDistinct', stddev: 'StDev', pthstddev: 'StDevP', variance: 'Var', popvariance: 'VarP',
+};
+
+/** Crystal special fields and keywords used as bare names. */
+export const NAMES: Record<string, string> = {
+  true: 'True', false: 'False', null: 'Nothing',
+  currentdate: 'Today()', today: 'Today()', currentdatetime: 'Now()', currenttime: 'TimeOfDay', printdate: 'Globals!ExecutionTime',
+  printtime: 'Globals!ExecutionTime', datadate: 'Globals!ExecutionTime', datatime: 'Globals!ExecutionTime',
+  pagenumber: 'Globals!PageNumber', totalpagecount: 'Globals!TotalPages', reporttitle: 'Globals!ReportName',
+  filename: 'Globals!ReportName', recordnumber: 'RowNumber(Nothing)',
+  crblack: '"Black"', crwhite: '"White"', crred: '"Red"', crgreen: '"Green"', crblue: '"Blue"', cryellow: '"Yellow"',
+  crmaroon: '"Maroon"', crnavy: '"Navy"', crolive: '"Olive"', crpurple: '"Purple"', crteal: '"Teal"', crgray: '"Gray"',
+  crsilver: '"Silver"', crlime: '"Lime"', craqua: '"Aqua"', crfuchsia: '"Fuchsia"', nocolor: '"Transparent"', crnocolor: '"Transparent"',
+  crnone: 'Nothing',
+  onfirstrecord: '(RowNumber(Nothing) = 1)', onlastrecord: '(RowNumber(Nothing) = CountRows("DataSet1"))',
+  inrepeatedgroupheader: 'False', drilldowngrouplevel: '0',
+  crsunday: 'FirstDayOfWeek.Sunday', crmonday: 'FirstDayOfWeek.Monday', crtuesday: 'FirstDayOfWeek.Tuesday',
+  crwednesday: 'FirstDayOfWeek.Wednesday', crthursday: 'FirstDayOfWeek.Thursday', crfriday: 'FirstDayOfWeek.Friday',
+  crsaturday: 'FirstDayOfWeek.Saturday', crusesystem: 'FirstDayOfWeek.System',
+  // Conditional formatting: the value being formatted, and "leave the property unchanged".
+  currentfieldvalue: 'Me.Value', defaultattribute: 'Nothing',
+};
+
+/** Special fields that appear in braces or as field objects, e.g. {PageNumber} or "Page N of M". */
+export const SPECIAL_FIELDS: Record<string, string> = {
+  'page number': 'Globals!PageNumber',
+  'total page count': 'Globals!TotalPages',
+  'page n of m': '"Page " & Globals!PageNumber & " of " & Globals!TotalPages',
+  'print date': 'Globals!ExecutionTime',
+  'print time': 'Globals!ExecutionTime',
+  'data date': 'Globals!ExecutionTime',
+  'data time': 'Globals!ExecutionTime',
+  'modification date': 'Globals!ExecutionTime',
+  'modification time': 'Globals!ExecutionTime',
+  'record number': 'RowNumber(Nothing)',
+  'report title': 'Globals!ReportName',
+  'file path and name': 'Globals!ReportName',
+  'report comments': '""',
+};
+
+/** VB helpers shared by translated formulas; each is added to the report Code block once. */
+export const CODE_HELPERS: Record<string, string> = {
+  // Crystal arrays are 1-based; generated arrays keep slot 0 unused.
+  CrSplit: [
+    'Public Function CrSplit(ByVal text As Object, ByVal delimiter As Object) As Object()',
+    '    Dim parts() As String = Split(CStr(text), CStr(delimiter))',
+    '    Dim result(parts.Length) As Object',
+    '    Array.Copy(parts, 0, result, 1, parts.Length)',
+    '    Return result',
+    'End Function',
+  ].join('\n'),
+  CrJoin: [
+    'Public Function CrJoin(ByVal items As Object, ByVal delimiter As Object) As String',
+    '    Dim parts As New System.Collections.Generic.List(Of String)',
+    '    For i As Integer = 1 To UBound(items)',
+    '        parts.Add(CStr(items(i)))',
+    '    Next',
+    '    Return String.Join(CStr(delimiter), parts.ToArray())',
+    'End Function',
+  ].join('\n'),
+  CrAdd: [
+    'Public Function CrAdd(ByVal a As Object, ByVal b As Object) As Object',
+    '    If TypeOf a Is Date AndAlso Not TypeOf b Is Date Then Return DateAdd("d", CDbl(b), CDate(a))',
+    '    If TypeOf b Is Date AndAlso Not TypeOf a Is Date Then Return DateAdd("d", CDbl(a), CDate(b))',
+    '    Return a + b',
+    'End Function',
+  ].join('\n'),
+  CrSubtract: [
+    'Public Function CrSubtract(ByVal a As Object, ByVal b As Object) As Object',
+    '    If TypeOf a Is Date AndAlso TypeOf b Is Date Then Return DateDiff("d", CDate(b), CDate(a))',
+    '    If TypeOf a Is Date Then Return DateAdd("d", -CDbl(b), CDate(a))',
+    '    Return a - b',
+    'End Function',
+  ].join('\n'),
+};
+
+/** Translates a multi-statement formula or custom function into a VB function for the report Code block. */
+function translateToCode(tokens: Token[], ctx: FormulaContext, name: string): Translation {
+  const issues: string[] = [];
+  try {
+    const program = new Parser(tokens).parseProgram();
+    const emitter = new Emitter(ctx, issues);
+    emitter.inCode = true;
+    const writer = new CodeWriter(emitter);
+    const raw = writer.write(program, name);
+    if (program.params) {
+      // A custom function: called from other formulas with its own arguments.
+      return { expression: `=Code.${name}()`, issues, code: raw, members: emitter.members, helpers: [...emitter.helpers] };
+    }
+    const { code, args } = extractArguments(raw);
+    const signature = args.map((_, i) => `ByVal a${i + 1} As Object`).join(', ');
+    const finalCode = code.replace(`Public Function ${name}() As Object`, `Public Function ${name}(${signature}) As Object`);
+    issues.push('was converted to custom code (Code.' + name + '); review the VB function');
+    return { expression: `=Code.${name}(${args.join(', ')})`, issues, code: finalCode, members: emitter.members, helpers: [...emitter.helpers] };
+  } catch (err) {
+    issues.push(`could not be parsed (${(err as Error).message}); needs manual conversion`);
+    return { expression: '=Nothing', issues };
+  }
+}
+
+const T = 'Today()';
+/** Crystal's named date ranges: [start, end] (inclusive days) as VB and T-SQL expressions. */
+const NAMED_DATE_RANGES: Record<string, { vb: [string, string]; sql: [string, string] }> = (() => {
+  const d = 'CAST(GETDATE() AS date)';
+  const vbDays = (n: number) => `DateAdd("d", ${n}, ${T})`;
+  const sqlDays = (n: number) => `DATEADD(day, ${n}, ${d})`;
+  const table: Record<string, { vb: [string, string]; sql: [string, string] }> = {
+    lastfullmonth: { vb: [`DateSerial(Year(${T}), Month(${T}) - 1, 1)`, `DateSerial(Year(${T}), Month(${T}), 0)`], sql: [`DATEADD(month, -1, DATEFROMPARTS(YEAR(${d}), MONTH(${d}), 1))`, `EOMONTH(${d}, -1)`] },
+    monthtodate: { vb: [`DateSerial(Year(${T}), Month(${T}), 1)`, T], sql: [`DATEFROMPARTS(YEAR(${d}), MONTH(${d}), 1)`, d] },
+    yeartodate: { vb: [`DateSerial(Year(${T}), 1, 1)`, T], sql: [`DATEFROMPARTS(YEAR(${d}), 1, 1)`, d] },
+    lastyearmtd: { vb: [`DateSerial(Year(${T}) - 1, Month(${T}), 1)`, `DateAdd("yyyy", -1, ${T})`], sql: [`DATEFROMPARTS(YEAR(${d}) - 1, MONTH(${d}), 1)`, `DATEADD(year, -1, ${d})`] },
+    lastyearytd: { vb: [`DateSerial(Year(${T}) - 1, 1, 1)`, `DateAdd("yyyy", -1, ${T})`], sql: [`DATEFROMPARTS(YEAR(${d}) - 1, 1, 1)`, `DATEADD(year, -1, ${d})`] },
+    last7days: { vb: [vbDays(-6), T], sql: [sqlDays(-6), d] },
+    lastfullweek: { vb: [`DateAdd("d", -Weekday(${T}) - 6, ${T})`, `DateAdd("d", -Weekday(${T}), ${T})`], sql: [`DATEADD(day, -DATEPART(weekday, ${d}) - 6, ${d})`, `DATEADD(day, -DATEPART(weekday, ${d}), ${d})`] },
+    weektodatefromsun: { vb: [`DateAdd("d", 1 - Weekday(${T}), ${T})`, T], sql: [`DATEADD(day, 1 - DATEPART(weekday, ${d}), ${d})`, d] },
+    last4weekstosun: { vb: [`DateAdd("d", -Weekday(${T}) - 27, ${T})`, `DateAdd("d", -Weekday(${T}) + 1, ${T})`], sql: [`DATEADD(day, -DATEPART(weekday, ${d}) - 27, ${d})`, `DATEADD(day, -DATEPART(weekday, ${d}) + 1, ${d})`] },
+    alldatestotoday: { vb: ['DateTime.MinValue', T], sql: [`'17530101'`, d] },
+    alldatestoyesterday: { vb: ['DateTime.MinValue', vbDays(-1)], sql: [`'17530101'`, sqlDays(-1)] },
+    alldatesfromtoday: { vb: [T, 'DateTime.MaxValue.Date'], sql: [d, `'99991230'`] },
+    alldatesfromtomorrow: { vb: [vbDays(1), 'DateTime.MaxValue.Date'], sql: [sqlDays(1), `'99991230'`] },
+    next30days: { vb: [T, vbDays(29)], sql: [d, sqlDays(29)] },
+    next31to60days: { vb: [vbDays(30), vbDays(59)], sql: [sqlDays(30), sqlDays(59)] },
+    next61to90days: { vb: [vbDays(60), vbDays(89)], sql: [sqlDays(60), sqlDays(89)] },
+    next91to365days: { vb: [vbDays(90), vbDays(364)], sql: [sqlDays(90), sqlDays(364)] },
+    aged0to30days: { vb: [vbDays(-30), T], sql: [sqlDays(-30), d] },
+    aged31to60days: { vb: [vbDays(-60), vbDays(-31)], sql: [sqlDays(-60), sqlDays(-31)] },
+    aged61to90days: { vb: [vbDays(-90), vbDays(-61)], sql: [sqlDays(-90), sqlDays(-61)] },
+    over90days: { vb: ['DateTime.MinValue', vbDays(-91)], sql: [`'17530101'`, sqlDays(-91)] },
+  };
+  const quarter = (q: number) => ({ vb: [`DateSerial(Year(${T}), ${q * 3 - 2}, 1)`, `DateSerial(Year(${T}), ${q * 3 + 1}, 0)`] as [string, string], sql: [`DATEFROMPARTS(YEAR(${d}), ${q * 3 - 2}, 1)`, `EOMONTH(DATEFROMPARTS(YEAR(${d}), ${q * 3}, 1))`] as [string, string] });
+  table.calendar1stqtr = quarter(1);
+  table.calendar2ndqtr = quarter(2);
+  table.calendar3rdqtr = quarter(3);
+  table.calendar4thqtr = quarter(4);
+  table.calendar1sthalf = { vb: [`DateSerial(Year(${T}), 1, 1)`, `DateSerial(Year(${T}), 6, 30)`], sql: [`DATEFROMPARTS(YEAR(${d}), 1, 1)`, `DATEFROMPARTS(YEAR(${d}), 6, 30)`] };
+  table.calendar2ndhalf = { vb: [`DateSerial(Year(${T}), 7, 1)`, `DateSerial(Year(${T}), 12, 31)`], sql: [`DATEFROMPARTS(YEAR(${d}), 7, 1)`, `DATEFROMPARTS(YEAR(${d}), 12, 31)`] };
+  return table;
+})();
+
+/** Crystal colours are integers in BGR order (0x00BBGGRR); SSRS wants "#RRGGBB". */
+export function crystalColor(value: number): string {
+  const hex = (n: number) => n.toString(16).padStart(2, '0');
+  return `#${hex(value & 0xff)}${hex((value >> 8) & 0xff)}${hex((value >> 16) & 0xff)}`;
+}
+
+interface VariableInfo {
+  vb: string;
+  vtype: string;
+  array: boolean;
+  /** A Crystal range variable, held as a two-element array (start, end). */
+  range?: boolean;
+}
+
+export class Emitter {
+  readonly issues: string[];
+  /** Variables in scope when emitting custom code (Crystal name, lower case -> info). */
+  readonly variables = new Map<string, VariableInfo>();
+  /** Class-level members needed by custom code: VB name -> VB type. */
+  readonly members: Record<string, string> = {};
+  /** Names of CODE_HELPERS functions used. */
+  readonly helpers = new Set<string>();
+  inCode = false;
+  private readonly ctx: FormulaContext;
+
+  constructor(ctx: FormulaContext, issues: string[]) {
+    this.ctx = ctx;
+    this.issues = issues;
+  }
+
+  /** Emits a value that becomes the formula's result; with colors on, numeric colours become "#RRGGBB". */
+  result(node: Node, colors: boolean): string {
+    if (colors) {
+      if (node.t === 'literal' && /^\d+$/.test(node.vb)) return vbString(crystalColor(Number(node.vb)));
+      if (node.t === 'call' && node.name.toLowerCase() === 'color' && node.args.every((a) => a.t === 'literal' && /^\d+$/.test(a.vb))) {
+        const [r, g, b] = node.args.map((a) => Number((a as { vb: string }).vb));
+        return vbString(crystalColor(r | (g << 8) | (b << 16)));
+      }
+      if (node.t === 'if') {
+        return `IIf(${this.emit(node.cond)}, ${this.result(node.then, true)}, ${node.else ? this.result(node.else, true) : 'Nothing'})`;
+      }
+      if (node.t === 'select') {
+        const pairs = node.cases.flatMap((c) => [c.match.map((m) => this.emit(m)).join(' OrElse '), this.result(c.result, true)]);
+        if (node.otherwise) pairs.push('True', this.result(node.otherwise, true));
+        return `Switch(${pairs.join(', ')})`;
+      }
+    }
+    return this.emit(node);
+  }
+
+  private note(message: string): void {
+    if (!this.issues.includes(message)) this.issues.push(message);
+  }
+
+  fieldRef(ref: string): string {
+    const prefix = ref[0];
+    const name = ref.slice(1);
+    if (prefix === '@') {
+      const expression = this.ctx.formula(name);
+      if (expression === undefined) {
+        this.note(`references unknown formula {@${name}}`);
+        return 'Nothing';
+      }
+      return `(${expression})`;
+    }
+    if (prefix === '?') {
+      const range = this.ctx.parameterRange?.(name);
+      if (range) return `New Object() {Parameters!${range.start}.Value, Parameters!${range.end}.Value}`;
+      return `Parameters!${this.ctx.parameter(name)}.Value`;
+    }
+    if (prefix === '#') {
+      const expression = this.ctx.runningTotal?.(name);
+      if (expression) return expression;
+      this.note(`references running total {${ref}} which could not be converted`);
+      return 'Nothing';
+    }
+    if (prefix === '%') {
+      this.note(`references SQL expression {${ref}} which needs manual conversion`);
+      return 'Nothing';
+    }
+    const special = SPECIAL_FIELDS[ref.toLowerCase()];
+    if (special) return special;
+    const dot = ref.lastIndexOf('.');
+    if (dot > 0) {
+      const field = this.ctx.field(ref.slice(0, dot), ref.slice(dot + 1));
+      if (field) return `Fields!${field}.Value`;
+    }
+    this.note(`references unknown field {${ref}}`);
+    return 'Nothing';
+  }
+
+  emit(node: Node): string {
+    switch (node.t) {
+      case 'literal':
+        return node.vb;
+      case 'field':
+        return this.fieldRef(node.ref);
+      case 'name': {
+        const variable = this.variables.get(node.name.toLowerCase());
+        if (variable) return variable.vb;
+        const vb = NAMES[node.name.toLowerCase()];
+        if (vb) return vb;
+        this.note(`uses "${node.name}" which has no direct SSRS equivalent`);
+        return 'Nothing';
+      }
+      case 'unary':
+        return node.op === 'not' ? `Not (${this.emit(node.arg)})` : `-(${this.emit(node.arg)})`;
+      case 'binary':
+        return this.emitBinary(node.op, node.left, node.right);
+      case 'if':
+        return `IIf(${this.emit(node.cond)}, ${this.emit(node.then)}, ${node.else ? this.emit(node.else) : this.defaultFor(node.then)})`;
+      case 'in': {
+        if (node.list.length === 0) return node.negate ? 'True' : 'False';
+        const value = this.emit(node.value);
+        const test = node.list.map((item) => `${value} = ${this.emit(item)}`).join(' OrElse ');
+        return node.negate ? `Not (${test})` : `(${test})`;
+      }
+      case 'range': {
+        const value = this.emit(node.value);
+        const test = `(${value} >= ${this.emit(node.from)} AndAlso ${value} <= ${this.emit(node.to)})`;
+        return node.negate ? `Not ${test}` : test;
+      }
+      case 'select': {
+        const pairs = node.cases.flatMap((c) => [c.match.map((m) => this.emit(m)).join(' OrElse '), this.emit(c.result)]);
+        if (node.otherwise) pairs.push('True', this.emit(node.otherwise));
+        return `Switch(${pairs.join(', ')})`;
+      }
+      case 'array':
+        // Crystal arrays start at 1: slot 0 stays unused, so indexes and UBound() match.
+        return `New Object() {Nothing${node.items.map((i) => `, ${this.emit(i)}`).join('')}}`;
+      case 'call':
+        return this.emitCall(node.name, node.args);
+      case 'rangeValue':
+        return `New Object() {${this.emit(node.from)}, ${this.emit(node.to)}}`;
+      case 'index': {
+        const base = this.emit(node.base);
+        const variable = node.base.t === 'name' ? this.variables.get(node.base.name.toLowerCase()) : undefined;
+        if (variable?.array) {
+          if (node.to) this.note('uses an array range, which needs manual conversion');
+          return `${base}(${this.emit(node.from)})`;
+        }
+        const from = this.emit(node.from);
+        return node.to ? `Mid(${base}, ${from}, (${this.emit(node.to)}) - (${from}) + 1)` : `Mid(${base}, ${from}, 1)`;
+      }
+    }
+  }
+
+  /** Start and end expressions of a range variable or range parameter. */
+  private rangeOf(node: Node): { start: string; end: string } | undefined {
+    if (node.t === 'name') {
+      const v = this.variables.get(node.name.toLowerCase());
+      if (v?.range) return { start: `${v.vb}(0)`, end: `${v.vb}(1)` };
+    }
+    if (node.t === 'field' && node.ref.startsWith('?')) {
+      const range = this.ctx.parameterRange?.(node.ref.slice(1));
+      if (range) return { start: `Parameters!${range.start}.Value`, end: `Parameters!${range.end}.Value` };
+    }
+    return undefined;
+  }
+
+  /** "x = {?rangeParam}" means "x within the range"; "x = {?multiParam}" means "x is one of the values". */
+  private parameterComparison(op: string, left: Node, right: Node): string | undefined {
+    if (op !== '=' && op !== '<>') return undefined;
+    const [value, param] = right.t === 'field' && right.ref.startsWith('?') ? [left, right.ref.slice(1)] : left.t === 'field' && left.ref.startsWith('?') ? [right, left.ref.slice(1)] : [];
+    if (!value || param === undefined) return undefined;
+    const range = this.ctx.parameterRange?.(param);
+    const v = () => this.emit(value);
+    if (range) {
+      const x = v();
+      const test = `(${x} >= Parameters!${range.start}.Value AndAlso ${x} <= Parameters!${range.end}.Value)`;
+      return op === '=' ? test : `Not ${test}`;
+    }
+    if (this.ctx.parameterMultiple?.(param)) {
+      const test = `(Array.IndexOf(Parameters!${this.ctx.parameter(param)}.Value, ${v()}) >= 0)`;
+      return op === '=' ? test : `Not ${test}`;
+    }
+    return undefined;
+  }
+
+  /** Crystal's value for an "if" without "else": the default of the "then" branch's type. */
+  defaultFor(node: Node): string {
+    if (node.t === 'literal') {
+      if (node.vb.startsWith('"')) return '""';
+      if (/^-?[\d.]+$/.test(node.vb)) return '0';
+      if (node.vb === 'True' || node.vb === 'False') return 'False';
+    }
+    if (node.t === 'call' && ['totext', 'cstr', 'left', 'right', 'mid', 'trim', 'ucase', 'lcase', 'uppercase', 'lowercase', 'replace', 'propercase'].includes(node.name.toLowerCase())) return '""';
+    if (node.t === 'binary') {
+      if (['+', '-', '*', '/', '%', '^'].includes(node.op) && !this.isDate(node)) {
+        const l = this.defaultFor(node.left);
+        return l === '""' && node.op === '+' ? '""' : l === 'Nothing' ? this.defaultFor(node.right) : l === '""' ? 'Nothing' : '0';
+      }
+      if (node.op === '&') return '""';
+      if (['=', '<>', '<', '>', '<=', '>=', 'and', 'or'].includes(node.op)) return 'False';
+    }
+    if (node.t === 'field' && !node.ref.startsWith('@') && !node.ref.startsWith('?')) {
+      const type = this.ctx.fieldType?.(node.ref);
+      if (type && ['string', 'memo'].includes(type)) return '""';
+      if (type && ['integer', 'number', 'currency'].includes(type)) return '0';
+      if (type === 'boolean') return 'False';
+    }
+    if (node.t === 'name') {
+      const v = this.variables.get(node.name.toLowerCase());
+      if (v && !v.array && !v.range) {
+        if (['numbervar', 'currencyvar'].includes(v.vtype)) return '0';
+        if (v.vtype === 'stringvar') return '""';
+        if (v.vtype === 'booleanvar') return 'False';
+      }
+    }
+    if (!this.isDate(node)) this.note('has an "if" without "else" whose result type is unknown; Crystal returns that type\'s default value there, SSRS returns Nothing');
+    return 'Nothing';
+  }
+
+  /** Whether an expression is a call to a report custom function (its result type is only known at run time). */
+  private isCustomCall(node: Node): boolean {
+    return node.t === 'call' && !SAME_ARGS[node.name.toLowerCase()] && this.ctx.customFunction?.(node.name) !== undefined;
+  }
+
+  /** Whether an expression is a date or date-time (Crystal adds days with + and subtracts dates with -). */
+  private isDate(node: Node): boolean {
+    switch (node.t) {
+      case 'name': {
+        const v = this.variables.get(node.name.toLowerCase());
+        if (v) return ['datevar', 'datetimevar'].includes(v.vtype) && !v.array && !v.range;
+        return ['currentdate', 'today', 'currentdatetime', 'printdate', 'datadate', 'modificationdate'].includes(node.name.toLowerCase());
+      }
+      case 'literal':
+        return node.vb.startsWith('CDate(');
+      case 'field':
+        return !node.ref.startsWith('@') && !node.ref.startsWith('?') && /^(date|dateTime)$/.test(this.ctx.fieldType?.(node.ref) ?? '');
+      case 'call':
+        return ['cdate', 'date', 'datetime', 'cdatetime', 'dateserial', 'dateadd', 'datevalue', 'minimum', 'maximum'].includes(node.name.toLowerCase()) && (node.name.toLowerCase() !== 'minimum' && node.name.toLowerCase() !== 'maximum' || this.isDate(node.args[0]));
+      case 'index':
+        return node.base.t === 'name' && ['datevar', 'datetimevar'].includes(this.variables.get(node.base.name.toLowerCase())?.vtype ?? '');
+      case 'binary':
+        return (node.op === '+' || node.op === '-') && this.isDate(node.left) && !this.isDate(node.right);
+      default:
+        return false;
+    }
+  }
+
+  private emitBinary(op: string, left: Node, right: Node): string {
+    const special = this.parameterComparison(op, left, right);
+    if (special) return special;
+    if (op === '+' || op === '-') {
+      const leftDate = this.isDate(left);
+      const rightDate = this.isDate(right);
+      if (leftDate && rightDate && op === '-') return `DateDiff("d", ${this.emit(right)}, ${this.emit(left)})`;
+      if (leftDate && !rightDate) return `DateAdd("d", ${op === '-' ? '-' : ''}(${this.emit(right)}), ${this.emit(left)})`;
+      if (rightDate && !leftDate && op === '+') return `DateAdd("d", ${this.emit(left)}, ${this.emit(right)})`;
+      if (!leftDate && !rightDate && (this.isCustomCall(left) || this.isCustomCall(right))) {
+        // A custom function may return a date: decide at run time, as Crystal's typed arithmetic would.
+        this.helpers.add(op === '+' ? 'CrAdd' : 'CrSubtract');
+        return `${this.inCode ? '' : 'Code.'}${op === '+' ? 'CrAdd' : 'CrSubtract'}(${this.emit(left)}, ${this.emit(right)})`;
+      }
+    }
+    const l = this.emit(left);
+    const r = this.emit(right);
+    if (op === 'startswith') return `(${l}).StartsWith(${r})`;
+    if (op === '%') return `((${l}) / (${r}) * 100)`;
+    if (op === 'eqv') return `((${l}) = (${r}))`;
+    if (op === 'imp') return `(Not (${l}) OrElse (${r}))`;
+    return `(${l} ${BINARY_VB[op]} ${r})`;
+  }
+
+  private emitCall(name: string, args: Node[]): string {
+    const key = name.toLowerCase();
+    const a = () => args.map((x) => this.emit(x));
+
+    if (key === '$inrange') {
+      const special = this.parameterComparison('=', args[0], args[1]);
+      if (special) return special;
+      const range = this.rangeOf(args[1]);
+      if (range) {
+        const value = this.emit(args[0]);
+        return `(${value} >= ${range.start} AndAlso ${value} <= ${range.end})`;
+      }
+      const named = args[1].t === 'name' ? NAMED_DATE_RANGES[args[1].name.toLowerCase()] : undefined;
+      if (named) {
+        const value = this.emit(args[0]);
+        return `(${value} >= ${named.vb[0]} AndAlso ${value} < DateAdd("d", 1, ${named.vb[1]}))`;
+      }
+      this.note('tests a value against a range parameter or named date range; check the translated comparison');
+      const [value, target] = a();
+      return `(${value} = ${target})`;
+    }
+    if ((key === 'minimum' || key === 'maximum') && args.length === 1) {
+      const range = this.rangeOf(args[0]);
+      if (range) return key === 'minimum' ? range.start : range.end;
+    }
+    if (AGGREGATES[key]) {
+      const [target, group] = args;
+      const inner = target ? this.emit(target) : 'Nothing';
+      let scope = '';
+      if (group) {
+        const ref = group.t === 'field' ? group.ref : undefined;
+        const name = ref ? this.ctx.groupScope?.(ref) : undefined;
+        if (name) scope = `, ${vbString(name)}`;
+        else this.note(`aggregates over a group that could not be matched (${ref ?? 'expression'}); check the scope`);
+        if (args.length > 2) this.note('uses a date-grouping condition in a summary; check the grouping');
+      }
+      return `${AGGREGATES[key]}(${inner}${scope})`;
+    }
+    switch (key) {
+      case 'isnull':
+        return `IsNothing(${a()[0]})`;
+      case 'totext':
+      case 'cstr': {
+        const [value, second, third] = a();
+        if (second === undefined) return `CStr(${value})`;
+        if (/^-?\d+$/.test(second)) return `FormatNumber(${value}, ${second}${third !== undefined ? '' : ''})`;
+        return `Format(${value}, ${second})`;
+      }
+      case 'rgb':
+      case 'color': {
+        const [r, g, b] = a();
+        return `String.Format("#{0:X2}{1:X2}{2:X2}", CInt(${r}), CInt(${g}), CInt(${b}))`;
+      }
+      case 'propercase':
+        return `StrConv(${a()[0]}, VbStrConv.ProperCase)`;
+      case 'replicatestring': {
+        const [text, count] = a();
+        return `StrDup(${count}, ${text})`;
+      }
+      case 'remainder': {
+        const [x, y] = a();
+        return `(${x} Mod ${y})`;
+      }
+      case 'date':
+      case 'cdate': {
+        const v = a();
+        return v.length === 3 ? `DateSerial(${v.join(', ')})` : `CDate(${v[0]})`;
+      }
+      case 'datetime': {
+        const v = a();
+        if (v.length === 6) return `(DateSerial(${v.slice(0, 3).join(', ')}) + TimeSerial(${v.slice(3).join(', ')}))`;
+        if (v.length === 2) return `(CDate(${v[0]}).Date + CDate(${v[1]}).TimeOfDay)`;
+        return `CDate(${v[0]})`;
+      }
+      case 'time':
+        return a().length === 3 ? `TimeSerial(${a().join(', ')})` : `CDate(${a()[0]}).TimeOfDay`;
+      case 'roundup': {
+        const [x, n] = a();
+        return n === undefined ? `Math.Ceiling(${x})` : `(Math.Ceiling(${x} * 10 ^ ${n}) / 10 ^ ${n})`;
+      }
+      case 'urldecode':
+        return `System.Uri.UnescapeDataString(CStr(${a()[0]}).Replace("+", " "))`;
+      case 'urlencode':
+        return `System.Uri.EscapeDataString(CStr(${a()[0]}))`;
+      case 'split':
+      case 'join': {
+        const helper = key === 'split' ? 'CrSplit' : 'CrJoin';
+        this.helpers.add(helper);
+        const [first, second] = a();
+        return `${this.inCode ? '' : 'Code.'}${helper}(${first}, ${second ?? '" "'})`;
+      }
+      case 'ubound':
+        return `UBound(${a()[0]})`;
+      case 'previous':
+        return `Previous(${a()[0]})`;
+      case 'previousisnull':
+        return `IsNothing(Previous(${a()[0]}))`;
+      case 'next':
+      case 'nextisnull': {
+        const ref = args[0]?.t === 'field' ? args[0].ref : undefined;
+        const next = ref ? this.ctx.nextValue?.(ref) : undefined;
+        if (!next) {
+          this.note(`uses ${name}() on something other than a database field; SSRS has no Next(), so it needs manual conversion`);
+          return 'Nothing';
+        }
+        return key === 'next' ? next : `IsNothing(${next})`;
+      }
+      case 'onfirstrecord':
+        return '(RowNumber(Nothing) = 1)';
+      case 'onlastrecord':
+        return '(RowNumber(Nothing) = CountRows("DataSet1"))';
+      case 'groupname':
+        return args[0] ? this.emit(args[0]) : 'Nothing';
+      case 'drilldowngrouplevel':
+        this.note('uses DrillDownGroupLevel, which has no SSRS equivalent; 0 was used');
+        return '0';
+      case 'inrepeatedgroupheader':
+        this.note('uses InRepeatedGroupHeader; SSRS repeats header rows itself, False was used');
+        return 'False';
+    }
+    const vb = SAME_ARGS[key];
+    if (vb) return `${vb}(${a().join(', ')})`;
+    const custom = this.ctx.customFunction?.(name);
+    if (custom) return `${this.inCode ? '' : 'Code.'}${custom}(${a().join(', ')})`;
+    this.note(`uses function ${name}() which has no mapping yet`);
+    return `${name}(${a().join(', ')})`;
+  }
+}
+
+/** Emits a program as the body of a VB function. */
+class CodeWriter {
+  private readonly lines: string[] = [];
+  /** Declarations, hoisted to the top: Crystal variables are visible in the whole formula. */
+  private readonly declarations: string[] = [];
+  private readonly emitter: Emitter;
+
+  constructor(emitter: Emitter) {
+    this.emitter = emitter;
+  }
+
+  private declareVariable(name: string, vtype: string, array: boolean, scope: string, range = false): VariableInfo {
+    const key = name.toLowerCase();
+    const existing = this.emitter.variables.get(key);
+    if (existing) return existing;
+    const vb = `v_${name.replace(/\W/g, '_')}`;
+    const info = { vb, vtype, array: array || range, range };
+    this.emitter.variables.set(key, info);
+    const type = range ? 'Object' : VB_TYPES[vtype] ?? 'Object';
+    array = array || range;
+    if (scope === 'local') this.declarations.push(`    Dim ${vb}${array ? '()' : ''} As ${type}${array ? '' : type === 'String' ? ' = ""' : ''}`);
+    else this.emitter.members[vb] = array ? `${type}()` : type;
+    return info;
+  }
+
+  write(program: Program, name: string): string {
+    const params = (program.params ?? []).map((p) => {
+      const info = { vb: `p_${p.name.replace(/\W/g, '_')}`, vtype: p.vtype, array: p.array, range: p.range };
+      this.emitter.variables.set(p.name.toLowerCase(), info);
+      // A Crystal range is passed as a two-element array: (0) start, (1) end.
+      const type = p.range ? 'Object()' : `${VB_TYPES[p.vtype] ?? 'Object'}${p.array ? '()' : ''}`;
+      const optional = p.optional ? ` = ${this.emitter.emit(p.optional)}` : '';
+      return `${p.optional ? 'Optional ' : ''}ByVal ${info.vb} As ${type}${optional}`;
+    });
+    this.statements(program.body, '    ', true);
+    return [`Public Function ${name}(${params.join(', ')}) As Object`, ...this.declarations, ...this.lines, '    Return Nothing', 'End Function'].join('\n');
+  }
+
+  private statements(stmts: Stmt[], indent: string, last: boolean): void {
+    const effective = stmts.filter((s) => s.s !== 'timing');
+    for (const stmt of stmts) {
+      const isLast = last && stmt === effective[effective.length - 1];
+      this.statement(stmt, indent, isLast);
+    }
+  }
+
+  private statement(stmt: Stmt, indent: string, last: boolean): void {
+    const e = (node: Node) => this.emitter.emit(node);
+    switch (stmt.s) {
+      case 'timing':
+        this.emitter.issues.push(`uses ${stmt.word}; custom code runs as SSRS renders the report, check totals across pages`);
+        return;
+      case 'select': {
+        this.lines.push(`${indent}Select Case ${e(stmt.value)}`);
+        for (const c of stmt.cases) {
+          const items = c.match.map((m) => (m.t === 'range' ? `${e(m.from)} To ${e(m.to)}` : m.t === 'binary' && m.op === '=' ? e(m.right) : e(m)));
+          this.lines.push(`${indent}    Case ${items.join(', ')}`);
+          this.statements(c.body, `${indent}        `, last);
+        }
+        if (stmt.otherwise) {
+          this.lines.push(`${indent}    Case Else`);
+          this.statements(stmt.otherwise, `${indent}        `, last);
+        }
+        this.lines.push(`${indent}End Select`);
+        return;
+      }
+      case 'redim': {
+        const info = this.emitter.variables.get(stmt.name.toLowerCase()) ?? this.declareVariable(stmt.name, 'numbervar', true, 'local');
+        this.lines.push(`${indent}ReDim ${stmt.preserve ? 'Preserve ' : ''}${info.vb}(${e(stmt.size)})`);
+        return;
+      }
+      case 'decl': {
+        const info = this.declareVariable(stmt.name, stmt.vtype, stmt.array, stmt.scope, stmt.range);
+        if (stmt.array && stmt.init?.t === 'array') {
+          this.lines.push(`${indent}${info.vb} = New ${VB_TYPES[stmt.vtype] ?? 'Object'}() {Nothing${stmt.init.items.map((x) => `, ${e(x)}`).join('')}}`);
+        } else if (stmt.init) {
+          this.lines.push(`${indent}${info.vb} = ${e(stmt.init)}`);
+        }
+        if (last && stmt.init) this.lines.push(`${indent}Return ${info.vb}`);
+        return;
+      }
+      case 'assign': {
+        const info = this.emitter.variables.get(stmt.name.toLowerCase()) ?? this.declareVariable(stmt.name, 'numbervar', false, 'global');
+        const target = stmt.index ? `${info.vb}(${e(stmt.index)})` : info.vb;
+        this.lines.push(`${indent}${target} = ${e(stmt.value)}`);
+        if (last) this.lines.push(`${indent}Return ${info.vb}`);
+        return;
+      }
+      case 'expr':
+        if (last) this.lines.push(`${indent}Return ${e(stmt.expr)}`);
+        return;
+      case 'if':
+        this.lines.push(`${indent}If ${e(stmt.cond)} Then`);
+        this.statements(stmt.then, `${indent}    `, last);
+        if (stmt.else) {
+          this.lines.push(`${indent}Else`);
+          this.statements(stmt.else, `${indent}    `, last);
+        }
+        this.lines.push(`${indent}End If`);
+        return;
+      case 'for': {
+        const info = this.emitter.variables.get(stmt.name.toLowerCase()) ?? this.declareVariable(stmt.name, 'numbervar', false, 'local');
+        this.lines.push(`${indent}For ${info.vb} = ${e(stmt.from)} To ${e(stmt.to)}${stmt.step ? ` Step ${e(stmt.step)}` : ''}`);
+        this.statements(stmt.body, `${indent}    `, false);
+        this.lines.push(`${indent}Next`);
+        return;
+      }
+      case 'while':
+        this.lines.push(stmt.post ? `${indent}Do` : `${indent}Do While ${e(stmt.cond)}`);
+        this.statements(stmt.body, `${indent}    `, false);
+        this.lines.push(stmt.post ? `${indent}Loop While ${e(stmt.cond)}` : `${indent}Loop`);
+        return;
+      case 'exit':
+        this.lines.push(`${indent}Exit ${stmt.what === 'for' ? 'For' : 'Do'}`);
+        return;
+    }
+  }
+}
+
+/** Whether a formula needs statements (variables, loops, several statements, custom function). */
+function needsCode(tokens: Token[]): boolean {
+  let depth = 0;
+  let statements = 0;
+  let sawContent = false;
+  for (const t of tokens) {
+    if (t.kind === 'op' && t.value === ':=') return true;
+    if (t.kind === 'ident' && ['for', 'while', 'do', 'function', 'local', 'global', 'shared', 'redim', ...VARIABLE_TYPES].includes(KEYWORD(t.value))) return true;
+    if (t.kind === 'op' && (t.value === '(' || t.value === '[')) depth++;
+    if (t.kind === 'op' && (t.value === ')' || t.value === ']')) depth--;
+    if (t.kind === 'op' && t.value === ';' && depth === 0) {
+      if (sawContent) statements++;
+      sawContent = false;
+    } else if (t.kind !== 'eof' && !(t.kind === 'ident' && TIMING_WORDS.includes(KEYWORD(t.value)))) {
+      sawContent = true;
+    }
+  }
+  if (sawContent) statements++;
+  return statements > 1;
+}
+
+/** Aggregate / report references that custom code cannot evaluate itself: they become arguments. */
+const ARGUMENT_REFERENCE = /\b(Sum|Count|Avg|Max|Min|CountDistinct|StDev|StDevP|Var|VarP|First|Last|Previous|RowNumber|RunningValue)\(|Fields!\w+\.Value|Parameters!\w+\.Value|Globals!\w+|Me\.Value/g;
+
+/** Replaces field/parameter/aggregate references in VB code with parameters; returns the argument list. */
+export function extractArguments(code: string): { code: string; args: string[] } {
+  const args: string[] = [];
+  let out = '';
+  let pos = 0;
+  ARGUMENT_REFERENCE.lastIndex = 0;
+  for (let m = ARGUMENT_REFERENCE.exec(code); m; m = ARGUMENT_REFERENCE.exec(code)) {
+    let end = m.index + m[0].length;
+    if (m[0].endsWith('(')) {
+      // Aggregate call: take through the matching parenthesis.
+      let depth = 1;
+      while (end < code.length && depth > 0) {
+        if (code[end] === '(') depth++;
+        else if (code[end] === ')') depth--;
+        else if (code[end] === '"') end = code.indexOf('"', end + 1);
+        end++;
+      }
+    }
+    const text = code.slice(m.index, end);
+    let index = args.indexOf(text);
+    if (index < 0) {
+      args.push(text);
+      index = args.length - 1;
+    }
+    out += code.slice(pos, m.index) + `a${index + 1}`;
+    pos = end;
+    ARGUMENT_REFERENCE.lastIndex = end;
+  }
+  return { code: out + code.slice(pos), args };
+}
+
+export interface TranslateOptions {
+  /** Name for the VB function when the formula needs custom code (statements, variables, loops). */
+  codeName?: string;
+  /** The formula returns a colour (Font_Color, Back_Color, ...): convert Crystal colour numbers. */
+  colors?: boolean;
+}
+
+export function translateFormula(source: string, ctx: FormulaContext, options: TranslateOptions = {}): Translation {
+  const issues: string[] = [];
+  if (isBasicSyntax(source)) {
+    if (options.codeName) return translateBasic(source, ctx, options.codeName);
+    issues.push('is written in Crystal Basic syntax, which needs custom code here; needs manual conversion');
+    return { expression: '=Nothing', issues };
+  }
+  if (options.codeName) {
+    try {
+      const tokens = tokenize(source);
+      if (needsCode(tokens)) return translateToCode(tokens, ctx, options.codeName);
+    } catch {
+      // fall through to the expression translation, which reports the problem
+    }
+  }
+  try {
+    const parser = new Parser(tokenize(source));
+    const tree = parser.parseFormula();
+    issues.push(...parser.issues);
+    const emitter = new Emitter(ctx, issues);
+    const expression = `=${emitter.result(tree, options.colors ?? false)}`;
+    return { expression, issues, helpers: [...emitter.helpers] };
+  } catch (err) {
+    issues.push(`could not be parsed (${(err as Error).message}); needs manual conversion`);
+    return { expression: '=Nothing', issues };
+  }
+}
+
+// ---- selection formula -> SQL WHERE ---------------------------------------------------------
+
+export interface SqlContext {
+  /** Quoted column ("[Alias].[Column]") for a database field, or undefined. */
+  column(table: string, field: string): string | undefined;
+  /** SQL parameter name ("@Name") for a Crystal parameter. */
+  parameter(name: string): string;
+  /** For a range parameter: the SQL parameters holding its start and end. */
+  parameterRange?(name: string): { start: string; end: string } | undefined;
+}
+
+const sqlString = (value: string) => `'${value.replace(/'/g, "''")}'`;
+
+/**
+ * Translates a record selection formula into a T-SQL condition. Returns undefined when the
+ * formula uses anything without an exact SQL equivalent (then an SSRS filter is used instead).
+ */
+export function translateToSql(source: string, ctx: SqlContext): string | undefined {
+  let tree: Node;
+  try {
+    const tokens = tokenize(source);
+    if (needsCode(tokens)) return undefined;
+    const parser = new Parser(tokens);
+    tree = parser.parseFormula();
+    if (parser.issues.length > 0) return undefined;
+  } catch {
+    return undefined;
+  }
+  const fail = (): never => {
+    throw new Error('unsupported');
+  };
+  const value = (node: Node): string => {
+    switch (node.t) {
+      case 'literal': {
+        if (/^-?[\d.]+$/.test(node.vb)) return node.vb;
+        const str = /^"(.*)"$/s.exec(node.vb);
+        if (str) return sqlString(str[1].replace(/""/g, '"'));
+        const date = /^CDate\("(.*)"\)$/.exec(node.vb);
+        if (date) return sqlString(date[1]);
+        return fail();
+      }
+      case 'field': {
+        if (node.ref.startsWith('?')) return ctx.parameter(node.ref.slice(1));
+        const dot = node.ref.lastIndexOf('.');
+        const column = dot > 0 ? ctx.column(node.ref.slice(0, dot), node.ref.slice(dot + 1)) : undefined;
+        return column ?? fail();
+      }
+      case 'name': {
+        const key = node.name.toLowerCase();
+        if (key === 'currentdate' || key === 'today') return 'CAST(GETDATE() AS date)';
+        if (key === 'currentdatetime') return 'GETDATE()';
+        return fail();
+      }
+      case 'unary':
+        return node.op === '-' ? `-(${value(node.arg)})` : fail();
+      case 'binary': {
+        const ops: Record<string, string> = { '+': '+', '-': '-', '*': '*', '/': '/' };
+        return ops[node.op] ? `(${value(node.left)} ${ops[node.op]} ${value(node.right)})` : fail();
+      }
+      case 'call': {
+        const key = node.name.toLowerCase();
+        const args = node.args.map(value);
+        if ((key === 'date' || key === 'cdate') && args.length === 3) return `DATEFROMPARTS(${args.join(', ')})`;
+        if (key === 'datetime' && args.length === 6) return `DATETIMEFROMPARTS(${args.join(', ')}, 0)`;
+        if ((key === 'uppercase' || key === 'ucase') && args.length === 1) return `UPPER(${args[0]})`;
+        if ((key === 'lowercase' || key === 'lcase') && args.length === 1) return `LOWER(${args[0]})`;
+        if (key === 'trim' && args.length === 1) return `LTRIM(RTRIM(${args[0]}))`;
+        if (key === 'year' || key === 'month' || key === 'day') return `${key.toUpperCase()}(${args[0]})`;
+        return fail();
+      }
+      default:
+        return fail();
+    }
+  };
+  const condition = (node: Node): string => {
+    switch (node.t) {
+      case 'binary': {
+        if (node.op === 'and' || node.op === 'or') return `(${condition(node.left)} ${node.op.toUpperCase()} ${condition(node.right)})`;
+        if (node.op === '=' || node.op === '<>') {
+          const param = node.right.t === 'field' && node.right.ref.startsWith('?') ? node.right.ref.slice(1) : undefined;
+          const range = param !== undefined ? ctx.parameterRange?.(param) : undefined;
+          if (range) return `${value(node.left)} ${node.op === '=' ? '' : 'NOT '}BETWEEN ${range.start} AND ${range.end}`;
+        }
+        if (['=', '<>', '<', '>', '<=', '>='].includes(node.op)) return `${value(node.left)} ${node.op} ${value(node.right)}`;
+        if (node.op === 'startswith') return `${value(node.left)} LIKE ${value(node.right)} + '%'`;
+        if (node.op === 'like' && node.right.t === 'literal') {
+          const pattern = /^"(.*)"$/s.exec(node.right.vb)?.[1] ?? fail();
+          return `${value(node.left)} LIKE ${sqlString(pattern.replace(/\*/g, '%').replace(/\?/g, '_'))}`;
+        }
+        return fail();
+      }
+      case 'unary':
+        return node.op === 'not' ? `NOT (${condition(node.arg)})` : fail();
+      case 'in':
+        return `${value(node.value)} ${node.negate ? 'NOT IN' : 'IN'} (${node.list.map(value).join(', ')})`;
+      case 'range':
+        return `${value(node.value)} ${node.negate ? 'NOT BETWEEN' : 'BETWEEN'} ${value(node.from)} AND ${value(node.to)}`;
+      case 'call':
+        if (node.name.toLowerCase() === 'isnull' && node.args.length === 1) return `${value(node.args[0])} IS NULL`;
+        if (node.name === '$inRange' && node.args[1].t === 'field' && node.args[1].ref.startsWith('?')) {
+          const range = ctx.parameterRange?.(node.args[1].ref.slice(1));
+          if (range) return `${value(node.args[0])} BETWEEN ${range.start} AND ${range.end}`;
+        }
+        if (node.name === '$inRange' && node.args[1].t === 'name') {
+          const named = NAMED_DATE_RANGES[node.args[1].name.toLowerCase()];
+          if (named) {
+            const v = value(node.args[0]);
+            return `(${v} >= ${named.sql[0]} AND ${v} < DATEADD(day, 1, ${named.sql[1]}))`;
+          }
+        }
+        return fail();
+      case 'literal':
+        if (node.vb === 'True') return '1 = 1';
+        if (node.vb === 'False') return '1 = 0';
+        return fail();
+      default:
+        return fail();
+    }
+  };
+  try {
+    return condition(tree);
+  } catch {
+    return undefined;
+  }
+}
