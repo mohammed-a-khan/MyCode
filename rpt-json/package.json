@@ -1,0 +1,20 @@
+{
+  "name": "rpt-json",
+  "version": "1.0.0",
+  "description": "In-house Crystal Reports .rpt <-> JSON converter with no third-party dependencies",
+  "type": "module",
+  "private": true,
+  "main": "src/index.ts",
+  "bin": {
+    "rpt-json": "src/cli.ts"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.ts\"",
+    "rpt-json": "node src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc"
+  }
+}
