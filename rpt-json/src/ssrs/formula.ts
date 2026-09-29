@@ -749,6 +749,13 @@ export const SPECIAL_FIELDS: Record<string, string> = {
   'report comments': '""',
 };
 
+/** The review note for a formula converted to custom code; folds in the print-time note, if any. */
+export function customCodeNote(issues: string[], name: string, origin = ''): string {
+  const timing = issues.findIndex((i) => /^uses whileprintingrecords;/i.test(i));
+  if (timing >= 0) issues.splice(timing, 1);
+  return `was converted to custom code (Code.${name})${origin}${timing >= 0 ? '; it uses WhilePrintingRecords, so it runs as SSRS renders each page (check totals across pages)' : ''}; review the VB function`;
+}
+
 /** VB helpers shared by translated formulas; each is added to the report Code block once. */
 export const CODE_HELPERS: Record<string, string> = {
   // Crystal arrays are 1-based; generated arrays keep slot 0 unused.
@@ -801,7 +808,7 @@ function translateToCode(tokens: Token[], ctx: FormulaContext, name: string): Tr
     const { code, args } = extractArguments(raw);
     const signature = args.map((_, i) => `ByVal a${i + 1} As Object`).join(', ');
     const finalCode = code.replace(`Public Function ${name}() As Object`, `Public Function ${name}(${signature}) As Object`);
-    issues.push('was converted to custom code (Code.' + name + '); review the VB function');
+    issues.push(customCodeNote(issues, name));
     return { expression: `=Code.${name}(${args.join(', ')})`, issues, code: finalCode, members: emitter.members, helpers: [...emitter.helpers] };
   } catch (err) {
     issues.push(`could not be parsed (${(err as Error).message}); needs manual conversion`);

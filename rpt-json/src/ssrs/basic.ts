@@ -8,7 +8,7 @@
  * of the generated function, as for Crystal syntax formulas.
  */
 
-import { Emitter, extractArguments, NAMES, type FormulaContext, type Node, type Translation } from './formula.ts';
+import { customCodeNote, Emitter, extractArguments, NAMES, type FormulaContext, type Node, type Translation } from './formula.ts';
 
 type BasicToken =
   | { k: 'nl' }
@@ -475,7 +475,7 @@ export function translateBasic(source: string, ctx: FormulaContext, name: string
     const { code: body, args } = extractArguments(code);
     const signature = args.map((_, i) => `ByVal a${i + 1} As Object`).join(', ');
     const finalCode = body.replace(`Public Function ${name}() As Object`, `Public Function ${name}(${signature}) As Object`);
-    issues.push(`was converted to custom code (Code.${name}) from Crystal Basic syntax; review the VB function`);
+    issues.push(customCodeNote(issues, name, ' from Crystal Basic syntax'));
     return { expression: `=Code.${name}(${args.join(', ')})`, issues, code: finalCode, members, helpers };
   } catch (err) {
     issues.push(`could not be parsed as Basic syntax (${(err as Error).message}); needs manual conversion`);

@@ -560,5 +560,11 @@ describe('subreports in page headers and footers', () => {
     assert.match(rdl, /<KeepWithGroup>After<\/KeepWithGroup>\s*<RepeatOnNewPage>true<\/RepeatOnNewPage>/, 'a group on a constant repeats its header');
     assert.ok(review.some((r) => /SQL Server login/.test(r.message)));
     assert.ok(review.some((r) => /placed here directly/.test(r.message)));
+    const { inlinedOnly } = convertToRdl(main, source, { reportName: 'Main', subreports });
+    assert.deepEqual(inlinedOnly, [1, 2], 'neither subreport needs its own .rdl');
+    const formulaNotes = review.filter((r) => r.item.endsWith('Formula {@OwnerShared}'));
+    assert.equal(formulaNotes.length, 2, 'one note per converted formula');
+    assert.match(formulaNotes[0].message, /custom code \(Code\.F_OwnerShared\); it uses WhilePrintingRecords/);
+    assert.ok(!review.some((r) => /reads no database|check that its parameters match/.test(r.message)), JSON.stringify(review));
   });
 });

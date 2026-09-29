@@ -44,7 +44,7 @@ export function convertDocumentToSsrs(doc: CfbDocument, baseName: string, option
     });
   }
 
-  return models.map((model) => {
+  const results = models.map((model) => {
     const reportName = nameOf(model.storage);
     if (!model.definition) {
       return {
@@ -54,15 +54,20 @@ export function convertDocumentToSsrs(doc: CfbDocument, baseName: string, option
         review: [{ item: 'Report', message: `could not be decoded: ${(model.errors ?? []).join('; ')}` }],
       };
     }
-    const { rdl, review } = convertToRdl(model.definition, model.dataSource, {
+    const { rdl, review, inlinedOnly } = convertToRdl(model.definition, model.dataSource, {
       reportName,
       connectionString: options.connectionString,
       subreports: model.storage ? new Map() : subreports,
       subreport: Boolean(model.storage),
       images: embeddedImages(storageAt(doc.root, model.storage)),
     });
-    return { fileName: `${reportName}.rdl`, storage: model.storage, rdl, review };
+    return { fileName: `${reportName}.rdl`, storage: model.storage, rdl, review, inlinedOnly };
   });
+  // Subreports placed entirely inside the main report (page header/footer) need no .rdl of their own.
+  const inlined = new Set(results.find((r) => !r.storage)?.inlinedOnly ?? []);
+  return results
+    .filter((r) => !inlined.has(Number(/^Subdocument (\d+)$/.exec(r.storage)?.[1])))
+    .map(({ inlinedOnly: _, ...r }) => r);
 }
 
 function storageAt(root: CfbStorage, path: string): CfbStorage | undefined {
