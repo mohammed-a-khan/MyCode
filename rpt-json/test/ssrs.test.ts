@@ -455,3 +455,110 @@ describe('chart types, margins, subreports and Basic syntax', () => {
     assert.equal(tr('Join(Split({Orders.Name}, ","), ";")').expression, '=Code.CrJoin(Code.CrSplit(Fields!Name.Value, ","), ";")');
   });
 });
+
+describe('formatting formulas and connection details', () => {
+  it('hides objects by Object_Visibility, skips empty formatting formulas and finds the database', () => {
+    const definition: ReportDefinition = {
+      ...emptyDefinition(),
+      formulaTexts: ['', 'PageNumber > 1', ''],
+      formulas: [{ name: 'HeaderLabel', kind: 'formula', text: 'WhileReadingRecords; ""', referencedFields: [] }],
+      layout: [{ name: 'PageHeaderArea1', sections: [{
+        name: 'PH', conditions: { suppress: { name: 'Section_Visibility', index: 2 } },
+        objects: [
+          { kind: 'text', name: 'T', text: 'Title', position: { x: 0, y: 0 }, conditions: { suppress: { name: 'Object_Visibility', index: 1 } } },
+          { kind: 'field', name: 'H', field: '@HeaderLabel', position: { x: 1440, y: 0 } },
+        ],
+      }] }],
+    };
+    const source: DataSourceInfo = {
+      connections: [{ driver: 'OLE DB (ADO)', database: 'Warehouse', properties: { Provider: 'SQLOLEDB', 'Data Source': 'SRV1' } }],
+      tables: [{ alias: 'usp_Report;1', name: 'usp_Report', kind: 'storedProcedure', fields: [] }],
+      links: [],
+    };
+    const { rdl, review } = convertToRdl(definition, source, { reportName: 'Real' });
+    assert.match(rdl, /<Hidden>=\(Globals!PageNumber &gt; 1\)<\/Hidden>/);
+    assert.ok(rdl.includes('<ConnectString>Data Source=SRV1;Initial Catalog=Warehouse</ConnectString>'));
+    assert.deepEqual(review.map((r) => r.item).filter((i) => i !== 'Page' && i !== 'Dataset'), [], JSON.stringify(review));
+  });
+});
+
+describe('subreports in page headers and footers', () => {
+  const params = [{ name: '@account', valueType: 'number' }, { name: '@kind', valueType: 'number' }];
+  const jdbc = { driver: 'JDBC (JNDI)', database: 'jdbc:sqlserver://dbhost\\\\INST:1433;databaseName=SalesDb', properties: { Server: 'dbhost\\\\INST', 'User ID': 'reader' } };
+  const header: ReportDefinition = {
+    ...emptyDefinition(),
+    parameters: params,
+    formulas: [
+      { name: 'Object_Visibility', index: 0, kind: 'conditionalFormat', text: '{?@kind} = 1', referencedFields: [] },
+      { name: 'OwnerShared', index: 1, kind: 'formula', text: 'WhilePrintingRecords; shared StringVar owner; owner := {usp_Header;1.Owner};', referencedFields: [] },
+    ],
+    formulaTexts: ['{?@kind} = 1', 'WhilePrintingRecords; shared StringVar owner; owner := {usp_Header;1.Owner};'],
+    layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 900, objects: [
+        { kind: 'field', name: 'title1', field: 'usp_Header;1.Title', position: { x: 3600, y: 300 }, size: { width: 5000, height: 300 }, conditions: { suppress: { name: 'Object_Visibility', index: 0 } } },
+        { kind: 'field', name: 'owner1', field: '@OwnerShared', position: { x: 0, y: 600 }, size: { width: 2000, height: 230 } },
+      ] }] },
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF', height: 220, objects: [] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 220, objects: [] }] },
+    ],
+  };
+  const footer: ReportDefinition = {
+    ...emptyDefinition(),
+    formulas: [{ name: 'OwnerShared', index: 0, kind: 'formula', text: 'WhilePrintingRecords; shared StringVar owner; owner;', referencedFields: [] }],
+    formulaTexts: ['WhilePrintingRecords; shared StringVar owner; owner;'],
+    layout: [
+      { name: 'Area1', sections: [{ name: 'S1', height: 220, objects: [{ kind: 'field', name: 'owner2', field: '@OwnerShared', position: { x: 0, y: 0 }, size: { width: 3000, height: 180 } }] }] },
+      { name: 'Area5', sections: [{ name: 'S5', height: 220, objects: [] }] },
+      { name: 'Area3', sections: [{ name: 'S3', height: 220, objects: [] }] },
+    ],
+  };
+  const main: ReportDefinition = {
+    ...emptyDefinition(),
+    parameters: params,
+    formulas: [
+      { name: 'HeaderGroup', index: 0, kind: 'formula', text: 'WhileReadingRecords; " "', referencedFields: [] },
+      { name: 'Group #1 Order', index: 1, kind: 'internal', text: '', referencedFields: ['@HeaderGroup'] },
+    ],
+    selectionFormulas: { record: '{Holdings.Account} = {?@account}' },
+    layout: [
+      { name: 'PageHeaderArea1', sections: [{ name: 'PH', height: 308, objects: [{ kind: 'subreport', name: 'Subreport1', subreport: { index: 1, onDemand: false }, position: { x: 0, y: 0 }, size: { width: 9000, height: 308 } }] }] },
+      { name: 'PageFooterArea1', sections: [{ name: 'PF', height: 308, objects: [{ kind: 'subreport', name: 'Subreport2', subreport: { index: 2, onDemand: false }, position: { x: 0, y: 0 }, size: { width: 9000, height: 308 } }] }] },
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 0, objects: [] }] },
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF', height: 0, objects: [] }] },
+      { name: 'GroupHeaderArea1', sections: [{ name: 'GH', height: 400, objects: [{ kind: 'text', name: 'Heading', text: 'Name', position: { x: 0, y: 0 }, size: { width: 3000, height: 240 } }] }] },
+      { name: 'GroupFooterArea1', sections: [{ name: 'GF', height: 0, objects: [] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 300, objects: [{ kind: 'field', name: 'name1', field: 'Holdings.Name', position: { x: 0, y: 0 }, size: { width: 3000, height: 240 } }] }] },
+    ],
+  };
+  const source: DataSourceInfo = {
+    connections: [jdbc],
+    tables: [{ alias: 'Holdings', name: 'Holdings', kind: 'table', schema: 'dbo', fields: [{ name: 'Account', type: 'integer' }, { name: 'Name', type: 'string' }] }],
+    links: [],
+  };
+  const headerSource: DataSourceInfo = {
+    connections: [jdbc],
+    tables: [{ alias: 'usp_Header;1', name: 'usp_Header;1', kind: 'storedProcedure', schema: 'dbo', fields: [{ name: 'Title', type: 'string' }, { name: 'Owner', type: 'string' }] }],
+    links: [],
+  };
+
+  it('places their content directly in the header/footer, with their own datasets and shared variables', () => {
+    const subreports = new Map([
+      [1, { name: 'Main_Subdocument_1', links: [], parameters: ['@account', '@kind'], definition: header, dataSource: headerSource }],
+      [2, { name: 'Main_Subdocument_2', links: [], parameters: [], definition: footer, dataSource: { connections: [], tables: [], links: [] } }],
+    ]);
+    const { rdl, review } = convertToRdl(main, source, { reportName: 'Main', subreports });
+    assertBalancedXml(rdl);
+    assert.ok(!rdl.includes('<Subreport '), 'SSRS allows no subreport in a page header or footer');
+    assert.ok(rdl.includes('<ConnectString>Data Source=dbhost\\INST,1433;Initial Catalog=SalesDb</ConnectString>'), 'server, instance, port and database from the JDBC URL');
+    assert.equal((rdl.match(/<DataSource Name=/g) ?? []).length, 1, 'subreports on the same connection share the data source');
+    assert.match(rdl, /<DataSet Name="DataSet_Main_Subdocument_1">[\s\S]*<CommandType>StoredProcedure<\/CommandType>\s*<CommandText>\[dbo\]\.\[usp_Header\]<\/CommandText>/);
+    assert.match(rdl, /<DataSet Name="DataSet_Main_Subdocument_2">[\s\S]*<CommandText>SELECT 1 AS \[NoData\]<\/CommandText>/);
+    assert.ok(rdl.includes('<Value>=First(Fields!Title.Value, "DataSet_Main_Subdocument_1")</Value>'));
+    assert.ok(rdl.includes('<Hidden>=(Parameters!kind.Value = 1)</Hidden>'));
+    assert.match(rdl, /Dim v_owner As String[\s\S]*v_owner = a1[\s\S]*Return v_owner/, 'one class member carries the shared variable between them');
+    assert.equal((rdl.match(/<ReportParameter Name="(account|kind)">/g) ?? []).length, 2, 'parameters are not duplicated');
+    assert.match(rdl, /<KeepWithGroup>After<\/KeepWithGroup>\s*<RepeatOnNewPage>true<\/RepeatOnNewPage>/, 'a group on a constant repeats its header');
+    assert.ok(review.some((r) => /SQL Server login/.test(r.message)));
+    assert.ok(review.some((r) => /placed here directly/.test(r.message)));
+  });
+});

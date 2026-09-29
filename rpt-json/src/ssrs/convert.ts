@@ -34,7 +34,14 @@ export function convertDocumentToSsrs(doc: CfbDocument, baseName: string, option
     const links = (m.definition?.parameters ?? [])
       .filter((p) => /^Pm-/i.test(p.name))
       .map((p) => ({ parameter: sanitizeName(p.name), field: p.name.slice(3) }));
-    subreports.set(Number(n), { name: nameOf(m.storage), links });
+    subreports.set(Number(n), {
+      name: nameOf(m.storage),
+      links,
+      parameters: (m.definition?.parameters ?? []).map((p) => p.name),
+      definition: m.definition,
+      dataSource: m.dataSource,
+      images: embeddedImages(storageAt(doc.root, m.storage)),
+    });
   }
 
   return models.map((model) => {
