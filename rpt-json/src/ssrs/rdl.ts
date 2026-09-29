@@ -98,6 +98,8 @@ export interface ReviewNote {
 export interface RdlResult {
   rdl: string;
   review: ReviewNote[];
+  /** Subreports ("Subdocument N" numbers) whose content was placed inline and that need no .rdl of their own. */
+  inlinedOnly?: number[];
 }
 
 const RDL_NS = 'http://schemas.microsoft.com/sqlserver/reporting/2016/01/reportdefinition';
@@ -214,6 +216,9 @@ class RdlBuilder {
   private readonly extraDataSets: XmlElement[] = [];
   private readonly extraDataSources: { name: string; connectionString: string }[] = [];
   private readonly extraParameters: ParameterEntry[] = [];
+  /** Subreports (by "Subdocument N" number) placed inline, and those kept as subreport items. */
+  private readonly inlinedSubreports = new Set<number>();
+  private readonly referencedSubreports = new Set<number>();
   private cachedConnectionString?: string;
 
   constructor(definition: ReportDefinition, source: DataSourceInfo, options: RdlOptions) {
@@ -651,6 +656,7 @@ class RdlBuilder {
       this.note(item, 'SSRS allows no subreport in a page header or footer, and the subreport could not be placed inline; move its content here manually');
       return null;
     }
+    this.inlinedSubreports.add(obj.subreport!.index);
     const dataset = this.datasetNames.make(`DataSet_${info.name}`);
     const child = new RdlBuilder(info.definition, info.dataSource ?? { connections: [], tables: [], links: [] }, {
       reportName: info.name,
@@ -680,9 +686,11 @@ class RdlBuilder {
     for (const n of result.review) {
       // Notes about a connection it shares with the main report are already in the main report's notes.
       if (n.item === 'Data source' && dataSource === DATASOURCE) continue;
+      // Placed inline, a subreport without a database simply shows its formulas and parameters.
+      if (n.item === 'Dataset' && !readsData) continue;
       this.note(`${item}: ${n.item}`, n.message);
     }
-    this.note(item, `SSRS allows no subreport in a page header or footer, so its content was placed here directly, reading dataset ${dataset} (first row); the separate ${info.name}.rdl is not needed for this report`);
+    this.note(item, `SSRS allows no subreport in a page header or footer, so its content was placed here directly, reading dataset ${dataset} (first row)`);
 
     const height = Math.max(box.height, result.height);
     const rectangle = el('Rectangle', { Name: this.itemNames.make(obj.name || 'Subreport') },
@@ -729,6 +737,7 @@ class RdlBuilder {
           return null;
         }
         const reportName = info.name;
+        if (obj.subreport) this.referencedSubreports.add(obj.subreport.index);
         // Linked subreports: each "Pm-Table.Field" parameter receives that field's value.
         const parameters = info.links.map((link) => el('Parameter', { Name: link.parameter },
           el('Value', `=${this.fieldObjectValue(link.field, scope, item).expression}`)));
@@ -1257,7 +1266,10 @@ class RdlBuilder {
       const parameters = this.definition.parameters
         .filter((p) => p.name.startsWith('@'))
         .map((p) => el('QueryParameter', { Name: p.name }, el('Value', `=Parameters!${this.parameterName(p.name)}.Value`)));
-      this.note('Dataset', `calls stored procedure ${name}; check that its parameters match the report parameters`);
+      // Crystal takes a procedure's "@" parameters from the procedure itself, so they already match its signature.
+      if (parameters.length === 0 && this.definition.parameters.length > 0) {
+        this.note('Dataset', `calls stored procedure ${name} without parameters, while the report has parameters; check the procedure's signature`);
+      }
       return {
         commandType: 'StoredProcedure',
         text: procedure.schema ? `${this.quote(procedure.schema)}.${this.quote(name)}` : name,
@@ -1665,7 +1677,8 @@ class RdlBuilder {
         s.objects.some((o) => Object.values(o.conditions ?? {}).some((c) => c.index === f.index))));
       if (!used && f.text.trim()) this.note(`Formula {@${f.name}}`, 'is a formatting formula that no object uses in a decoded property; check whether it is still needed');
     }
-    return { rdl: toXml(report), review: this.review };
+    const inlinedOnly = [...this.inlinedSubreports].filter((n) => !this.referencedSubreports.has(n));
+    return { rdl: toXml(report), review: this.review, ...(inlinedOnly.length ? { inlinedOnly } : {}) };
   }
 }
 

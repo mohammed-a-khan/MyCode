@@ -16,8 +16,12 @@ The AES cipher is implemented in this project.
 
 ## Requirements
 
-Node.js **22.18 or later**, which runs `.ts` files directly (no build step). `npm run build` produces plain JavaScript
-with `tsc`, a dev-time tool only.
+Node.js **22.18 or later** (or 23.6 and later), which runs `.ts` files directly with no build step. On earlier 22.x
+and 23.x versions, add `--experimental-strip-types` after `node`.
+
+No packages are installed, not even type definitions: `types/node.d.ts` declares the Node built-ins the code uses, so
+editors and `tsc` type-check the project as it is. `npm run build` (with a `tsc` you already have) writes plain
+JavaScript to `dist/`; run it with `node dist/src/cli.js`.
 
 ## Command line
 
