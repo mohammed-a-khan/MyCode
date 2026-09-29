@@ -197,7 +197,17 @@ class Parser {
         this.pos++;
         continue;
       }
-      if (this.isWord('local', 'global', 'shared', 'whileprintingrecords', 'whilereadingrecords', 'beforereadingrecords', 'evaluateafter', ...VARIABLE_TYPES)) {
+      if (this.isWord('whilereadingrecords', 'beforereadingrecords', 'evaluateafter')) {
+        // Evaluation-time hints: an SSRS expression is already evaluated per row, in dependency order.
+        while (this.peek().kind !== 'eof' && !this.isOp(';')) this.pos++;
+        continue;
+      }
+      if (this.isWord('whileprintingrecords')) {
+        this.issues.push('uses WhilePrintingRecords; SSRS evaluates it as the report renders, check totals across pages');
+        this.pos++;
+        continue;
+      }
+      if (this.isWord('local', 'global', 'shared', ...VARIABLE_TYPES)) {
         this.issues.push(`uses "${this.peek().value}" (variables / evaluation timing) which needs manual conversion, e.g. to custom code or a running total`);
         while (this.peek().kind !== 'eof' && !this.isOp(';')) this.pos++;
         continue;

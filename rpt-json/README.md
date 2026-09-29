@@ -59,9 +59,11 @@ and Report Builder.
 
 ### Data source
 
-- **Connection:** the SQL Server connection string is built from the server and database stored in the report. If the
-  report used another database, such as Access, a placeholder is written and flagged. Pass `--connection` to set it
-  for all reports.
+- **Connection:** the SQL Server connection string is built from the server and database stored in the report, whether
+  it connected through OLE DB, ODBC or JDBC (`jdbc:sqlserver://host\\instance:port;databaseName=...`). If the report
+  used another database, such as Access, a placeholder is written and flagged. A report that signed in with a SQL
+  Server login is flagged, since the generated data source uses Windows authentication. Pass `--connection` to set
+  the connection string for all reports.
 - **Tables and views:** a `SELECT` of the columns the report uses, joined the way the Crystal links are defined. The
   record selection formula becomes a `WHERE` clause with query parameters when it has an exact SQL equivalent;
   otherwise it becomes a dataset filter. Joins keep their type: inner, left outer, right outer or full outer.
@@ -82,7 +84,7 @@ and Report Builder.
 | Range parameters                   | Two parameters (`…_Start`, `…_End`), used with `BETWEEN` / `>=` and `<=`       |
 | Formulas                           | Calculated dataset fields, inline expressions, or custom code (see below)     |
 | Record / group selection           | `WHERE` clause or dataset filter / group filter                               |
-| Groups (with header/footer)        | Table row groups with group header/footer rows                                |
+| Groups (with header/footer)        | Table row groups with group header/footer rows; a group on a constant formula (Crystal's way to repeat a header) repeats its header on every page |
 | Group sort, Top N / Bottom N       | Group sort by the summary with `TopN` / `BottomN` filter                      |
 | Top N with an "Others" group       | A rank column in the query (`DENSE_RANK` over the group total); groups past N are labelled with the "Others" name |
 | Record sorts                       | Detail sort expressions with their direction                                  |
@@ -99,7 +101,8 @@ and Report Builder.
 | Pictures                           | Embedded images                                                               |
 | Cross-tabs                         | Matrices with row and column groups and grand totals                          |
 | Charts                             | Charts with the same category, values and titles, and the matching type: bar → column (plain, stacked, percent, 3D), line, area, pie, doughnut, radar, bubble, stock, funnel |
-| Subreports                         | Subreport items pointing to the generated subreport `.rdl`; linked fields become subreport parameters |
+| Subreports                         | Subreport items pointing to the generated subreport `.rdl`; linked fields and same-named parameters become subreport parameters |
+| Subreports in page header/footer   | SSRS allows none there, so their content is placed directly in the header/footer, reading their own dataset (first row); shared variables stay shared |
 | Free-form sections                 | One row per section holding a rectangle, with every object at its position   |
 | Conditional formatting             | Font and background colour, tooltips, hyperlinks, section suppression as `Hidden`, new page before/after |
 | Page orientation and paper size    | Page width/height                                                             |

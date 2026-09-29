@@ -77,7 +77,13 @@ const QE_CONNECTION_PROPERTY = 0x0009;
 
 /** Field value types as stored in the query engine and on named values. */
 const VALUE_TYPES: Record<number, string> = {
+  // 0-5: signed/unsigned 8, 16 and 32-bit integers.
+  0: 'integer',
+  1: 'integer',
+  2: 'integer',
+  3: 'integer',
   4: 'integer',
+  5: 'integer',
   6: 'number',
   7: 'currency',
   8: 'boolean',
@@ -332,6 +338,8 @@ export interface TableInfo {
   kind: 'table' | 'storedProcedure' | 'command';
   /** Owner / schema, when stored (e.g. "dbo"). */
   schema?: string;
+  /** Database (catalog), when the stored name is qualified with it ("Sales.dbo.Orders"). */
+  catalog?: string;
   /** SQL text of a command. */
   sql?: string;
   /** Other strings stored on the table record (catalog, qualified name, ...). */
@@ -512,6 +520,8 @@ const CONDITION_ALIASES: Record<string, string> = {
   new_page_after: 'newPageAfter',
   back_color: 'backColor',
   section_back_color: 'backColor',
+  background_color: 'backColor',
+  object_visibility: 'suppress',
   tool_tip_text: 'toolTip',
   hyperlink_text: 'hyperlink',
 };
@@ -886,8 +896,14 @@ export function buildDataSource(records: RecordNode[]): DataSourceInfo {
     };
     if (sql) info.sql = sql;
     if (!sql && qualified.length > 1) info.schema = qualified[qualified.length - 2];
+    if (!sql && qualified.length > 2 && qualified[qualified.length - 3]) info.catalog = qualified[qualified.length - 3];
     const details = [...new Set(strings.slice(3).filter((s) => s.length > 0 && s !== alias && s !== storedName && s !== sql))];
     if (details.length > 0) info.details = details;
+    // The details can list the catalog before the schema ("Sales", "dbo").
+    if (!info.catalog && info.schema && details.length > 0) {
+      const at = details.indexOf(info.schema);
+      if (at > 0) info.catalog = details[at - 1];
+    }
 
     for (const field of children(table).filter((c) => c.type === QE_FIELD)) {
       const bytes = ownBytes(field);

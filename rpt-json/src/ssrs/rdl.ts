@@ -38,12 +38,49 @@ export interface RdlOptions {
   images?: Map<number, Uint8Array>;
   /** The report is a subreport: its areas have no page header or footer. */
   subreport?: boolean;
+  /** Internal: build the report as items inside another report (a subreport in a page header/footer). */
+  inline?: InlineTarget;
+}
+
+interface InlineTarget {
+  dataset: string;
+  itemNames: NameSet;
+  imageNames: NameSet;
+  codeNames: NameSet;
+}
+
+/** A report built as items for another report. */
+interface InlineResult {
+  items: XmlElement[];
+  height: number;
+  width: number;
+  connectionString: string;
+  dataset: (dataSourceName: string) => XmlElement;
+  parameters: ParameterEntry[];
+  codeFunctions: string[];
+  codeMembers: Record<string, string>;
+  embeddedImages: XmlElement[];
+  review: ReviewNote[];
+}
+
+interface ParameterEntry {
+  name: string;
+  type: string;
+  prompt: string;
+  multiple: boolean;
+  nullable: boolean;
 }
 
 export interface SubreportInfo {
   name: string;
   /** Subreport parameter (SSRS name) fed from a main-report field (Crystal "Table.Field"). */
   links: { parameter: string; field: string }[];
+  /** The subreport's own parameters (Crystal names), passed from same-named main-report parameters. */
+  parameters?: string[];
+  /** The subreport itself, for placing its content directly where SSRS allows no subreport (page header/footer). */
+  definition?: ReportDefinition;
+  dataSource?: DataSourceInfo;
+  images?: Map<number, Uint8Array>;
 }
 
 /** The identifier NameSet gives a name the first time it is used. */
@@ -158,6 +195,8 @@ class RdlBuilder {
   private readonly calculated: { name: string; expression: string }[] = [];
   private readonly formulaResults = new Map<string, string | null>();
   private readonly parameterNames = new Map<string, string>();
+  /** Parameter names are their own namespace, so a subreport's parameters match the main report's. */
+  private readonly parameterNameSet = new NameSet();
   private readonly groupFields: string[] = [];
   private readonly groupNames: string[] = [];
   private readonly embeddedImages: XmlElement[] = [];
@@ -168,11 +207,27 @@ class RdlBuilder {
   private readonly definition: ReportDefinition;
   private readonly source: DataSourceInfo;
   private readonly options: RdlOptions;
+  /** Name of this report's dataset (a subreport placed inline gets its own). */
+  private readonly dataset: string;
+  private readonly datasetNames = new NameSet();
+  /** Datasets, data sources and parameters of subreports placed inline. */
+  private readonly extraDataSets: XmlElement[] = [];
+  private readonly extraDataSources: { name: string; connectionString: string }[] = [];
+  private readonly extraParameters: ParameterEntry[] = [];
+  private cachedConnectionString?: string;
 
   constructor(definition: ReportDefinition, source: DataSourceInfo, options: RdlOptions) {
     this.definition = definition;
     this.source = source;
     this.options = options;
+    this.dataset = options.inline?.dataset ?? DATASET;
+    this.datasetNames.make(DATASET);
+    if (options.inline) {
+      // Item, image and code names must be unique across the report the items are placed in.
+      this.itemNames = options.inline.itemNames;
+      this.imageNames = options.inline.imageNames;
+      this.codeNames = options.inline.codeNames;
+    }
   }
 
   private note(item: string, message: string): void {
@@ -275,7 +330,7 @@ class RdlBuilder {
     let names = this.rangeNames.get(key);
     if (!names) {
       const base = this.parameterName(name);
-      names = { start: this.itemNames.make(`${base}_Start`), end: this.itemNames.make(`${base}_End`) };
+      names = { start: this.parameterNameSet.make(`${base}_Start`), end: this.parameterNameSet.make(`${base}_End`) };
       this.rangeNames.set(key, names);
     }
     return names;
@@ -310,7 +365,7 @@ class RdlBuilder {
     const key = crystalName.toLowerCase();
     let name = this.parameterNames.get(key);
     if (!name) {
-      name = this.itemNames.make(crystalName.replace(/^[@?]/, ''));
+      name = this.parameterNameSet.make(crystalName.replace(/^[@?]/, ''));
       this.parameterNames.set(key, name);
     }
     return name;
@@ -354,8 +409,9 @@ class RdlBuilder {
   /** A formatting-condition formula (by name and position in the formula list), translated for a property. */
   private conditionExpression(ref: FormulaRef, colors: boolean, item: string): string | undefined {
     const text = this.definition.formulaTexts?.[ref.index] ?? this.definition.formulas.find((f) => f.index === ref.index)?.text;
-    if (!text) {
-      this.note(item, `refers to formatting formula ${ref.name} (#${ref.index}), which was not found or is empty`);
+    if (!text?.trim()) {
+      // An empty formatting formula sets nothing, as in Crystal.
+      if (text === undefined) this.note(item, `refers to formatting formula ${ref.name} (#${ref.index}), which is not in the report's formula list (${this.definition.formulaTexts?.length ?? 0} entries); set it manually`);
       return undefined;
     }
     const formula = { text };
@@ -377,7 +433,7 @@ class RdlBuilder {
     if (total.evaluateOnChangeOf) {
       this.note(item, `Crystal evaluates it once per change of ${total.evaluateOnChangeOf}; if the dataset has several rows per ${total.evaluateOnChangeOf}, adjust the expression`);
     }
-    return `RunningValue(${value}, ${operation}, ${vbString(DATASET)})`;
+    return `RunningValue(${value}, ${operation}, ${vbString(this.dataset)})`;
   }
 
   // ---- expressions for report objects ------------------------------------------------------
@@ -439,7 +495,7 @@ class RdlBuilder {
         this.note(item, `summary "${summary[1]}" has no direct SSRS aggregate; check the expression`);
         return { expression: 'Nothing' };
       }
-      const scopeArg = scope === 'row' ? '' : `, ${vbString(DATASET)}`;
+      const scopeArg = scope === 'row' ? '' : `, ${vbString(this.dataset)}`;
       const format = operation === 'Count' || operation === 'CountDistinct' ? 'N0' : inner.format;
       return { expression: `${operation}(${inner.expression}${scopeArg})`, format };
     }
@@ -455,7 +511,7 @@ class RdlBuilder {
   /** Outside a data region, field references must be wrapped in an aggregate with a dataset scope. */
   private scoped(expression: string, scope: Scope): string {
     if (scope === 'row' || !expression.includes('Fields!') || AGGREGATE_CALL.test(expression)) return expression;
-    return `First(${expression}, ${vbString(DATASET)})`;
+    return `First(${expression}, ${vbString(this.dataset)})`;
   }
 
   private objectValue(obj: ReportObject, scope: Scope): { value: string; format?: string } {
@@ -572,12 +628,70 @@ class RdlBuilder {
     let bottom = 0;
     for (const obj of section.objects) {
       const box = this.boxOf(obj, top);
+      if (obj.kind === 'subreport' && scope === 'page') {
+        // SSRS allows no subreport in a page header/footer: its content is placed there directly.
+        const inline = this.inlineSubreport(obj, box, area, hidden);
+        if (inline) items.push(inline.item);
+        bottom = Math.max(bottom, box.top - top + (inline?.height ?? box.height));
+        continue;
+      }
       const item = this.reportItem(obj, scope, area, box, hidden);
       if (item) items.push(item);
       bottom = Math.max(bottom, box.top - top + box.height);
     }
     const height = Math.max(section.height !== undefined ? twipsToInches(section.height) : 0, bottom);
     return { items, height: section.objects.length || section.height ? height : 0 };
+  }
+
+  /** Places a subreport's content as items reading its own dataset (first row), inside a rectangle. */
+  private inlineSubreport(obj: ReportObject, box: Box, area: string, hidden?: string): { item: XmlElement; height: number } | null {
+    const item = `subreport object "${obj.name}" in ${area}`;
+    const info = obj.subreport ? this.options.subreports?.get(obj.subreport.index) : undefined;
+    if (!info?.definition) {
+      this.note(item, 'SSRS allows no subreport in a page header or footer, and the subreport could not be placed inline; move its content here manually');
+      return null;
+    }
+    const dataset = this.datasetNames.make(`DataSet_${info.name}`);
+    const child = new RdlBuilder(info.definition, info.dataSource ?? { connections: [], tables: [], links: [] }, {
+      reportName: info.name,
+      connectionString: this.options.connectionString,
+      subreport: true,
+      images: info.images,
+      inline: { dataset, itemNames: this.itemNames, imageNames: this.imageNames, codeNames: this.codeNames },
+    });
+    const result = child.buildInline();
+
+    // The subreport's data source: the main one when the connection matches (or it reads no database), otherwise its own.
+    let dataSource = DATASOURCE;
+    const readsData = (info.dataSource?.tables.length ?? 0) > 0;
+    if (readsData && result.connectionString !== this.connectionString()) {
+      const existing = this.extraDataSources.find((d) => d.connectionString === result.connectionString);
+      dataSource = existing?.name ?? `DataSource${this.extraDataSources.length + 2}`;
+      if (!existing) this.extraDataSources.push({ name: dataSource, connectionString: result.connectionString });
+    }
+    this.extraDataSets.push(result.dataset(dataSource));
+    for (const p of result.parameters) {
+      if (!this.extraParameters.some((x) => x.name.toLowerCase() === p.name.toLowerCase())) this.extraParameters.push(p);
+    }
+    for (const code of result.codeFunctions) if (!this.codeFunctions.includes(code)) this.codeFunctions.push(code);
+    // Crystal shared variables are shared with subreports: same-named class members are the same variable.
+    Object.assign(this.codeMembers, result.codeMembers);
+    this.embeddedImages.push(...result.embeddedImages);
+    for (const n of result.review) {
+      // Notes about a connection it shares with the main report are already in the main report's notes.
+      if (n.item === 'Data source' && dataSource === DATASOURCE) continue;
+      this.note(`${item}: ${n.item}`, n.message);
+    }
+    this.note(item, `SSRS allows no subreport in a page header or footer, so its content was placed here directly, reading dataset ${dataset} (first row); the separate ${info.name}.rdl is not needed for this report`);
+
+    const height = Math.max(box.height, result.height);
+    const rectangle = el('Rectangle', { Name: this.itemNames.make(obj.name || 'Subreport') },
+      result.items.length ? el('ReportItems', ...result.items) : null,
+      el('KeepTogether', 'true'),
+      el('Top', inches(box.top)), el('Left', inches(box.left)), el('Height', inches(height)), el('Width', inches(Math.max(box.width, result.width))),
+      hidden ? el('Visibility', el('Hidden', hidden)) : null,
+      el('Style', el('Border', el('Style', 'None'))));
+    return { item: rectangle, height };
   }
 
   private reportItem(obj: ReportObject, scope: Scope, area: string, box: Box, hidden?: string): XmlElement | null {
@@ -618,6 +732,13 @@ class RdlBuilder {
         // Linked subreports: each "Pm-Table.Field" parameter receives that field's value.
         const parameters = info.links.map((link) => el('Parameter', { Name: link.parameter },
           el('Value', `=${this.fieldObjectValue(link.field, scope, item).expression}`)));
+        // Subreport parameters named like a main-report parameter receive its value.
+        for (const name of info.parameters ?? []) {
+          const main = this.definition.parameters.find((p) => p.name.toLowerCase() === name.toLowerCase());
+          if (!main || /^Pm-/i.test(name)) continue;
+          parameters.push(el('Parameter', { Name: sanitizeName(name.replace(/^[@?]/, '')) },
+            el('Value', `=Parameters!${this.parameterName(main.name)}.Value`)));
+        }
         if (info.links.length && scope !== 'row') this.note(item, 'is linked to the main report but sits outside the table; it receives the first record\'s values');
         if (obj.subreport?.onDemand) this.note(item, 'was an on-demand subreport in Crystal; consider a drillthrough action instead');
         return el('Subreport', { Name: name() },
@@ -710,7 +831,7 @@ class RdlBuilder {
           el('TablixRow', el('Height', inches(height)), cells('RowTotal')))),
       el('TablixColumnHierarchy', el('TablixMembers', groupMember(ct.columns, 'Column', 'Column'), totalMember('Column', ct.columns.length))),
       el('TablixRowHierarchy', el('TablixMembers', groupMember(ct.rows, 'Row', 'Row'), totalMember('Row', ct.rows.length))),
-      el('DataSetName', DATASET),
+      el('DataSetName', this.dataset),
       el('Top', inches(box.top)), el('Left', inches(box.left)),
       el('Height', inches(height * (ct.columns.length + 2))),
       el('Width', inches(width * (ct.rows.length + 2))),
@@ -780,7 +901,7 @@ class RdlBuilder {
       el('Palette', 'BrightPastel'),
       el('ChartBorderSkin', el('Style')),
       el('ChartNoDataMessage', { Name: 'NoDataMessage' }, el('Caption', 'No Data Available'), el('Style')),
-      el('DataSetName', DATASET),
+      el('DataSetName', this.dataset),
       el('Top', inches(box.top)), el('Left', inches(box.left)), el('Height', inches(box.height)), el('Width', inches(box.width)),
       el('Style', el('Border', el('Style', 'None'))));
   }
@@ -820,6 +941,13 @@ class RdlBuilder {
   }
 
   /** A table row for one section: a cell per column, or one merged cell with the objects at their positions. */
+  /** A group on a formula that reads no fields, parameters or other formulas: every record is in one group. */
+  private isConstantGroup(field: string | undefined): boolean {
+    if (!field?.startsWith('@')) return false;
+    const formula = this.definition.formulas.find((f) => f.name.toLowerCase() === field.slice(1).toLowerCase());
+    return !!formula && formula.referencedFields.length === 0 && !/[{]/.test(formula.text);
+  }
+
   private tableRow(columns: Column[], section: SectionInfo, rowName: string, area: string): { row: XmlElement; height: number; hidden?: string } {
     const suppress = section.conditions?.suppress;
     const hidden = suppress ? this.conditionExpression(suppress, false, `Section ${section.name}`) : undefined;
@@ -946,7 +1074,13 @@ class RdlBuilder {
       : [];
     const levels = this.groupFields.length;
     const headerMembers: XmlElement[][] = [];
-    for (let level = 1; level <= levels; level++) headerMembers[level - 1] = addRows(areas.groupHeaders.get(level), `Group${level}Header`, `Group Header ${level}`, 'After');
+    for (let level = 1; level <= levels; level++) {
+      headerMembers[level - 1] = addRows(areas.groupHeaders.get(level), `Group${level}Header`, `Group Header ${level}`, 'After');
+      // Grouping on a constant formula is Crystal's way to repeat a header on every page.
+      if (this.isConstantGroup(this.groupFields[level - 1])) {
+        headerMembers[level - 1] = headerMembers[level - 1].map((m) => ({ ...m, children: [...m.children, el('RepeatOnNewPage', 'true')] }));
+      }
+    }
     const detailMembers = addRows(areas.detail, 'Detail', 'Details', null, true);
     const footerMembers: XmlElement[][] = [];
     for (let level = levels; level >= 1; level--) footerMembers[level - 1] = addRows(areas.groupFooters.get(level), `Group${level}Footer`, `Group Footer ${level}`, 'Before');
@@ -1018,7 +1152,7 @@ class RdlBuilder {
         el('TablixRows', ...rows)),
       el('TablixColumnHierarchy', el('TablixMembers', ...columns.map(() => el('TablixMember')))),
       el('TablixRowHierarchy', el('TablixMembers', ...headingMembers, member)),
-      el('DataSetName', DATASET),
+      el('DataSetName', this.dataset),
       el('Top', inches(top)),
       el('Left', inches(left)),
       el('Height', inches(height)),
@@ -1041,17 +1175,37 @@ class RdlBuilder {
   // ---- dataset --------------------------------------------------------------------------
 
   private connectionString(): string {
+    this.cachedConnectionString ??= this.computeConnectionString();
+    return this.cachedConnectionString;
+  }
+
+  private computeConnectionString(): string {
     if (this.options.connectionString) return this.options.connectionString;
     const connection = this.source.connections[0];
     const props = new Map(Object.entries(connection?.properties ?? {}).map(([k, v]) => [k.toLowerCase(), v]));
-    const server = props.get('server') ?? props.get('data source') ?? props.get('server name');
-    const database = props.get('database') ?? props.get('initial catalog');
-    const isSqlServer = /sql|sqloledb|msoledbsql|sqlncli/i.test(`${connection?.driver ?? ''} ${props.get('provider') ?? ''} ${props.get('database type') ?? ''}`) || !!server;
+    // A JDBC URL: jdbc:sqlserver://host[\\instance][:port];databaseName=name;...
+    const url = [props.get('connection url'), connection?.database].find((u) => /^jdbc:sqlserver:\/\//i.test(u ?? ''));
+    const jdbc = url ? /^jdbc:sqlserver:\/\/([^;:]*)(?::(\d+))?(.*)$/i.exec(url) : null;
+    const jdbcDatabase = jdbc ? /;\s*(?:databaseName|database)\s*=\s*([^;]+)/i.exec(jdbc[3])?.[1] : undefined;
+    const jdbcServer = jdbc?.[1] ? `${jdbc[1]}${jdbc[2] ? `,${jdbc[2]}` : ''}` : undefined;
+    // JDBC escapes the instance separator ("host\\\\INSTANCE").
+    const rawServer = jdbcServer ?? props.get('server') ?? props.get('data source') ?? props.get('server name');
+    const server = rawServer?.replace(/\\+/g, '\\');
+    // The database can be a logon property, the connection's own database entry, or the table names' catalog.
+    const ownDatabase = connection?.database && !/[\\/:]|\.\w{2,4}$/.test(connection.database) ? connection.database : undefined;
+    const database = props.get('database') ?? props.get('initial catalog') ?? props.get('database name') ?? jdbcDatabase
+      ?? this.source.tables.find((t) => t.catalog)?.catalog ?? (ownDatabase !== server ? ownDatabase : undefined);
+    const isSqlServer = /sql|sqloledb|msoledbsql|sqlncli/i.test(`${connection?.driver ?? ''} ${props.get('provider') ?? ''} ${props.get('database type') ?? ''} ${props.get('database class name') ?? ''}`) || !!jdbc || !!server;
     if (isSqlServer && server) {
       if (!database) this.note('Data source', 'the database name was not found; add "Initial Catalog" to the connection string');
+      if (props.get('user id') || props.get('user name')) {
+        this.note('Data source', 'the Crystal report signed in with a SQL Server login; the data source uses Windows authentication, so switch it to stored credentials for that login if needed');
+      }
       return `Data Source=${server};Initial Catalog=${database ?? 'YOUR_DATABASE'}`;
     }
     const original = [connection?.driver, connection?.database].filter(Boolean).join(', ');
+    // A report that reads no database needs no connection; the placeholder is harmless.
+    if (!connection && this.source.tables.length === 0) return 'Data Source=YOUR_SQL_SERVER;Initial Catalog=YOUR_DATABASE';
     this.note('Data source', `the Crystal report used ${original || 'an unknown data source'}; replace the placeholder SQL Server connection string`);
     return 'Data Source=YOUR_SQL_SERVER;Initial Catalog=YOUR_DATABASE';
   }
@@ -1064,13 +1218,18 @@ class RdlBuilder {
     return `${table.schema ? `${this.quote(table.schema)}.` : ''}${this.quote(table.name)} AS ${this.quote(table.alias)}`;
   }
 
-  private query(): { commandType?: string; text: string; parameters: XmlElement[]; fieldsFromAll: boolean } {
+  private query(): { commandType?: string; text: string; parameters: XmlElement[]; fieldsFromAll: boolean; noData?: boolean } {
     const tables = this.source.tables;
     const commands = tables.filter((t) => t.kind === 'command');
     const procedures = tables.filter((t) => t.kind === 'storedProcedure');
     if (tables.length === 0) {
-      this.note('Dataset', 'no tables were found in the report; write the query manually');
-      return { text: '-- No tables found in the Crystal report', parameters: [], fieldsFromAll: true };
+      if (this.source.connections.length === 0) {
+        this.note('Dataset', 'the Crystal report reads no database (it shows only formulas, parameters or text); if values come from the main report, pass them as subreport parameters');
+      } else {
+        this.note('Dataset', 'no tables were found in the report; write the query manually');
+      }
+      // One constant row, so formulas and parameters still evaluate.
+      return { text: 'SELECT 1 AS [NoData]', parameters: [], fieldsFromAll: true, noData: true };
     }
     if (commands.length + procedures.length > 0 && tables.length > 1) {
       this.note('Dataset', 'the report combines a SQL command or stored procedure with other tables; SSRS needs one query, so combine them manually');
@@ -1290,7 +1449,61 @@ class RdlBuilder {
 
   // ---- report ---------------------------------------------------------------------------
 
-  build(): RdlResult {
+  private datasetParts?: { query: ReturnType<RdlBuilder['query']>; filters: XmlElement | null; datasetFields: DatasetField[] };
+
+  /** Builds the query once all report items have marked the fields they use. */
+  private finishDataset(): void {
+    if (this.datasetParts) return;
+    const query = this.query();
+    const filters = this.selectionFilter();
+    const datasetFields = [...this.fields.values()].filter((f) => f.used || query.fieldsFromAll || ![...this.fields.values()].some((x) => x.used));
+    this.datasetParts = { query, filters, datasetFields };
+  }
+
+  private datasetElement(dataSourceName: string): XmlElement {
+    this.finishDataset();
+    const { query, filters, datasetFields } = this.datasetParts!;
+    return el('DataSet', { Name: this.dataset },
+        el('Query',
+          el('DataSourceName', dataSourceName),
+          query.parameters.length ? el('QueryParameters', ...query.parameters) : null,
+          query.commandType ? el('CommandType', query.commandType) : null,
+          el('CommandText', query.text)),
+        el('Fields',
+          query.noData ? el('Field', { Name: 'NoData' }, el('rd:TypeName', 'System.Int32'), el('DataField', 'NoData')) : null,
+          ...datasetFields.map((f) => el('Field', { Name: f.name }, el('rd:TypeName', TYPE_NAMES[f.type] ?? 'System.String'), el('DataField', query.fieldsFromAll ? f.column : f.name))),
+          ...[...this.sqlExpressions.values()].map((e) => el('Field', { Name: e.name }, el('rd:TypeName', 'System.Object'), el('DataField', e.name))),
+          ...[...this.nextColumns.values()].map((n) => el('Field', { Name: n.name }, el('rd:TypeName', TYPE_NAMES[n.field.type] ?? 'System.Object'), el('DataField', n.name))),
+          ...(this.othersGroup && !query.fieldsFromAll ? [
+            el('Field', { Name: this.othersGroup.total }, el('rd:TypeName', 'System.Decimal'), el('DataField', this.othersGroup.total)),
+            el('Field', { Name: this.othersGroup.rank }, el('rd:TypeName', 'System.Int64'), el('DataField', this.othersGroup.rank)),
+          ] : []),
+          ...this.calculated.map((c) => el('Field', { Name: c.name }, el('Value', c.expression)))),
+        filters);
+  }
+
+  /** Every parameter referenced anywhere must exist, including ones only formulas mention. */
+  private parameterEntries(): ParameterEntry[] {
+    const def = this.definition;
+    return [...this.parameterNames.entries()].flatMap(([key, name]) => {
+      const p = def.parameters.find((x) => x.name.toLowerCase() === key);
+      if (!p) this.note(`Parameter ${name}`, 'is referenced by a formula but has no definition in the report; it was added as a String parameter');
+      else if (!p.valueType) this.note(`Parameter ${p.name}`, 'the value type was not decoded; it was set to String');
+      const type = PARAMETER_TYPES[p?.valueType ?? 'string'] ?? 'String';
+      const prompt = (p?.prompt ?? name).replace(/:\s*$/, '');
+      const range = this.rangeNames.get(key);
+      if (range) {
+        return [
+          { name: range.start, type, prompt: `${prompt} (from)`, multiple: false, nullable: p?.nullable ?? false },
+          { name: range.end, type, prompt: `${prompt} (to)`, multiple: false, nullable: p?.nullable ?? false },
+        ];
+      }
+      return [{ name, type, prompt: p?.prompt ?? name, multiple: p?.allowMultiple ?? false, nullable: p?.nullable ?? false }];
+    });
+  }
+
+  /** Fields, groups and parameters: shared by a full build and an inline one. */
+  private prepare(): void {
     const def = this.definition;
     this.registerFields();
 
@@ -1305,6 +1518,45 @@ class RdlBuilder {
       this.groupNames.push(this.itemNames.make(`Group${i + 1}_${field.split('.').pop()}`));
     }
     for (const p of def.parameters) this.parameterName(p.name);
+  }
+
+  /** Builds the report as items for a page header/footer of another report: every section, stacked, reading the first row. */
+  buildInline(): InlineResult {
+    this.prepare();
+    const areas = this.classify(this.definition.layout);
+    const sections = [
+      ...areas.reportHeader, ...areas.pageHeader,
+      ...[...areas.groupHeaders.values()].flat(), ...areas.detail, ...[...areas.groupFooters.values()].flat(),
+      ...areas.pageFooter, ...areas.reportFooter,
+    ].filter((s) => s.objects.length > 0);
+    if ([...areas.detail, ...[...areas.groupHeaders.values()].flat()].some((s) => s.objects.length > 0)) {
+      this.note('Details', 'a page header/footer shows one record: the first row of the subreport\'s data is used');
+    }
+    const items: XmlElement[] = [];
+    let top = 0;
+    for (const section of sections) {
+      const placed = this.placeSection(section, top, 'page', 'Subreport');
+      items.push(...placed.items);
+      top += placed.height;
+    }
+    let width = 0;
+    for (const item of items) width = Math.max(width, itemRight(item));
+    const connectionString = this.connectionString();
+    this.finishDataset();
+    return {
+      items, height: top, width, connectionString,
+      dataset: (dataSourceName) => this.datasetElement(dataSourceName),
+      parameters: this.parameterEntries(),
+      codeFunctions: this.codeFunctions,
+      codeMembers: this.codeMembers,
+      embeddedImages: this.embeddedImages,
+      review: this.review,
+    };
+  }
+
+  build(): RdlResult {
+    const def = this.definition;
+    this.prepare();
 
     const areas = this.classify(def.layout);
     const detailXs = new Set(this.columnsFor(areas.detail.flatMap((s) => s.objects)).map((c) => c.x));
@@ -1350,33 +1602,17 @@ class RdlBuilder {
       ? { left: def.margins.left / TWIPS_PER_INCH, right: def.margins.right / TWIPS_PER_INCH, top: def.margins.top / TWIPS_PER_INCH, bottom: def.margins.bottom / TWIPS_PER_INCH }
       : { left: MARGIN, right: MARGIN, top: MARGIN, bottom: MARGIN };
     const landscape = def.page ? def.page.orientation === 'landscape' : width > paperWidth - margins.left - margins.right;
-    if (!def.page && landscape) this.note('Page', `the layout is ${inches(width)} wide, so the page was set to landscape; check the page setup`);
+    if (!def.page && landscape && !this.options.subreport) this.note('Page', `the layout is ${inches(width)} wide, so the page was set to landscape; check the page setup`);
     if (def.page?.paperSize && !PAPER_SIZES[def.page.paperSize]) this.note('Page', `paper size code ${def.page.paperSize} is not mapped; Letter was used`);
     const pageWidth = landscape ? paperHeight : paperWidth;
-    if (width > pageWidth - margins.left - margins.right + 0.01) this.note('Page', `the layout (${inches(width)}) is wider than the printable page; SSRS will add horizontal pages`);
+    if (width > pageWidth - margins.left - margins.right + 0.01 && !this.options.subreport) this.note('Page', `the layout (${inches(width)}) is wider than the printable page; SSRS will add horizontal pages`);
     // A subreport's margins never apply: it prints inside the main report.
     if (!def.margins && !this.options.subreport) this.note('Page', 'the report uses the printer default margins; 0.25in margins were used');
 
-    const query = this.query();
-    const filters = this.selectionFilter();
-    const datasetFields = [...this.fields.values()].filter((f) => f.used || query.fieldsFromAll || ![...this.fields.values()].some((x) => x.used));
-
-    // Every parameter referenced anywhere must exist, including ones only formulas mention.
-    const parameterList = [...this.parameterNames.entries()].flatMap(([key, name]) => {
-      const p = def.parameters.find((x) => x.name.toLowerCase() === key);
-      if (!p) this.note(`Parameter ${name}`, 'is referenced by a formula but has no definition in the report; it was added as a String parameter');
-      else if (!p.valueType) this.note(`Parameter ${p.name}`, 'the value type was not decoded; it was set to String');
-      const type = PARAMETER_TYPES[p?.valueType ?? 'string'] ?? 'String';
-      const prompt = (p?.prompt ?? name).replace(/:\s*$/, '');
-      const range = this.rangeNames.get(key);
-      if (range) {
-        return [
-          { name: range.start, type, prompt: `${prompt} (from)`, multiple: false, nullable: p?.nullable ?? false },
-          { name: range.end, type, prompt: `${prompt} (to)`, multiple: false, nullable: p?.nullable ?? false },
-        ];
-      }
-      return [{ name, type, prompt: p?.prompt ?? name, multiple: p?.allowMultiple ?? false, nullable: p?.nullable ?? false }];
-    });
+    this.finishDataset();
+    // Parameters of subreports placed inline are added unless the main report has one of the same name.
+    const ownParameters = this.parameterEntries();
+    const parameterList = [...ownParameters, ...this.extraParameters.filter((p) => !ownParameters.some((o) => o.name.toLowerCase() === p.name.toLowerCase()))];
     const parameters = parameterList.map((p) => el('ReportParameter', { Name: p.name },
       el('DataType', p.type),
       p.nullable ? el('Nullable', 'true') : null,
@@ -1394,23 +1630,12 @@ class RdlBuilder {
           el('DataProvider', 'SQL'),
           el('ConnectString', this.connectionString()),
           el('IntegratedSecurity', 'true')),
-        el('rd:DataSourceID', reportId(`${this.options.reportName}/${DATASOURCE}`)))),
-      el('DataSets', el('DataSet', { Name: DATASET },
-        el('Query',
-          el('DataSourceName', DATASOURCE),
-          query.parameters.length ? el('QueryParameters', ...query.parameters) : null,
-          query.commandType ? el('CommandType', query.commandType) : null,
-          el('CommandText', query.text)),
-        el('Fields',
-          ...datasetFields.map((f) => el('Field', { Name: f.name }, el('rd:TypeName', TYPE_NAMES[f.type] ?? 'System.String'), el('DataField', query.fieldsFromAll ? f.column : f.name))),
-          ...[...this.sqlExpressions.values()].map((e) => el('Field', { Name: e.name }, el('rd:TypeName', 'System.Object'), el('DataField', e.name))),
-          ...[...this.nextColumns.values()].map((n) => el('Field', { Name: n.name }, el('rd:TypeName', TYPE_NAMES[n.field.type] ?? 'System.Object'), el('DataField', n.name))),
-          ...(this.othersGroup && !query.fieldsFromAll ? [
-            el('Field', { Name: this.othersGroup.total }, el('rd:TypeName', 'System.Decimal'), el('DataField', this.othersGroup.total)),
-            el('Field', { Name: this.othersGroup.rank }, el('rd:TypeName', 'System.Int64'), el('DataField', this.othersGroup.rank)),
-          ] : []),
-          ...this.calculated.map((c) => el('Field', { Name: c.name }, el('Value', c.expression)))),
-        filters)),
+        el('rd:DataSourceID', reportId(`${this.options.reportName}/${DATASOURCE}`))),
+        ...this.extraDataSources.map((d) => el('DataSource', { Name: d.name },
+          el('rd:SecurityType', 'Integrated'),
+          el('ConnectionProperties', el('DataProvider', 'SQL'), el('ConnectString', d.connectionString), el('IntegratedSecurity', 'true')),
+          el('rd:DataSourceID', reportId(`${this.options.reportName}/${d.name}`))))),
+      el('DataSets', this.datasetElement(DATASOURCE), ...this.extraDataSets),
       el('ReportSections', el('ReportSection',
         el('Body', el('ReportItems', ...bodyItems), el('Height', inches(Math.max(top, DEFAULT_HEIGHT))), el('Style')),
         el('Width', inches(Math.max(width, 1))),
