@@ -30,6 +30,8 @@ node src/cli.ts to-json  report.rpt report.json          # full JSON (original b
 node src/cli.ts to-rpt   report.json rebuilt.rpt
 node src/cli.ts to-rdl   report.rpt out/                 # SSRS .rdl (+ subreports) and a review checklist
 node src/cli.ts to-rdl   reports/ out/                   # every .rpt in a folder
+node src/cli.ts headers  report.rpt                      # header text: titles, labels, column headings
+node src/cli.ts headers  reports/ headers.csv --csv      # every report in a folder, as CSV (or --json)
 node src/cli.ts inspect  report.rpt                      # just the readable model and stream catalog
 node src/cli.ts verify   report.rpt                      # round-trip checks (see below)
 ```
@@ -164,6 +166,9 @@ person needs to finish.
 
 Note that `metadata` is a read-only view that is regenerated on every conversion. Edits to it are ignored; edit
 `decoded` instead.
+
+Edit a stream's `decoded` records or its raw `data`, not both: if `data` was changed (its `sha256` no longer
+matches) and `decoded` differs from it too, `to-rpt` stops and asks which one to keep instead of losing an edit.
 
 ## JSON format
 

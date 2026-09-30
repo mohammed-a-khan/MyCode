@@ -135,6 +135,9 @@ function jsonToRecord(value: unknown, path: string, fail: Fail): RecordNode {
     parts: [],
   };
   if (value.typeByte !== undefined) node.typeByte = parseNumber(value.typeByte, 0xff, `${path}.typeByte`, fail);
+  // The flags say which header parts exist; a value the flags leave out would be silently dropped.
+  if ((node.schema !== null) !== Boolean(node.flags & 0x20)) fail(`${path}.schema`, 'must be set exactly when flags include 0x20');
+  if ((node.typeByte !== undefined) !== Boolean(node.flags & 0x04)) fail(`${path}.typeByte`, 'must be set exactly when flags include 0x04');
   if (!Array.isArray(value.content)) return fail(`${path}.content`, 'must be an array');
   const pending: Uint8Array[] = [];
   const flush = () => {

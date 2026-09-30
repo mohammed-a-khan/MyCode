@@ -264,3 +264,34 @@ describe('real .rpt samples', { skip: !samplesDir && 'set RPT_SAMPLES_DIR to ena
     });
   }
 });
+
+describe('input validation (audit fixes)', () => {
+  it('rejects impossible or out-of-range timestamps instead of changing them', () => {
+    assert.throws(() => isoToFiletime('2021-02-30T00:00:00Z'), CfbError);
+    assert.throws(() => isoToFiletime('2021-01-01T24:00:00Z'), CfbError);
+    assert.throws(() => isoToFiletime('1500-01-01T00:00:00Z'), /1601/);
+  });
+
+  it('writes storages with start sector 0, as MS-CFB requires', () => {
+    const bytes = writeCfb(doc([{ type: 'storage', name: 'Sub', clsid: ZERO, stateBits: 0, created: null, modified: null, children: [stream('a', 'x')] }]));
+    const directory = readCfb(bytes) && bytes.subarray(512 * 2);
+    // Find the "Sub" entry by its UTF-16 name and read its start sector.
+    for (let off = 0; off < directory.length; off += 128) {
+      const name = String.fromCharCode(...Array.from({ length: 3 }, (_, i) => directory[off + i * 2]));
+      if (name === 'Sub' && directory[off + 66] === 1) {
+        assert.equal(new DataView(directory.buffer, directory.byteOffset).getUint32(off + 116, true), 0);
+        return;
+      }
+    }
+    assert.fail('storage entry not found');
+  });
+
+  it('refuses JSON whose edited data and decoded content disagree, and bad field values', () => {
+    const json = rptToJson(writeCfb(doc([stream('a', 'x')])), { metadata: false });
+    const entry = json.root.children[0] as unknown as Record<string, unknown>;
+    assert.throws(() => jsonToRpt({ ...json, root: { ...json.root, children: [{ ...entry, stateBits: -1 }] } } as RptJson), /stateBits/);
+    assert.throws(() => jsonToRpt({ ...json, root: { ...json.root, children: [{ ...entry, data: 'Q', size: undefined, sha256: undefined }] } } as RptJson), /base64/);
+    const upper = { ...entry, sha256: String(entry.sha256).toUpperCase() };
+    assert.doesNotThrow(() => jsonToRpt({ ...json, root: { ...json.root, children: [upper] } } as RptJson), 'hashes compare case-insensitively');
+  });
+});

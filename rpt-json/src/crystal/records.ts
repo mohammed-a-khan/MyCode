@@ -98,6 +98,8 @@ function isNestedHeader(h: Header, dialect: Dialect): boolean {
   const { flags, schema } = h.node;
   if (!(flags & FLAG_MASKED) || !(flags & FLAG_ENHANCED_STRINGS) || schema === null) return false;
   if (schema >> 8 !== SCHEMA_PREFIX[dialect]) return false;
+  // An extended type word is only needed for types above 0x3ff; a smaller one means these are data bytes.
+  if (flags & FLAG_EXTENDED_TYPE && h.node.type <= 0x3ff) return false;
   const width = LENGTH_WIDTHS[flags >> 6];
   return width === 4 || (width === 0 && dialect === 'report');
 }

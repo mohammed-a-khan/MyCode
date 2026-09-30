@@ -84,6 +84,7 @@ function buildDirectory(root: CfbStorage): DirEntry[] {
     });
   };
 
+  validateName(root.name, '(root)');
   add(root, OBJ_ROOT);
   addChildren(0, root, '');
   return entries;
@@ -214,7 +215,9 @@ export function writeCfb(doc: CfbDocument, options: CfbWriteOptions = {}): Uint8
     view.setUint32(off + 96, e.node.stateBits >>> 0, true);
     view.setBigUint64(off + 100, isoToFiletime(e.node.created), true);
     view.setBigUint64(off + 108, isoToFiletime(e.node.modified), true);
-    view.setUint32(off + 116, e.size === 0 && e.objectType !== OBJ_ROOT ? ENDOFCHAIN : e.startSector, true);
+    // MS-CFB: a storage's start sector is zero; an empty stream has none.
+    const start = e.objectType === OBJ_STORAGE ? 0 : e.size === 0 && e.objectType !== OBJ_ROOT ? ENDOFCHAIN : e.startSector;
+    view.setUint32(off + 116, start, true);
     view.setUint32(off + 120, e.size % 2 ** 32, true);
     view.setUint32(off + 124, Math.floor(e.size / 2 ** 32), true);
   }

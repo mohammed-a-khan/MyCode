@@ -29,6 +29,11 @@ export interface FormulaContext {
   nextValue?(fieldRef: string): string | undefined;
   /** Value type ("date", "dateTime", "string", ...) of a database field, if known. */
   fieldType?(fieldRef: string): string | undefined;
+  /**
+   * Prefix for Global variables' class members. Crystal Global variables belong to one report (Shared ones are
+   * shared with subreports), so a subreport placed inside another report keeps its own copies.
+   */
+  memberPrefix?: string;
 }
 
 export interface Translation {
@@ -282,11 +287,28 @@ class Parser {
     return { t: 'binary', op: '=', left: value, right: from };
   }
 
+  /**
+   * Lowest precedence first, as Crystal defines it: Imp, Eqv, Xor, Or, And, Not, comparisons, &, + -,
+   * Mod, \, * / %, ^, unary minus. Every binary level is left-associative.
+   */
   private parseOr(): Node {
-    let left = this.parseAnd();
-    while (this.isWord('or', 'xor', 'eqv', 'imp')) {
+    return this.parseLevel(['imp'], () => this.parseLevel(['eqv'], () => this.parseLevel(['xor'], () => this.parseOrOnly())));
+  }
+
+  private parseLevel(words: string[], next: () => Node): Node {
+    let left = next();
+    while (this.isWord(...words)) {
       const op = KEYWORD(this.next().value);
-      left = { t: 'binary', op, left, right: this.parseAnd() };
+      left = { t: 'binary', op, left, right: next() };
+    }
+    return left;
+  }
+
+  private parseOrOnly(): Node {
+    let left = this.parseAnd();
+    while (this.isWord('or')) {
+      this.pos++;
+      left = { t: 'binary', op: 'or', left, right: this.parseAnd() };
     }
     return left;
   }
@@ -358,35 +380,58 @@ class Parser {
   }
 
   private parseAdditive(): Node {
-    let left = this.parseMultiplicative();
+    let left = this.parseMod();
     while (this.isOp('+') || this.isOp('-')) {
       const op = this.next().value;
-      left = { t: 'binary', op, left, right: this.parseMultiplicative() };
+      left = { t: 'binary', op, left, right: this.parseMod() };
+    }
+    return left;
+  }
+
+  private parseMod(): Node {
+    let left = this.parseIntegerDivision();
+    while (this.isWord('mod')) {
+      this.pos++;
+      left = { t: 'binary', op: 'mod', left, right: this.parseIntegerDivision() };
+    }
+    return left;
+  }
+
+  private parseIntegerDivision(): Node {
+    let left = this.parseMultiplicative();
+    while (this.isOp('\\')) {
+      this.pos++;
+      left = { t: 'binary', op: '\\', left, right: this.parseMultiplicative() };
     }
     return left;
   }
 
   private parseMultiplicative(): Node {
-    let left = this.parseUnary();
-    while (this.isOp('*') || this.isOp('/') || this.isOp('\\') || this.isOp('%') || this.isWord('mod')) {
-      const op = KEYWORD(this.next().value);
-      left = { t: 'binary', op, left, right: this.parseUnary() };
+    let left = this.parsePower();
+    while (this.isOp('*') || this.isOp('/') || this.isOp('%')) {
+      const op = this.next().value;
+      left = { t: 'binary', op, left, right: this.parsePower() };
     }
     return left;
   }
 
+  private parsePower(): Node {
+    let left = this.parseUnary();
+    while (this.isOp('^')) {
+      this.pos++;
+      left = { t: 'binary', op: '^', left, right: this.parseUnary() };
+    }
+    return left;
+  }
+
+  /** Unary minus binds tighter than ^ in Crystal: -2^2 is 4. */
   private parseUnary(): Node {
     if (this.isOp('-') || this.isOp('+')) {
       const op = this.next().value;
       const arg = this.parseUnary();
       return op === '-' ? { t: 'unary', op: '-', arg } : arg;
     }
-    const base = this.parsePrimary();
-    if (this.isOp('^')) {
-      this.pos++;
-      return { t: 'binary', op: '^', left: base, right: this.parseUnary() };
-    }
-    return base;
+    return this.parsePrimary();
   }
 
   /** Subscripts: x[i] (array element or character) and s[a to b] (substring). */
@@ -666,7 +711,9 @@ class Parser {
 
 // ---- emitting --------------------------------------------------------------------------
 
-export const vbString = (value: string) => `"${value.replace(/"/g, '""')}"`;
+/** A VB string literal; line breaks become vbCrLf (a VB literal cannot span lines). */
+export const vbString = (value: string) =>
+  value.split(/\r?\n/).map((line) => `"${line.replace(/"/g, '""')}"`).join(' & vbCrLf & ').replace(/^"" & | & ""$/g, '');
 
 const BINARY_VB: Record<string, string> = {
   and: 'AndAlso',
@@ -698,7 +745,7 @@ export const SAME_ARGS: Record<string, string> = {
   chr: 'Chr', chrw: 'ChrW', asc: 'Asc', ascw: 'AscW', val: 'Val',
   tonumber: 'CDbl', cdbl: 'CDbl', cstr: 'CStr', cbool: 'CBool', cdate: 'CDate', ccur: 'CDec', int: 'Int',
   abs: 'Abs', sgn: 'Sign', sqr: 'Sqrt', sqrt: 'Sqrt', exp: 'Exp', log: 'Log', sin: 'Sin', cos: 'Cos', tan: 'Tan', atn: 'Atan', fix: 'Fix',
-  truncate: 'Fix', round: 'Round',
+
   year: 'Year', month: 'Month', day: 'Day', hour: 'Hour', minute: 'Minute', second: 'Second',
   dateadd: 'DateAdd', datediff: 'DateDiff', datepart: 'DatePart', dayofweek: 'Weekday', weekday: 'Weekday',
   monthname: 'MonthName', weekdayname: 'WeekdayName', datevalue: 'DateValue', timevalue: 'TimeValue',
@@ -758,6 +805,29 @@ export function customCodeNote(issues: string[], name: string, origin = ''): str
 
 /** VB helpers shared by translated formulas; each is added to the report Code block once. */
 export const CODE_HELPERS: Record<string, string> = {
+  // Sum, Average, Maximum, Minimum and Count over an array; "first" is 1 for Crystal arrays, 0 for parameters.
+  CrArrayAgg: [
+    'Public Function CrArrayAgg(ByVal items As Object, ByVal op As String, ByVal first As Integer) As Object',
+    '    Dim result As Object = Nothing',
+    '    Dim n As Integer = 0',
+    '    For i As Integer = first To UBound(items)',
+    '        Dim v As Object = items(i)',
+    '        If v Is Nothing Then Continue For',
+    '        n += 1',
+    '        Select Case op',
+    '            Case "sum", "average"',
+    '                result = If(result Is Nothing, v, result + v)',
+    '            Case "maximum"',
+    '                If result Is Nothing OrElse v > result Then result = v',
+    '            Case "minimum"',
+    '                If result Is Nothing OrElse v < result Then result = v',
+    '        End Select',
+    '    Next',
+    '    If op = "count" Or op = "distinctcount" Then Return n',
+    '    If op = "average" Then Return If(n = 0, Nothing, result / n)',
+    '    Return result',
+    'End Function',
+  ].join('\n'),
   // Crystal arrays are 1-based; generated arrays keep slot 0 unused.
   CrSplit: [
     'Public Function CrSplit(ByVal text As Object, ByVal delimiter As Object) As Object()',
@@ -878,7 +948,7 @@ export class Emitter {
   /** Names of CODE_HELPERS functions used. */
   readonly helpers = new Set<string>();
   inCode = false;
-  private readonly ctx: FormulaContext;
+  readonly ctx: FormulaContext;
 
   constructor(ctx: FormulaContext, issues: string[]) {
     this.ctx = ctx;
@@ -961,11 +1031,16 @@ export class Emitter {
         return 'Nothing';
       }
       case 'unary':
-        return node.op === 'not' ? `Not (${this.emit(node.arg)})` : `-(${this.emit(node.arg)})`;
+        return node.op === 'not' ? `Not (${this.emit(node.arg)})` : `(-(${this.emit(node.arg)}))`;
       case 'binary':
         return this.emitBinary(node.op, node.left, node.right);
-      case 'if':
-        return `IIf(${this.emit(node.cond)}, ${this.emit(node.then)}, ${node.else ? this.emit(node.else) : this.defaultFor(node.then)})`;
+      case 'if': {
+        const then = this.emit(node.then);
+        const otherwise = node.else ? this.emit(node.else) : this.defaultFor(node.then);
+        // IIf evaluates both branches; If() evaluates only the chosen one, so a guarded division cannot fail.
+        const fn = /[/\\]|\bMod\b/.test(`${then} ${otherwise}`) ? 'If' : 'IIf';
+        return `${fn}(${this.emit(node.cond)}, ${then}, ${otherwise})`;
+      }
       case 'in': {
         if (node.list.length === 0) return node.negate ? 'True' : 'False';
         const value = this.emit(node.value);
@@ -979,7 +1054,9 @@ export class Emitter {
       }
       case 'select': {
         const pairs = node.cases.flatMap((c) => [c.match.map((m) => this.emit(m)).join(' OrElse '), this.emit(c.result)]);
-        if (node.otherwise) pairs.push('True', this.emit(node.otherwise));
+        // Without "default", Crystal returns the default of the result type.
+        const otherwise = node.otherwise ? this.emit(node.otherwise) : node.cases[0] ? this.defaultFor(node.cases[0].result) : 'Nothing';
+        pairs.push('True', otherwise);
         return `Switch(${pairs.join(', ')})`;
       }
       case 'array':
@@ -992,9 +1069,13 @@ export class Emitter {
       case 'index': {
         const base = this.emit(node.base);
         const variable = node.base.t === 'name' ? this.variables.get(node.base.name.toLowerCase()) : undefined;
-        if (variable?.array) {
+        if (variable?.array || this.isArrayNode(node.base)) {
           if (node.to) this.note('uses an array range, which needs manual conversion');
           return `${base}(${this.emit(node.from)})`;
+        }
+        if (this.isMultiParameter(node.base)) {
+          // Parameter values are 0-based; Crystal counts from 1.
+          return `${base}((${this.emit(node.from)}) - 1)`;
         }
         const from = this.emit(node.from);
         return node.to ? `Mid(${base}, ${from}, (${this.emit(node.to)}) - (${from}) + 1)` : `Mid(${base}, ${from}, 1)`;
@@ -1032,6 +1113,33 @@ export class Emitter {
       return op === '=' ? test : `Not ${test}`;
     }
     return undefined;
+  }
+
+  /** A multi-value report parameter ({?Name} allowing several values). */
+  private isMultiParameter(node: Node): boolean {
+    return node.t === 'field' && node.ref.startsWith('?') && this.ctx.parameterMultiple?.(node.ref.slice(1)) === true;
+  }
+
+  /** An array value in the generated code: a literal, an array variable or Split(). */
+  private isArrayNode(node: Node): boolean {
+    if (node.t === 'array') return true;
+    if (node.t === 'call' && node.name.toLowerCase() === 'split') return true;
+    if (node.t === 'name') return this.variables.get(node.name.toLowerCase())?.array === true;
+    return false;
+  }
+
+  private isStringNode(node: Node): boolean {
+    if (node.t === 'literal') return node.vb.startsWith('"');
+    if (node.t === 'field' && !node.ref.startsWith('@') && !node.ref.startsWith('?')) return ['string', 'memo'].includes(this.ctx.fieldType?.(node.ref) ?? '');
+    if (node.t === 'name') return this.variables.get(node.name.toLowerCase())?.vtype === 'stringvar';
+    return false;
+  }
+
+  private isNumberNode(node: Node): boolean {
+    if (node.t === 'literal') return /^-?[\d.]+$/.test(node.vb);
+    if (node.t === 'field' && !node.ref.startsWith('@') && !node.ref.startsWith('?')) return ['integer', 'number', 'currency'].includes(this.ctx.fieldType?.(node.ref) ?? '');
+    if (node.t === 'name') return ['numbervar', 'currencyvar'].includes(this.variables.get(node.name.toLowerCase())?.vtype ?? '');
+    return false;
   }
 
   /** Crystal's value for an "if" without "else": the default of the "then" branch's type. */
@@ -1111,9 +1219,14 @@ export class Emitter {
         return `${this.inCode ? '' : 'Code.'}${op === '+' ? 'CrAdd' : 'CrSubtract'}(${this.emit(left)}, ${this.emit(right)})`;
       }
     }
+    if (op === 'startswith') {
+      // CStr turns a null field into "", so no NullReferenceException.
+      const l = this.emit(left);
+      if (right.t === 'array') return `(${right.items.map((i) => `CStr(${l}).StartsWith(${this.emit(i)})`).join(' OrElse ')})`;
+      return `CStr(${l}).StartsWith(${this.emit(right)})`;
+    }
     const l = this.emit(left);
     const r = this.emit(right);
-    if (op === 'startswith') return `(${l}).StartsWith(${r})`;
     if (op === '%') return `((${l}) / (${r}) * 100)`;
     if (op === 'eqv') return `((${l}) = (${r}))`;
     if (op === 'imp') return `(Not (${l}) OrElse (${r}))`;
@@ -1137,6 +1250,16 @@ export class Emitter {
         const value = this.emit(args[0]);
         return `(${value} >= ${named.vb[0]} AndAlso ${value} < DateAdd("d", 1, ${named.vb[1]}))`;
       }
+      if (this.isArrayNode(args[1])) {
+        // Membership in a (1-based) array; slot 0 is unused.
+        const [value, target] = a();
+        return `(Array.IndexOf(${target}, ${value}) > 0)`;
+      }
+      if (args[1].t === 'literal' || this.isStringNode(args[1])) {
+        // "x in <string>" tests for a substring.
+        const [value, target] = a();
+        return `(InStr(${target}, ${value}) > 0)`;
+      }
       this.note('tests a value against a range parameter or named date range; check the translated comparison');
       const [value, target] = a();
       return `(${value} = ${target})`;
@@ -1144,6 +1267,13 @@ export class Emitter {
     if ((key === 'minimum' || key === 'maximum') && args.length === 1) {
       const range = this.rangeOf(args[0]);
       if (range) return key === 'minimum' ? range.start : range.end;
+    }
+    if (AGGREGATES[key] && args.length === 1 && (this.isMultiParameter(args[0]) || this.isArrayNode(args[0]))) {
+      // Crystal array functions: Sum([...]), Count({?Multi}), ... over the array's elements.
+      const multi = this.isMultiParameter(args[0]);
+      if (multi && key === 'count') return `Parameters!${this.ctx.parameter((args[0] as { ref: string }).ref.slice(1))}.Count`;
+      this.helpers.add('CrArrayAgg');
+      return `${this.inCode ? '' : 'Code.'}CrArrayAgg(${this.emit(args[0])}, ${vbString(key)}, ${multi ? 0 : 1})`;
     }
     if (AGGREGATES[key]) {
       const [target, group] = args;
@@ -1164,8 +1294,17 @@ export class Emitter {
       case 'totext':
       case 'cstr': {
         const [value, second, third] = a();
-        if (second === undefined) return `CStr(${value})`;
-        if (/^-?\d+$/.test(second)) return `FormatNumber(${value}, ${second}${third !== undefined ? '' : ''})`;
+        if (second === undefined) {
+          // Crystal shows numbers with two decimals and thousands separators.
+          return this.isNumberNode(args[0]) ? `FormatNumber(${value}, 2)` : `CStr(${value})`;
+        }
+        if (/^-?\d+$/.test(second)) {
+          if (third === undefined) return `FormatNumber(${value}, ${second})`;
+          if (third === '""') return `FormatNumber(${value}, ${second}, , , TriState.False)`;
+          if (third !== '","') this.note(`formats a number with the thousands separator ${third}; SSRS uses the report's language`);
+          if (args.length > 3) this.note('sets a decimal separator in ToText; SSRS uses the report\'s language');
+          return `FormatNumber(${value}, ${second})`;
+        }
         return `Format(${value}, ${second})`;
       }
       case 'rgb':
@@ -1204,14 +1343,33 @@ export class Emitter {
         return `System.Uri.UnescapeDataString(CStr(${a()[0]}).Replace("+", " "))`;
       case 'urlencode':
         return `System.Uri.EscapeDataString(CStr(${a()[0]}))`;
-      case 'split':
-      case 'join': {
+      case 'truncate': {
+        const [x, n] = a();
+        return n === undefined ? `Fix(${x})` : `(Fix(${x} * 10 ^ ${n}) / 10 ^ ${n})`;
+      }
+      case 'round': {
+        // Crystal rounds halves away from zero (Math.Round would round them to even).
+        const [x, n] = a();
+        if (n === undefined) return `Math.Round(${x}, MidpointRounding.AwayFromZero)`;
+        const places = args[1].t === 'unary' && args[1].op === '-' ? this.emit(args[1].arg) : /^\(?-(\d+)\)?$/.exec(n)?.[1];
+        if (places !== undefined) return `(Math.Round(${x} / 10 ^ ${places}, MidpointRounding.AwayFromZero) * 10 ^ ${places})`;
+        return `Math.Round(${x}, ${n}, MidpointRounding.AwayFromZero)`;
+      }
+      case 'join':
+        if (args[0] && this.isMultiParameter(args[0])) {
+          // Parameter values are a 0-based array.
+          const [items, separator] = a();
+          return `Join(${items}, ${separator ?? '" "'})`;
+        }
+      // falls through
+      case 'split': {
         const helper = key === 'split' ? 'CrSplit' : 'CrJoin';
         this.helpers.add(helper);
         const [first, second] = a();
         return `${this.inCode ? '' : 'Code.'}${helper}(${first}, ${second ?? '" "'})`;
       }
       case 'ubound':
+        if (args[0] && this.isMultiParameter(args[0])) return `Parameters!${this.ctx.parameter((args[0] as { ref: string }).ref.slice(1))}.Count`;
         return `UBound(${a()[0]})`;
       case 'previous':
         return `Previous(${a()[0]})`;
@@ -1264,11 +1422,13 @@ class CodeWriter {
     const key = name.toLowerCase();
     const existing = this.emitter.variables.get(key);
     if (existing) return existing;
-    const vb = `v_${name.replace(/\W/g, '_')}`;
+    const prefix = scope === 'global' && this.emitter.ctx.memberPrefix ? this.emitter.ctx.memberPrefix.replace(/\W/g, '_') : '';
+    const vb = `v_${prefix}${name.replace(/\W/g, '_')}`;
     const info = { vb, vtype, array: array || range, range };
     this.emitter.variables.set(key, info);
-    const type = range ? 'Object' : VB_TYPES[vtype] ?? 'Object';
+    // Arrays are Object(): Split(), array literals and parameters all produce Object() values.
     array = array || range;
+    const type = array ? 'Object' : VB_TYPES[vtype] ?? 'Object';
     if (scope === 'local') this.declarations.push(`    Dim ${vb}${array ? '()' : ''} As ${type}${array ? '' : type === 'String' ? ' = ""' : ''}`);
     else this.emitter.members[vb] = array ? `${type}()` : type;
     return info;
@@ -1279,7 +1439,7 @@ class CodeWriter {
       const info = { vb: `p_${p.name.replace(/\W/g, '_')}`, vtype: p.vtype, array: p.array, range: p.range };
       this.emitter.variables.set(p.name.toLowerCase(), info);
       // A Crystal range is passed as a two-element array: (0) start, (1) end.
-      const type = p.range ? 'Object()' : `${VB_TYPES[p.vtype] ?? 'Object'}${p.array ? '()' : ''}`;
+      const type = p.range || p.array ? 'Object()' : VB_TYPES[p.vtype] ?? 'Object';
       const optional = p.optional ? ` = ${this.emitter.emit(p.optional)}` : '';
       return `${p.optional ? 'Optional ' : ''}ByVal ${info.vb} As ${type}${optional}`;
     });
@@ -1323,7 +1483,7 @@ class CodeWriter {
       case 'decl': {
         const info = this.declareVariable(stmt.name, stmt.vtype, stmt.array, stmt.scope, stmt.range);
         if (stmt.array && stmt.init?.t === 'array') {
-          this.lines.push(`${indent}${info.vb} = New ${VB_TYPES[stmt.vtype] ?? 'Object'}() {Nothing${stmt.init.items.map((x) => `, ${e(x)}`).join('')}}`);
+          this.lines.push(`${indent}${info.vb} = New Object() {Nothing${stmt.init.items.map((x) => `, ${e(x)}`).join('')}}`);
         } else if (stmt.init) {
           this.lines.push(`${indent}${info.vb} = ${e(stmt.init)}`);
         }
@@ -1397,8 +1557,13 @@ export function extractArguments(code: string): { code: string; args: string[] }
   const args: string[] = [];
   let out = '';
   let pos = 0;
+  // Spans of VB string literals ("..." with "" as an escaped quote): references inside them are text.
+  const strings: [number, number][] = [];
+  for (const lit of code.matchAll(/"(?:[^"]|"")*"/g)) strings.push([lit.index!, lit.index! + lit[0].length]);
+  const inString = (at: number) => strings.some(([from, to]) => at > from && at < to);
   ARGUMENT_REFERENCE.lastIndex = 0;
   for (let m = ARGUMENT_REFERENCE.exec(code); m; m = ARGUMENT_REFERENCE.exec(code)) {
+    if (inString(m.index)) continue;
     let end = m.index + m[0].length;
     if (m[0].endsWith('(')) {
       // Aggregate call: take through the matching parenthesis.
@@ -1467,6 +1632,33 @@ export interface SqlContext {
   parameter(name: string): string;
   /** For a range parameter: the SQL parameters holding its start and end. */
   parameterRange?(name: string): { start: string; end: string } | undefined;
+  /** Whether a parameter takes several values (SSRS expands it only inside IN (...)). */
+  parameterMultiple?(name: string): boolean;
+  /** Value type of a database field or parameter ("date", "dateTime", "string", ...), if known. */
+  columnType?(table: string, field: string): string | undefined;
+  parameterType?(name: string): string | undefined;
+}
+
+/** The text of a VB string literal expression ("a" & vbCrLf & "b"), or undefined if it is something else. */
+function vbLiteralText(vb: string): string | undefined {
+  const piece = /"(?:[^"]|"")*"|vbCrLf/y;
+  let out = '';
+  let pos = 0;
+  for (;;) {
+    piece.lastIndex = pos;
+    const m = piece.exec(vb);
+    if (!m) return undefined;
+    out += m[0] === 'vbCrLf' ? '\r\n' : m[0].slice(1, -1).replace(/""/g, '"');
+    pos = piece.lastIndex;
+    if (pos === vb.length) return out;
+    if (!vb.startsWith(' & ', pos)) return undefined;
+    pos += 3;
+  }
+}
+
+/** A Crystal LIKE pattern (* and ?) as a T-SQL LIKE pattern, with SQL's own wildcards taken literally. */
+function sqlLikePattern(pattern: string): string {
+  return pattern.replace(/[[%_]/g, (c) => `[${c}]`).replace(/\*/g, '%').replace(/\?/g, '_');
 }
 
 const sqlString = (value: string) => `'${value.replace(/'/g, "''")}'`;
@@ -1489,12 +1681,34 @@ export function translateToSql(source: string, ctx: SqlContext): string | undefi
   const fail = (): never => {
     throw new Error('unsupported');
   };
+  const DATE_TYPES = ['date', 'dateTime'];
+  const isMulti = (node: Node) => node.t === 'field' && node.ref.startsWith('?') && ctx.parameterMultiple?.(node.ref.slice(1)) === true;
+  /** Whether an expression is a date (Crystal adds days to dates with + and -). */
+  const isDate = (node: Node): boolean => {
+    switch (node.t) {
+      case 'literal':
+        return node.vb.startsWith('CDate(');
+      case 'name':
+        return ['currentdate', 'today', 'currentdatetime'].includes(node.name.toLowerCase());
+      case 'field': {
+        if (node.ref.startsWith('?')) return DATE_TYPES.includes(ctx.parameterType?.(node.ref.slice(1)) ?? '');
+        const dot = node.ref.lastIndexOf('.');
+        return dot > 0 && DATE_TYPES.includes(ctx.columnType?.(node.ref.slice(0, dot), node.ref.slice(dot + 1)) ?? '');
+      }
+      case 'call':
+        return ['date', 'cdate', 'datetime'].includes(node.name.toLowerCase());
+      case 'binary':
+        return (node.op === '+' || node.op === '-') && isDate(node.left) !== isDate(node.right);
+      default:
+        return false;
+    }
+  };
   const value = (node: Node): string => {
     switch (node.t) {
       case 'literal': {
         if (/^-?[\d.]+$/.test(node.vb)) return node.vb;
-        const str = /^"(.*)"$/s.exec(node.vb);
-        if (str) return sqlString(str[1].replace(/""/g, '"'));
+        const text = vbLiteralText(node.vb);
+        if (text !== undefined) return sqlString(text);
         const date = /^CDate\("(.*)"\)$/.exec(node.vb);
         if (date) return sqlString(date[1]);
         return fail();
@@ -1514,7 +1728,18 @@ export function translateToSql(source: string, ctx: SqlContext): string | undefi
       case 'unary':
         return node.op === '-' ? `-(${value(node.arg)})` : fail();
       case 'binary': {
-        const ops: Record<string, string> = { '+': '+', '-': '-', '*': '*', '/': '/' };
+        const leftDate = isDate(node.left);
+        const rightDate = isDate(node.right);
+        if (node.op === '-' && leftDate && rightDate) return `DATEDIFF(day, ${value(node.right)}, ${value(node.left)})`;
+        if ((node.op === '+' || node.op === '-') && leftDate !== rightDate) {
+          // A date plus or minus a number of days.
+          if (rightDate && node.op === '-') return fail();
+          const [date, days] = leftDate ? [node.left, node.right] : [node.right, node.left];
+          return `DATEADD(day, ${node.op === '-' ? '-' : ''}(${value(days)}), ${value(date)})`;
+        }
+        // Crystal divides as decimals; T-SQL would divide two integers as integers.
+        if (node.op === '/') return `(${value(node.left)} * 1.0 / ${value(node.right)})`;
+        const ops: Record<string, string> = { '+': '+', '-': '-', '*': '*' };
         return ops[node.op] ? `(${value(node.left)} ${ops[node.op]} ${value(node.right)})` : fail();
       }
       case 'call': {
@@ -1540,18 +1765,29 @@ export function translateToSql(source: string, ctx: SqlContext): string | undefi
           const param = node.right.t === 'field' && node.right.ref.startsWith('?') ? node.right.ref.slice(1) : undefined;
           const range = param !== undefined ? ctx.parameterRange?.(param) : undefined;
           if (range) return `${value(node.left)} ${node.op === '=' ? '' : 'NOT '}BETWEEN ${range.start} AND ${range.end}`;
+          // SSRS expands a multi-value parameter into a list only inside IN (...).
+          const [one, many] = isMulti(node.right) ? [node.left, node.right] : isMulti(node.left) ? [node.right, node.left] : [];
+          if (one && many) return `${value(one)} ${node.op === '=' ? 'IN' : 'NOT IN'} (${value(many)})`;
         }
+        if (isMulti(node.left) || isMulti(node.right)) return fail();
         if (['=', '<>', '<', '>', '<=', '>='].includes(node.op)) return `${value(node.left)} ${node.op} ${value(node.right)}`;
-        if (node.op === 'startswith') return `${value(node.left)} LIKE ${value(node.right)} + '%'`;
+        if (node.op === 'startswith') {
+          const text = node.right.t === 'literal' ? vbLiteralText(node.right.vb) : undefined;
+          if (text !== undefined) return `${value(node.left)} LIKE ${sqlString(`${text.replace(/[[%_]/g, (c) => `[${c}]`)}%`)}`;
+          // A parameter or field: escape SQL's wildcards in its value.
+          const prefix = value(node.right);
+          return `${value(node.left)} LIKE REPLACE(REPLACE(REPLACE(${prefix}, '[', '[[]'), '%', '[%]'), '_', '[_]') + '%'`;
+        }
         if (node.op === 'like' && node.right.t === 'literal') {
-          const pattern = /^"(.*)"$/s.exec(node.right.vb)?.[1] ?? fail();
-          return `${value(node.left)} LIKE ${sqlString(pattern.replace(/\*/g, '%').replace(/\?/g, '_'))}`;
+          const pattern = vbLiteralText(node.right.vb) ?? fail();
+          return `${value(node.left)} LIKE ${sqlString(sqlLikePattern(pattern))}`;
         }
         return fail();
       }
       case 'unary':
         return node.op === 'not' ? `NOT (${condition(node.arg)})` : fail();
       case 'in':
+        if (node.list.length === 0) return node.negate ? '1 = 1' : '1 = 0';
         return `${value(node.value)} ${node.negate ? 'NOT IN' : 'IN'} (${node.list.map(value).join(', ')})`;
       case 'range':
         return `${value(node.value)} ${node.negate ? 'NOT BETWEEN' : 'BETWEEN'} ${value(node.from)} AND ${value(node.to)}`;
@@ -1560,6 +1796,7 @@ export function translateToSql(source: string, ctx: SqlContext): string | undefi
         if (node.name === '$inRange' && node.args[1].t === 'field' && node.args[1].ref.startsWith('?')) {
           const range = ctx.parameterRange?.(node.args[1].ref.slice(1));
           if (range) return `${value(node.args[0])} BETWEEN ${range.start} AND ${range.end}`;
+          if (isMulti(node.args[1])) return `${value(node.args[0])} IN (${value(node.args[1])})`;
         }
         if (node.name === '$inRange' && node.args[1].t === 'name') {
           const named = NAMED_DATE_RANGES[node.args[1].name.toLowerCase()];

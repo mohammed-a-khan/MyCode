@@ -89,6 +89,8 @@ export function parsePropertySet(bytes: Uint8Array, streamName: string): Propert
     const readValue = (off: number, vt: number): [PropertyValue, number] => {
       if (vt & VT_VECTOR) {
         const count = view.getUint32(off, true);
+        // Every item takes at least one byte, except empty ones: a count beyond the data is corrupt.
+        if (count > bytes.length - off - 4) throw new Error(`property vector of ${count} items exceeds the property data`);
         const items: PropertyValue[] = [];
         let pos = off + 4;
         for (let i = 0; i < count; i++) {

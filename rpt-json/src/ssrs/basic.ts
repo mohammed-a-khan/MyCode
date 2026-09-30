@@ -8,7 +8,7 @@
  * of the generated function, as for Crystal syntax formulas.
  */
 
-import { customCodeNote, Emitter, extractArguments, NAMES, type FormulaContext, type Node, type Translation } from './formula.ts';
+import { customCodeNote, Emitter, extractArguments, NAMES, vbString, type FormulaContext, type Node, type Translation } from './formula.ts';
 
 type BasicToken =
   | { k: 'nl' }
@@ -47,6 +47,7 @@ const VB_FUNCTIONS = new Set([
 export function isBasicSyntax(source: string): boolean {
   const code = source.replace(/^\s*(?:'|rem\b).*$/gim, '');
   return /^\s*formula\s*=/im.test(code)
+    || /\b(?:then|else)\s+formula\s*=/i.test(code)
     || /^\s*(?:dim|global|shared|local)\s+\w+\s*(?:\(\s*\))?\s+as\s+\w+/im.test(code)
     || /^\s*function\s+\w+\s*\(/im.test(code)
     || /^\s*end\s+(?:if|select|function)\b/im.test(code);
@@ -337,9 +338,16 @@ class BasicTranslator {
       const token = st[i++];
       if (token?.k !== 'id') throw new Error('expected a variable name');
       let array = false;
+      let size: BasicToken[] | undefined;
       if (isOp(st[i], '(') && isOp(st[i + 1], ')')) {
         array = true;
         i += 2;
+      } else if (isOp(st[i], '(')) {
+        // Dim a(5): an array with that upper bound.
+        const close = this.matchingParen(st, i);
+        size = st.slice(i + 1, close);
+        array = true;
+        i = close + 1;
       }
       let type = 'Object';
       if (isId(st[i], 'as')) {
@@ -359,6 +367,7 @@ class BasicTranslator {
         if (shared) this.emitter.members[vb] = vbType;
         else this.declarations.push(`    Dim ${vb}${array ? '()' : ''} As ${array ? 'Object' : type}${!array && type === 'String' ? ' = ""' : ''}`);
       }
+      if (size) this.emitLine(`ReDim ${vb}(${this.expression(size)})`);
       if (isOp(st[i], '=')) {
         const end = this.findTopLevel(st, i + 1, [',']);
         this.emitLine(`${vb} = ${this.expression(st.slice(i + 1, end))}`);
@@ -376,7 +385,7 @@ class BasicTranslator {
       const t = tokens[i];
       let text: string;
       if (t.k === 'str') {
-        text = `"${t.v.replace(/"/g, '""')}"`;
+        text = vbString(t.v);
       } else if (t.k === 'num') {
         text = t.v;
       } else if (t.k === 'date') {

@@ -24,6 +24,7 @@ import type {
   SectionInfo,
   TableInfo,
 } from '../crystal/model.ts';
+import { classifyAreas } from '../crystal/areas.ts';
 import { CODE_HELPERS, SPECIAL_FIELDS, translateFormula, translateToSql, vbString, type FormulaContext, type Translation } from './formula.ts';
 import { el, toXml, type XmlElement } from './xml.ts';
 
@@ -69,6 +70,9 @@ interface ParameterEntry {
   prompt: string;
   multiple: boolean;
   nullable: boolean;
+  /** Default value from the first row of a dataset field; with hidden, the parameter is not prompted. */
+  defaultFrom?: { dataset: string; field: string };
+  hidden?: boolean;
 }
 
 export interface SubreportInfo {
@@ -228,6 +232,8 @@ class RdlBuilder {
     this.dataset = options.inline?.dataset ?? DATASET;
     this.datasetNames.make(DATASET);
     if (options.inline) {
+      // Global (not Shared) variables stay separate per placed copy of a subreport.
+      this.formulaContext.memberPrefix = `${options.inline.dataset}_`;
       // Item, image and code names must be unique across the report the items are placed in.
       this.itemNames = options.inline.itemNames;
       this.imageNames = options.inline.imageNames;
@@ -412,7 +418,7 @@ class RdlBuilder {
   }
 
   /** A formatting-condition formula (by name and position in the formula list), translated for a property. */
-  private conditionExpression(ref: FormulaRef, colors: boolean, item: string): string | undefined {
+  private conditionExpression(ref: FormulaRef, colors: boolean, item: string, scope: Scope = 'row'): string | undefined {
     const text = this.definition.formulaTexts?.[ref.index] ?? this.definition.formulas.find((f) => f.index === ref.index)?.text;
     if (!text?.trim()) {
       // An empty formatting formula sets nothing, as in Crystal.
@@ -423,7 +429,9 @@ class RdlBuilder {
     const t = translateFormula(formula.text, this.formulaContext, { colors, codeName: this.codeNames.make(`C_${ref.name}_${ref.index}`) });
     this.addCode(t);
     for (const issue of t.issues) this.note(`${item}: formula ${ref.name}`, issue);
-    return t.expression === '=Nothing' ? undefined : t.expression;
+    if (t.expression === '=Nothing') return undefined;
+    // Outside the table, fields need a dataset scope.
+    return scope === 'row' ? t.expression : `=${scopeOutsideRegion(t.expression.slice(1), this.dataset)}`;
   }
 
   private runningTotalExpression(name: string, item: string): string | undefined {
@@ -515,8 +523,9 @@ class RdlBuilder {
 
   /** Outside a data region, field references must be wrapped in an aggregate with a dataset scope. */
   private scoped(expression: string, scope: Scope): string {
-    if (scope === 'row' || !expression.includes('Fields!') || AGGREGATE_CALL.test(expression)) return expression;
-    return `First(${expression}, ${vbString(this.dataset)})`;
+    if (scope === 'row' || !expression.includes('Fields!')) return expression;
+    if (!AGGREGATE_CALL.test(expression)) return `First(${expression}, ${vbString(this.dataset)})`;
+    return scopeOutsideRegion(expression, this.dataset);
   }
 
   private objectValue(obj: ReportObject, scope: Scope): { value: string; format?: string } {
@@ -533,7 +542,8 @@ class RdlBuilder {
         const parts = runs.map((r) => ('field' in r ? this.fieldObjectValue(r.field, scope, item).expression : vbString(r.text.replace(/\t+/g, '    '))));
         return { value: `=${parts.join(' & ')}` };
       }
-      return { value: text.startsWith('=') ? `=${vbString(text)}` : text };
+      // Multi-line text becomes an expression so each line break is kept (vbCrLf).
+      return { value: text.startsWith('=') || text.includes('\n') ? `=${vbString(text)}` : text };
     }
     return { value: '' };
   }
@@ -544,8 +554,7 @@ class RdlBuilder {
     const style = obj?.style;
     let colorValue: string | undefined = style?.color;
     if (obj?.conditions?.fontColor) {
-      colorValue = this.conditionExpression(obj.conditions.fontColor, true, `${obj.kind} object "${obj.name}"`) ?? colorValue;
-      if (scope === 'page' && colorValue?.includes('Fields!')) this.note(`${obj.kind} object "${obj.name}"`, 'its colour formula uses fields, which the page header/footer cannot read');
+      colorValue = this.conditionExpression(obj.conditions.fontColor, true, `${obj.kind} object "${obj.name}"`, scope) ?? colorValue;
     }
     return el('Style',
       style?.italic ? el('FontStyle', 'Italic') : null,
@@ -590,10 +599,10 @@ class RdlBuilder {
   private textbox(name: string, value: string, obj: ReportObject | undefined, format: string | undefined, scope: Scope, box?: Box, hidden?: string, lines: { top?: boolean; bottom?: boolean } = {}): XmlElement {
     const item = obj ? `${obj.kind} object "${obj.name}"` : name;
     const conditions = obj?.conditions ?? {};
-    const hyperlink = conditions.hyperlink ? this.conditionExpression(conditions.hyperlink, false, item) : undefined;
-    const toolTip = conditions.toolTip ? this.conditionExpression(conditions.toolTip, false, item) : undefined;
-    const backColor = conditions.backColor ? this.conditionExpression(conditions.backColor, true, item) : undefined;
-    const suppress = conditions.suppress ? this.conditionExpression(conditions.suppress, false, item) : undefined;
+    const hyperlink = conditions.hyperlink ? this.conditionExpression(conditions.hyperlink, false, item, scope) : undefined;
+    const toolTip = conditions.toolTip ? this.conditionExpression(conditions.toolTip, false, item, scope) : undefined;
+    const backColor = conditions.backColor ? this.conditionExpression(conditions.backColor, true, item, scope) : undefined;
+    const suppress = conditions.suppress ? this.conditionExpression(conditions.suppress, false, item, scope) : undefined;
     for (const key of Object.keys(conditions)) {
       if (!['fontColor', 'hyperlink', 'toolTip', 'backColor', 'suppress'].includes(key)) this.note(item, `formatting formula ${conditions[key].name} is not converted; set it on the text box manually`);
     }
@@ -627,11 +636,13 @@ class RdlBuilder {
 
   /** Places a section's objects at their positions starting at `top`; returns items and the block height. */
   private placeSection(section: SectionInfo, top: number, scope: Scope, area: string): { items: XmlElement[]; height: number } {
-    const hidden = section.conditions?.suppress ? this.conditionExpression(section.conditions.suppress, false, `Section ${section.name}`) : undefined;
+    const hidden = section.conditions?.suppress ? this.conditionExpression(section.conditions.suppress, false, `Section ${section.name}`, scope) : undefined;
     if (hidden) this.note(`Section ${section.name}`, 'its suppress condition was applied to each item as a Hidden expression');
     const items: XmlElement[] = [];
     let bottom = 0;
-    for (const obj of section.objects) {
+    // Boxes first: SSRS draws items in document order, so they stay behind the text as in Crystal.
+    const ordered = [...section.objects.filter((o) => o.kind === 'box'), ...section.objects.filter((o) => o.kind !== 'box')];
+    for (const obj of ordered) {
       const box = this.boxOf(obj, top);
       if (obj.kind === 'subreport' && scope === 'page') {
         // SSRS allows no subreport in a page header/footer: its content is placed there directly.
@@ -677,8 +688,20 @@ class RdlBuilder {
     }
     this.extraDataSets.push(result.dataset(dataSource));
     for (const p of result.parameters) {
-      if (!this.extraParameters.some((x) => x.name.toLowerCase() === p.name.toLowerCase())) this.extraParameters.push(p);
+      // A linked subreport's "Pm-Table.Field" parameter takes the main report's field, unprompted.
+      const link = info.links.find((l) => l.parameter.toLowerCase() === p.name.toLowerCase());
+      const dot = link ? link.field.lastIndexOf('.') : -1;
+      const linkedField = link && dot > 0 ? this.lookupField(link.field.slice(0, dot), link.field.slice(dot + 1)) : undefined;
+      if (link && !linkedField) this.note(item, `its link parameter ${p.name} (from ${link.field}) needs a value; set its default manually`);
+      const entry = linkedField ? { ...p, defaultFrom: { dataset: this.dataset, field: linkedField.name }, hidden: true } : p;
+      const existing = this.extraParameters.find((x) => x.name.toLowerCase() === p.name.toLowerCase());
+      const main = this.definition.parameters.find((x) => this.parameterName(x.name).toLowerCase() === p.name.toLowerCase());
+      if (main && PARAMETER_TYPES[main.valueType ?? 'string'] !== p.type) {
+        this.note(item, `its parameter ${p.name} has type ${p.type}, the main report's parameter of that name has another type; the main report's is used`);
+      }
+      if (!existing) this.extraParameters.push(entry);
     }
+    if (info.links.length) this.note(item, 'is linked to the main report: its link parameters take the first row\'s values of the linked fields');
     for (const code of result.codeFunctions) if (!this.codeFunctions.includes(code)) this.codeFunctions.push(code);
     // Crystal shared variables are shared with subreports: same-named class members are the same variable.
     Object.assign(this.codeMembers, result.codeMembers);
@@ -725,7 +748,6 @@ class RdlBuilder {
         return el('Rectangle', { Name: name() },
           el('KeepTogether', 'true'),
           el('Top', inches(box.top)), el('Left', inches(box.left)), el('Height', inches(box.height)), el('Width', inches(box.width)),
-          el('ZIndex', '-1'),
           visibility,
           el('Style', ...this.borderStyle(obj.border)));
       case 'picture':
@@ -745,8 +767,21 @@ class RdlBuilder {
         for (const name of info.parameters ?? []) {
           const main = this.definition.parameters.find((p) => p.name.toLowerCase() === name.toLowerCase());
           if (!main || /^Pm-/i.test(name)) continue;
-          parameters.push(el('Parameter', { Name: sanitizeName(name.replace(/^[@?]/, '')) },
-            el('Value', `=Parameters!${this.parameterName(main.name)}.Value`)));
+          const own = sanitizeName(name.replace(/^[@?]/, ''));
+          // A range parameter is two SSRS parameters (_Start and _End), on either side.
+          const mainRange = this.parameterRange(main.name);
+          const subRange = info.definition?.parameters.find((p) => p.name.toLowerCase() === name.toLowerCase())?.allowRange === true;
+          const mainValue = `=Parameters!${this.parameterName(main.name)}.Value`;
+          if (subRange) {
+            parameters.push(
+              el('Parameter', { Name: `${own}_Start` }, el('Value', mainRange ? `=Parameters!${mainRange.start}.Value` : mainValue)),
+              el('Parameter', { Name: `${own}_End` }, el('Value', mainRange ? `=Parameters!${mainRange.end}.Value` : mainValue)));
+          } else if (mainRange) {
+            this.note(item, `receives parameter ${main.name}, a range in the main report; its start value was passed`);
+            parameters.push(el('Parameter', { Name: own }, el('Value', `=Parameters!${mainRange.start}.Value`)));
+          } else {
+            parameters.push(el('Parameter', { Name: own }, el('Value', mainValue)));
+          }
         }
         if (info.links.length && scope !== 'row') this.note(item, 'is linked to the main report but sits outside the table; it receives the first record\'s values');
         if (obj.subreport?.onDemand) this.note(item, 'was an on-demand subreport in Crystal; consider a drillthrough action instead');
@@ -758,9 +793,13 @@ class RdlBuilder {
           el('Style', el('Border', el('Style', 'None'))));
       }
       case 'crossTab':
-        return this.matrix(obj, box, item);
       case 'chart':
-        return this.chart(obj, box, item);
+        if (scope === 'page') {
+          // SSRS allows no data regions (tables, matrices, charts) in a page header or footer.
+          this.note(item, 'SSRS allows no charts or cross-tabs in a page header or footer; it was left out, place it in the report body');
+          return null;
+        }
+        return obj.kind === 'chart' ? this.chart(obj, box, item) : this.matrix(obj, box, item);
       default:
         this.note(item, 'this object type is not converted');
         return null;
@@ -1016,7 +1055,7 @@ class RdlBuilder {
   }
 
   /** Crystal Top N with an "Others" group: ranks groups in SQL (direct table access only). */
-  private othersGroup?: { level: number; rank: string; total: string; column: DatasetField; group: DatasetField; operation: string; descending: boolean; topN: number; label: string };
+  private othersGroup?: { level: number; rank: string; total: string; column: DatasetField; group: DatasetField; outer: DatasetField[]; operation: string; descending: boolean; topN: number; label: string };
 
   private planOthersGroup(level: number, summaryRef: string, descending: boolean, topN: number, label: string): string | undefined {
     if (this.source.tables.some((t) => t.kind !== 'table')) return undefined;
@@ -1030,8 +1069,14 @@ class RdlBuilder {
     const gdot = groupRef.lastIndexOf('.');
     const group = gdot > 0 ? this.lookupField(groupRef.slice(0, gdot), groupRef.slice(gdot + 1)) : undefined;
     if (!sqlOperation || !column || !group) return undefined;
+    // An inner group ranks within each value of the groups around it.
+    const outer = this.groupFields.slice(0, level - 1).map((ref) => {
+      const d = ref.lastIndexOf('.');
+      return d > 0 ? this.lookupField(ref.slice(0, d), ref.slice(d + 1)) : undefined;
+    });
+    if (outer.some((f) => !f)) return undefined;
     this.othersGroup = {
-      level, column, group, descending, topN, label,
+      level, column, group, descending, topN, label, outer: outer as DatasetField[],
       operation: sqlOperation,
       rank: this.fieldNames.make(`Group${level}_Rank`),
       total: this.fieldNames.make(`Group${level}_Total`),
@@ -1249,7 +1294,7 @@ class RdlBuilder {
     if (commands.length > 0) {
       // Crystal substitutes {?param} into the command text; SQL Server takes them as @param query parameters.
       const used = new Set<string>();
-      const text = (commands[0].sql ?? '').replace(/'?\{\?([^}]+)\}'?/g, (_, name: string) => {
+      const text = substituteCommandParameters(commands[0].sql ?? '', (name) => {
         used.add(name);
         return `@${this.parameterName(name)}`;
       });
@@ -1272,7 +1317,7 @@ class RdlBuilder {
       }
       return {
         commandType: 'StoredProcedure',
-        text: procedure.schema ? `${this.quote(procedure.schema)}.${this.quote(name)}` : name,
+        text: procedure.schema ? `${this.quote(procedure.schema)}.${this.quote(name)}` : this.quote(name),
         parameters,
         fieldsFromAll: true,
       };
@@ -1351,9 +1396,11 @@ class RdlBuilder {
     if (others) {
       // Rank each group by its summary; groups beyond Top N are shown together as "Others".
       const column = `${this.quote(others.column.table)}.${this.quote(others.column.column)}`;
-      const group = `${this.quote(others.group.table)}.${this.quote(others.group.column)}`;
-      text = `SELECT\n${select},\n  ${others.operation}(${column}) OVER (PARTITION BY ${group}) AS ${this.quote(others.total)}\n${from.join('\n')}${where ? `\nWHERE ${where.sql}` : ''}`;
-      text = `SELECT q.*,\n  DENSE_RANK() OVER (ORDER BY q.${this.quote(others.total)} ${others.descending ? 'DESC' : 'ASC'}, q.${this.quote(others.group.name)}) AS ${this.quote(others.rank)}\nFROM (\n${text}\n) AS q`;
+      const columnOf = (f: DatasetField) => `${this.quote(f.table)}.${this.quote(f.column)}`;
+      const partition = [...others.outer, others.group].map(columnOf).join(', ');
+      const outerPartition = others.outer.length ? `PARTITION BY ${others.outer.map((f) => `q.${this.quote(f.name)}`).join(', ')} ` : '';
+      text = `SELECT\n${select},\n  ${others.operation}(${column}) OVER (PARTITION BY ${partition}) AS ${this.quote(others.total)}\n${from.join('\n')}${where ? `\nWHERE ${where.sql}` : ''}`;
+      text = `SELECT q.*,\n  DENSE_RANK() OVER (${outerPartition}ORDER BY q.${this.quote(others.total)} ${others.descending ? 'DESC' : 'ASC'}, q.${this.quote(others.group.name)}) AS ${this.quote(others.rank)}\nFROM (\n${text}\n) AS q`;
     }
     return {
       text,
@@ -1379,6 +1426,9 @@ class RdlBuilder {
         const f = this.fields.get(fieldKey(table, field));
         return f ? `${this.quote(f.table)}.${this.quote(f.column)}` : undefined;
       },
+      columnType: (table, field) => this.fields.get(fieldKey(table, field))?.type,
+      parameterType: (name) => this.parameterInfo(name)?.valueType,
+      parameterMultiple: (name) => this.parameterInfo(name)?.allowMultiple === true && !this.parameterRange(name),
       parameter: (name) => {
         used.add(name);
         return `@${this.parameterName(name)}`;
@@ -1417,46 +1467,9 @@ class RdlBuilder {
   // ---- layout classification -------------------------------------------------------------
 
   private classify(layout: AreaInfo[]): Classified {
-    const result: Classified = {
-      pageHeader: [], pageFooter: [], reportHeader: [], reportFooter: [], detail: [],
-      groupHeaders: new Map(), groupFooters: new Map(), columnHeadings: [],
-    };
-    // Crystal stores areas in a fixed order: page header, page footer, report header, report footer,
-    // one group header/footer pair per group (outermost first), details, then an empty end marker.
-    // Using the order keeps areas the report designer renamed (e.g. "Area2").
-    // A subreport has no page header/footer areas, so its order starts at the report header.
-    const real = layout.filter((a) => a.sections.length > 0);
-    const fixed = this.options.subreport ? 3 : 5;
-    const first = fixed - 3;
-    const groups = (real.length - fixed) / 2;
-    if (real.length >= fixed && Number.isInteger(groups)) {
-      if (!this.options.subreport) {
-        result.pageHeader.push(...real[0].sections);
-        result.pageFooter.push(...real[1].sections);
-      }
-      result.reportHeader.push(...real[first].sections);
-      result.reportFooter.push(...real[first + 1].sections);
-      for (let i = 0; i < groups; i++) {
-        result.groupHeaders.set(i + 1, real[first + 2 + i * 2].sections);
-        result.groupFooters.set(groups - i, real[first + 3 + i * 2].sections);
-      }
-      result.detail.push(...real[real.length - 1].sections);
-      return result;
-    }
-    let groupHeaderCount = 0;
-    let groupFooterCount = 0;
-    for (const area of layout) {
-      const level = Number(/(\d+)$/.exec(area.name)?.[1] ?? 0);
-      if (/^PageHeader/i.test(area.name)) result.pageHeader.push(...area.sections);
-      else if (/^PageFooter/i.test(area.name)) result.pageFooter.push(...area.sections);
-      else if (/^ReportHeader/i.test(area.name)) result.reportHeader.push(...area.sections);
-      else if (/^ReportFooter/i.test(area.name)) result.reportFooter.push(...area.sections);
-      else if (/^GroupHeader/i.test(area.name)) result.groupHeaders.set(level || ++groupHeaderCount, area.sections);
-      else if (/^GroupFooter/i.test(area.name)) result.groupFooters.set(level || ++groupFooterCount, area.sections);
-      else if (/^Detail/i.test(area.name) && area.sections.length > 0) result.detail.push(...area.sections);
-      else if (area.sections.some((s) => s.objects.length > 0)) this.note(`Area "${area.name}"`, 'unrecognised area; its objects were not converted');
-    }
-    return result;
+    const { unrecognised, ...areas } = classifyAreas(layout, this.options.subreport);
+    for (const area of unrecognised) this.note(`Area "${area.name}"`, 'unrecognised area; its objects were not converted');
+    return { ...areas, columnHeadings: [] };
   }
 
   // ---- report ---------------------------------------------------------------------------
@@ -1628,7 +1641,9 @@ class RdlBuilder {
     const parameters = parameterList.map((p) => el('ReportParameter', { Name: p.name },
       el('DataType', p.type),
       p.nullable ? el('Nullable', 'true') : null,
+      p.defaultFrom ? el('DefaultValue', el('DataSetReference', el('DataSetName', p.defaultFrom.dataset), el('ValueField', p.defaultFrom.field))) : null,
       el('Prompt', p.prompt),
+      p.hidden ? el('Hidden', 'true') : null,
       p.multiple ? el('MultiValue', 'true') : null));
 
     const report = el('Report', { MustUnderstand: 'df', xmlns: RDL_NS, 'xmlns:rd': RD_NS, 'xmlns:df': `${RDL_NS}/defaultfontfamily` },
@@ -1680,6 +1695,82 @@ class RdlBuilder {
     const inlinedOnly = [...this.inlinedSubreports].filter((n) => !this.referencedSubreports.has(n));
     return { rdl: toXml(report), review: this.review, ...(inlinedOnly.length ? { inlinedOnly } : {}) };
   }
+}
+
+const SCOPED_AGGREGATES = ['Sum', 'Count', 'Avg', 'Max', 'Min', 'CountDistinct', 'StDev', 'StDevP', 'Var', 'VarP', 'First', 'Last'];
+
+/**
+ * An expression for a place outside any data region (page header/footer, items outside the table): bare
+ * field references read the dataset's first row, and aggregates without a scope get the dataset as scope.
+ * Text inside string literals is left alone.
+ */
+export function scopeOutsideRegion(expression: string, dataset: string): string {
+  const scopeArg = vbString(dataset);
+  let out = '';
+  let i = 0;
+  const skipString = (from: number) => {
+    let j = from + 1;
+    while (j < expression.length && !(expression[j] === '"' && expression[j + 1] !== '"')) j += expression[j] === '"' ? 2 : 1;
+    return j + 1;
+  };
+  while (i < expression.length) {
+    const c = expression[i];
+    if (c === '"') {
+      const end = skipString(i);
+      out += expression.slice(i, end);
+      i = end;
+      continue;
+    }
+    const aggregate = /^([A-Za-z]+)\(/.exec(expression.slice(i));
+    if (aggregate && SCOPED_AGGREGATES.includes(aggregate[1]) && (i === 0 || !/[\w.!]/.test(expression[i - 1]))) {
+      // Find the matching parenthesis and whether there is a top-level comma (a scope argument).
+      let depth = 0;
+      let j = i + aggregate[1].length;
+      let hasScope = false;
+      for (; j < expression.length; j++) {
+        const ch = expression[j];
+        if (ch === '"') { j = skipString(j) - 1; continue; }
+        if (ch === '(') depth++;
+        else if (ch === ')' && --depth === 0) break;
+        else if (ch === ',' && depth === 1) hasScope = true;
+      }
+      const call = expression.slice(i, j);
+      out += hasScope ? `${call})` : `${call}, ${scopeArg})`;
+      i = j + 1;
+      continue;
+    }
+    const field = /^Fields!\w+\.Value/.exec(expression.slice(i));
+    if (field && (i === 0 || !/[\w.!]/.test(expression[i - 1]))) {
+      out += `First(${field[0]}, ${scopeArg})`;
+      i += field[0].length;
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
+/**
+ * Replaces Crystal's {?param} in SQL command text with query parameters. Inside a string literal the literal
+ * is split around it ('%{?p}%' becomes '%' + @p + '%'), so the value is still used, not the text "@p".
+ */
+export function substituteCommandParameters(sql: string, parameter: (name: string) => string): string {
+  const reference = /\{\?([^}]+)\}/g;
+  return sql.replace(/'(?:[^']|'')*'|[^']+/g, (part) => {
+    if (!part.startsWith("'") || !reference.test(part)) return part.replace(reference, (_, name: string) => parameter(name));
+    reference.lastIndex = 0;
+    const inner = part.slice(1, -1);
+    const pieces: string[] = [];
+    let last = 0;
+    for (const m of inner.matchAll(reference)) {
+      if (m.index! > last) pieces.push(`'${inner.slice(last, m.index)}'`);
+      pieces.push(parameter(m[1]));
+      last = m.index! + m[0].length;
+    }
+    if (last < inner.length) pieces.push(`'${inner.slice(last)}'`);
+    return pieces.join(' + ');
+  });
 }
 
 /** A Crystal custom function: "Function (...)" after any leading comments. */
