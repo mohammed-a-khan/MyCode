@@ -94,19 +94,27 @@ export function readCfb(bytes: Uint8Array): CfbDocument {
   if (numFatSectors > 0 && fatSectorIds.length > numFatSectors) fatSectorIds.length = numFatSectors;
   const fat = fatSectorIds.flatMap((id) => sectorIds(sector(id)));
 
-  const chain = (start: number, table: number[], what: string): number[] => {
+  // Sectors already used by a chain: two streams must never share one (a crafted file could make
+  // hundreds of streams point at one huge chain and exhaust memory).
+  const claimed = new Map<number[], Set<number>>();
+  const chain = (start: number, table: number[], what: string, maxSectors = Infinity): number[] => {
     const ids: number[] = [];
     const seen = new Set<number>();
-    for (let id = start; id !== ENDOFCHAIN && id !== FREESECT; id = table[id]) {
+    let used = claimed.get(table);
+    if (!used) claimed.set(table, (used = new Set<number>()));
+    for (let id = start; id !== ENDOFCHAIN && id !== FREESECT && ids.length < maxSectors; id = table[id]) {
       if (id > MAXREGSECT || id >= table.length) throw new CfbError(`Broken sector chain in ${what} (sector ${id})`);
       if (seen.has(id)) throw new CfbError(`Loop detected in sector chain of ${what}`);
+      if (used.has(id)) throw new CfbError(`Sector ${id} of ${what} is also used by another stream`);
       seen.add(id);
       ids.push(id);
     }
+    for (const id of ids) used.add(id);
     return ids;
   };
-  const readChain = (start: number, what: string): Uint8Array => {
-    const ids = chain(start, fat, what);
+  const readChain = (start: number, what: string, size?: number): Uint8Array => {
+    // Only the sectors the declared size needs are read.
+    const ids = chain(start, fat, what, size === undefined ? Infinity : Math.ceil(size / sectorSize));
     const out = new Uint8Array(ids.length * sectorSize);
     ids.forEach((id, i) => out.set(sector(id), i * sectorSize));
     return out;
@@ -145,13 +153,13 @@ export function readCfb(bytes: Uint8Array): CfbDocument {
 
   // 3. Mini stream (lives in the root entry's chain) and its allocation table.
   const miniFat = firstMiniFatSector <= MAXREGSECT ? sectorIds(readChain(firstMiniFatSector, 'mini FAT')) : [];
-  const miniStream = readChain(rootEntry.startSector, 'mini stream').subarray(0, rootEntry.size);
+  const miniStream = readChain(rootEntry.startSector, 'mini stream', rootEntry.size).subarray(0, rootEntry.size);
 
   const streamData = (entry: RawEntry): Uint8Array => {
     if (entry.size === 0) return new Uint8Array(0);
     let data: Uint8Array;
     if (entry.size < miniStreamCutoff) {
-      const ids = chain(entry.startSector, miniFat, `stream "${entry.name}"`);
+      const ids = chain(entry.startSector, miniFat, `stream "${entry.name}"`, Math.ceil(entry.size / MINI_SECTOR_SIZE));
       data = new Uint8Array(ids.length * MINI_SECTOR_SIZE);
       ids.forEach((id, i) => {
         const start = id * MINI_SECTOR_SIZE;
@@ -161,7 +169,7 @@ export function readCfb(bytes: Uint8Array): CfbDocument {
         data.set(miniStream.subarray(start, start + MINI_SECTOR_SIZE), i * MINI_SECTOR_SIZE);
       });
     } else {
-      data = readChain(entry.startSector, `stream "${entry.name}"`);
+      data = readChain(entry.startSector, `stream "${entry.name}"`, entry.size);
     }
     if (data.length < entry.size) throw new CfbError(`Stream "${entry.name}" is truncated (${data.length} of ${entry.size} bytes)`);
     return data.slice(0, entry.size);
@@ -171,19 +179,24 @@ export function readCfb(bytes: Uint8Array): CfbDocument {
   const visited = new Set<number>([0]);
   const childrenOf = (entry: RawEntry): CfbNode[] => {
     const result: CfbNode[] = [];
-    const walk = (id: number): void => {
-      if (id === NOSTREAM) return;
-      if (id >= entries.length) throw new CfbError(`Directory entry ${id} out of range`);
-      if (visited.has(id)) throw new CfbError('Loop detected in directory tree');
-      visited.add(id);
-      const e = entries[id];
-      walk(e.left);
+    // In-order walk with an explicit stack: a long chain of siblings must not overflow the call stack.
+    const stack: number[] = [];
+    const descendLeft = (start: number) => {
+      for (let id = start; id !== NOSTREAM; id = entries[id].left) {
+        if (id >= entries.length) throw new CfbError(`Directory entry ${id} out of range`);
+        if (visited.has(id)) throw new CfbError('Loop detected in directory tree');
+        visited.add(id);
+        stack.push(id);
+      }
+    };
+    descendLeft(entry.child);
+    while (stack.length > 0) {
+      const e = entries[stack.pop()!];
       const common = { name: e.name, clsid: e.clsid, stateBits: e.stateBits, created: e.created, modified: e.modified };
       if (e.objectType === OBJ_STORAGE) result.push({ type: 'storage', ...common, children: childrenOf(e) });
       else if (e.objectType === OBJ_STREAM) result.push({ type: 'stream', ...common, data: streamData(e) });
-      walk(e.right);
-    };
-    walk(entry.child);
+      descendLeft(e.right);
+    }
     return result;
   };
 

@@ -23,6 +23,8 @@ const AREA = 0x008a;
 const SECTION = 0x008c;
 const OBJECT_NAME = 0x009e;
 const OBJECT_POSITION = 0x00be;
+// Text objects hold paragraphs (0x00c0 ... 0x00c1) of text runs (0x00c2) and embedded fields (0x00c4).
+const TEXT_PARAGRAPH = 0x00c0;
 const TEXT_CONTENT = 0x00c2;
 const TEXT_EMBEDDED_FIELD = 0x00c4;
 const FONT = 0x0008;
@@ -77,6 +79,7 @@ const QE_CONNECTION_PROPERTY = 0x0009;
 
 /** Field value types as stored in the query engine and on named values. */
 const VALUE_TYPES: Record<number, string> = {
+  12: 'memo',
   // 0-5: signed/unsigned 8, 16 and 32-bit integers.
   0: 'integer',
   1: 'integer',
@@ -93,6 +96,12 @@ const VALUE_TYPES: Record<number, string> = {
   13: 'memo',
   14: 'blob',
   15: 'dateTime',
+  // Bitmap, icon, picture, OLE object and chart fields.
+  16: 'blob',
+  17: 'blob',
+  18: 'blob',
+  19: 'blob',
+  20: 'blob',
 };
 
 /** Summary operation codes (first word of a summary record). */
@@ -638,6 +647,14 @@ function buildLayout(records: RecordNode[]): AreaInfo[] {
       case OBJECT_POSITION:
         if (!object.position) object.position = position(record);
         break;
+      case TEXT_PARAGRAPH:
+        // A new paragraph after existing text is a line break.
+        if (object.runs?.length) {
+          // The plain text only gets a break after some text; runs keep it for fields too.
+          if (object.text) object.text = `${object.text}\n`;
+          object.runs.push({ text: '\n' });
+        }
+        break;
       case TEXT_CONTENT: {
         const text = ownStrings(record).join('');
         object.text = (object.text ?? '') + text;
@@ -778,10 +795,14 @@ export function buildReportDefinition(records: RecordNode[]): ReportDefinition {
   for (const node of findAll(records, PARAMETER)) {
     const { name, valueType } = namedValue(node);
     const strings = ownStrings(node);
-    const linkedField = strings.find((s) => /^[^{}]+\.[^{}]+$/.test(s) && !s.startsWith('crobj:'));
+    // The linked field (subreport links) is the second string; the first is the prompt.
+    const candidate = strings[1];
+    const linkedField = candidate && /^[^{}]+\.[^{}]+$/.test(candidate) && !candidate.startsWith('crobj:') && candidate !== name ? candidate : undefined;
     report.parameters.push({ name, prompt: strings[0] || undefined, valueType, linkedField });
   }
-  for (const node of findAll(records, GROUP)) {
+  // Report groups are named "Group #n Name"; cross-tabs and charts have group records of their own.
+  const isReportGroup = (node: RecordNode) => ownStrings(node).some((s) => /^Group #\d+ Name$/.test(s));
+  for (const node of findAll(records, GROUP).filter(isReportGroup)) {
     const field = ownStrings(node)[0];
     if (field) report.groups.push(field);
   }
@@ -796,7 +817,7 @@ export function buildReportDefinition(records: RecordNode[]): ReportDefinition {
     report.sorts.push({ field: field.text, descending: tail[3] === 1, bySummary: tail[0] === 2 });
   }
   report.groupOptions = [];
-  for (const node of findAll(records, GROUP)) {
+  for (const node of findAll(records, GROUP).filter(isReportGroup)) {
     const bytes = ownBytes(node);
     const field = readString(bytes, 0);
     if (!field || !field.text) continue;

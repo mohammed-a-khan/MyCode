@@ -5,9 +5,11 @@ import { describe, it } from 'node:test';
 import type { DataSourceInfo, ReportDefinition } from '../src/crystal/model.ts';
 import { readCfb } from '../src/index.ts';
 import { convertDocumentToSsrs } from '../src/ssrs/convert.ts';
-import { CODE_HELPERS, crystalColor, translateFormula, type FormulaContext } from '../src/ssrs/formula.ts';
+import { extractHeaders, formatHeadersCsv, formatHeadersText } from '../src/crystal/headers.ts';
+import { CODE_HELPERS, crystalColor, translateFormula, translateToSql, vbString, type FormulaContext } from '../src/ssrs/formula.ts';
 import { isBasicSyntax } from '../src/ssrs/basic.ts';
-import { chartStyle, convertToRdl } from '../src/ssrs/rdl.ts';
+import { chartStyle, convertToRdl, scopeOutsideRegion, substituteCommandParameters } from '../src/ssrs/rdl.ts';
+import { classifyAreas } from '../src/crystal/areas.ts';
 
 const ctx: FormulaContext = {
   field: (table, column) => (table === 'Orders' ? column.replace(/\W/g, '_') : undefined),
@@ -118,7 +120,7 @@ describe('RDL generation', () => {
     const { rdl } = convertToRdl(definition, source, { reportName: 'Proc' });
     assertBalancedXml(rdl);
     assert.ok(rdl.includes('<CommandType>StoredProcedure</CommandType>'));
-    assert.ok(rdl.includes('<CommandText>usp_OrdersByDate</CommandText>'));
+    assert.ok(rdl.includes('<CommandText>[usp_OrdersByDate]</CommandText>'));
     assert.ok(rdl.includes('<QueryParameter Name="@StartDate">') && rdl.includes('<Value>=Parameters!StartDate.Value</Value>'));
     assert.ok(rdl.includes('<ReportParameter Name="StartDate">') && rdl.includes('<DataType>DateTime</DataType>'));
     assert.ok(rdl.includes('<DataField>OrderDate</DataField>'));
@@ -450,7 +452,7 @@ describe('chart types, margins, subreports and Basic syntax', () => {
     assert.match(fn.code!, /Public Function F_Twice\(ByVal p_x As Double, Optional ByVal p_y As Double = 1\) As Object/);
     assert.match(fn.code!, /result = p_x \* 2 \+ p_y/);
     const array = translateFormula('Local StringVar Array a := ["x", "y"]; a[1]', ctx, { codeName: 'F_A' });
-    assert.match(array.code!, /v_a = New String\(\) \{Nothing, "x", "y"\}/);
+    assert.match(array.code!, /v_a = New Object\(\) \{Nothing, "x", "y"\}/);
     assert.match(array.code!, /Return v_a\(1\)/);
     assert.equal(tr('Join(Split({Orders.Name}, ","), ";")').expression, '=Code.CrJoin(Code.CrSplit(Fields!Name.Value, ","), ";")');
   });
@@ -566,5 +568,142 @@ describe('subreports in page headers and footers', () => {
     assert.equal(formulaNotes.length, 2, 'one note per converted formula');
     assert.match(formulaNotes[0].message, /custom code \(Code\.F_OwnerShared\); it uses WhilePrintingRecords/);
     assert.ok(!review.some((r) => /reads no database|check that its parameters match/.test(r.message)), JSON.stringify(review));
+  });
+});
+
+describe('header text extraction', () => {
+  const text = (name: string, value: string, x: number, y: number, width = 1400) =>
+    ({ kind: 'text', name, text: value, runs: value.split(/(\n)/).filter(Boolean).map((t) => ({ text: t })), position: { x, y }, size: { width, height: 240 } });
+  const main: ReportDefinition = {
+    ...emptyDefinition(),
+    layout: [
+      { name: 'PageHeaderArea1', sections: [{ name: 'PH', objects: [
+        text('Title', 'Orders Summary', 0, 0, 6000),
+        text('H1', 'Customer', 0, 400), text('H2', 'Amount\n(in $)', 3000, 400),
+        { kind: 'subreport', name: 'Sub1', subreport: { index: 1, onDemand: false }, position: { x: 0, y: 800 }, size: { width: 5000, height: 300 } },
+      ] }] },
+      { name: 'PageFooterArea1', sections: [{ name: 'PF', objects: [text('Foot', 'Confidential', 0, 0)] }] },
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', objects: [] }] },
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF', objects: [] }] },
+      { name: 'GroupHeaderArea1', sections: [{ name: 'GH', objects: [
+        { kind: 'text', name: 'GLabel', text: 'Region: ', runs: [{ text: 'Region: ' }, { field: 'Orders.Region' }], position: { x: 0, y: 0 }, size: { width: 3000, height: 240 } },
+      ] }] },
+      { name: 'GroupFooterArea1', sections: [{ name: 'GF', objects: [] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', objects: [
+        { kind: 'field', name: 'C', field: 'Orders.Customer', position: { x: 0, y: 0 }, size: { width: 1400, height: 240 } },
+        { kind: 'field', name: 'A', field: 'Orders.Amount', position: { x: 3000, y: 0 }, size: { width: 1400, height: 240 } },
+      ] }] },
+    ],
+  };
+  const sub: ReportDefinition = {
+    ...emptyDefinition(),
+    layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'SRH', objects: [text('SubTitle', 'Run Date:', 0, 0)] }] },
+      { name: 'ReportFooterArea1', sections: [{ name: 'SRF', objects: [] }] },
+      { name: 'DetailArea1', sections: [{ name: 'SD', objects: [] }] },
+    ],
+  };
+  const reports = [{ storage: '', definition: main }, { storage: 'Subdocument 1', definition: sub }];
+
+  it('lists titles, column headings in order, group labels and subreport headers', () => {
+    const items = extractHeaders(reports);
+    assert.deepEqual(items.map((i) => [i.report, i.area, i.kind, i.column, i.text]), [
+      ['Main report', 'Page Header', 'text', undefined, 'Orders Summary'],
+      ['Main report', 'Page Header', 'column heading', 1, 'Customer'],
+      ['Main report', 'Page Header', 'column heading', 2, 'Amount\n(in $)'],
+      ['Main report', 'Group Header 1', 'text', undefined, 'Region: {Orders.Region}'],
+      ['Subdocument 1 (in Page Header)', 'Report Header', 'text', undefined, 'Run Date:'],
+    ]);
+    assert.ok(extractHeaders(reports, { all: true }).some((i) => i.area === 'Page Footer' && i.text === 'Confidential'), '--all adds footers');
+    const listing = formatHeadersText(items);
+    assert.match(listing, /column headings {3}Customer \| Amount \(in \$\)/);
+    assert.match(formatHeadersCsv(items), /^file,report,area,section,kind,column,text,object,x,y\r\n,Main report,Page Header,PH,text,,Orders Summary,Title,0,0\r\n/);
+  });
+
+  it('keeps line breaks of multi-line text in SSRS', () => {
+    assert.equal(vbString('Amount\n(in $)'), '"Amount" & vbCrLf & "(in $)"');
+    const { rdl } = convertToRdl({ ...emptyDefinition(), layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', objects: [text('Two', 'Line one\nLine two', 0, 0, 3000)] }] },
+    ] }, { connections: [], tables: [], links: [] }, { reportName: 'Lines' });
+    assert.ok(rdl.includes('<Value>="Line one" &amp; vbCrLf &amp; "Line two"</Value>'));
+  });
+});
+
+describe('audit fixes', () => {
+  const multiCtx: FormulaContext = { ...ctx, parameterMultiple: (n) => n === 'Regions', fieldType: (ref) => ({ 'Orders.Amount': 'currency', 'Orders.Name': 'string' } as Record<string, string>)[ref] };
+  const f = (source: string) => translateFormula(source, multiCtx).expression;
+
+  it('follows Crystal operator precedence', () => {
+    assert.equal(f('10 mod 4 * 2'), '=(10 Mod (4 * 2))');
+    assert.equal(f('7 \\ 2 * 3'), '=(7 \\ (2 * 3))');
+    assert.equal(f('2^3^2'), '=((2 ^ 3) ^ 2)');
+    assert.equal(f('-2^2'), '=((-(2)) ^ 2)', 'negation binds tighter than ^ in Crystal');
+    assert.equal(f('true xor false or true'), '=(True Xor (False OrElse True))');
+  });
+
+  it('maps functions with Crystal semantics', () => {
+    assert.equal(f('Round(2.5)'), '=Math.Round(2.5, MidpointRounding.AwayFromZero)');
+    assert.equal(f('Truncate({Orders.Amount}, 2)'), '=(Fix(Fields!Amount.Value * 10 ^ 2) / 10 ^ 2)');
+    assert.equal(f('ToText({Orders.Amount})'), '=FormatNumber(Fields!Amount.Value, 2)');
+    assert.equal(f('{Orders.Name} startswith "A"'), '=CStr(Fields!Name.Value).StartsWith("A")');
+    assert.equal(f('"b" in "abc"'), '=(InStr("abc", "b") > 0)');
+    assert.equal(f('Split({Orders.Name}, ",")[2]'), '=Code.CrSplit(Fields!Name.Value, ",")(2)');
+    assert.match(f('if {Orders.Amount} <> 0 then 1 / {Orders.Amount} else 0'), /^=If\(/, 'a guarded division must not be evaluated');
+  });
+
+  it('treats multi-value parameters as 0-based arrays', () => {
+    assert.equal(f('Join({?Regions}, ", ")'), '=Join(Parameters!Regions.Value, ", ")');
+    assert.equal(f('UBound({?Regions})'), '=Parameters!Regions.Count');
+    assert.equal(f('Count({?Regions})'), '=Parameters!Regions.Count');
+    assert.equal(f('{?Regions}[1]'), '=Parameters!Regions.Value((1) - 1)');
+  });
+
+  it('keeps references inside string literals as text in custom code', () => {
+    const t = translateFormula('stringvar s := "Sum(of parts) Fields!X.Value"; s & {Orders.Name}', ctx, { codeName: 'F_S' });
+    assert.equal(t.expression, '=Code.F_S(Fields!Name.Value)');
+    assert.match(t.code!, /v_s = "Sum\(of parts\) Fields!X.Value"/);
+  });
+
+  it('writes selection formulas as valid T-SQL', () => {
+    const types: Record<string, string> = { 'Orders.Date': 'date', 'Orders.Qty': 'integer' };
+    const sql = (s: string) => translateToSql(s, {
+      column: (t, c) => `[${t}].[${c}]`, parameter: (n) => `@${n}`, parameterMultiple: (n) => n === 'Regions',
+      columnType: (t, c) => types[`${t}.${c}`], parameterType: () => 'string',
+    });
+    assert.equal(sql('{Orders.Date} >= CurrentDate - 30'), '[Orders].[Date] >= DATEADD(day, -(30), CAST(GETDATE() AS date))');
+    assert.equal(sql('{Orders.Region} = {?Regions}'), '[Orders].[Region] IN (@Regions)');
+    assert.equal(sql('{Orders.Name} like "*_*"'), "[Orders].[Name] LIKE '%[_]%'");
+    assert.equal(sql('{Orders.Name} startswith "10%"'), "[Orders].[Name] LIKE '10[%]%'");
+    assert.equal(sql('{Orders.Qty} / 2 > 2'), '([Orders].[Qty] * 1.0 / 2) > 2');
+    assert.equal(sql('{Orders.Name} in []'), '1 = 0');
+  });
+
+  it('scopes expressions outside data regions and splits command literals', () => {
+    assert.equal(scopeOutsideRegion('(Fields!Flag.Value = 1)', 'DataSet1'), '(First(Fields!Flag.Value, "DataSet1") = 1)');
+    assert.equal(scopeOutsideRegion('Sum(Fields!A.Value) & "Fields!B.Value"', 'DataSet1'), 'Sum(Fields!A.Value, "DataSet1") & "Fields!B.Value"');
+    assert.equal(substituteCommandParameters("WHERE a = {?A} AND b LIKE '%{?B}%'", (n) => `@${n}`), "WHERE a = @A AND b LIKE '%' + @B + '%'");
+  });
+
+  it('assigns each group footer to its own group and keeps data regions out of page headers', () => {
+    const section = (name: string) => ({ name, objects: [] });
+    const areas = classifyAreas([
+      { name: 'PageHeaderArea1', sections: [section('PH')] }, { name: 'PageFooterArea1', sections: [section('PF')] },
+      { name: 'ReportHeaderArea1', sections: [section('RH')] }, { name: 'ReportFooterArea1', sections: [section('RF')] },
+      { name: 'GroupHeaderArea1', sections: [section('GH1')] }, { name: 'GroupFooterArea1', sections: [section('GF1')] },
+      { name: 'GroupHeaderArea2', sections: [section('GH2')] }, { name: 'GroupFooterArea2', sections: [section('GF2')] },
+      { name: 'DetailArea1', sections: [section('D')] },
+    ]);
+    assert.equal(areas.groupFooters.get(1)?.[0].name, 'GF1');
+    assert.equal(areas.groupFooters.get(2)?.[0].name, 'GF2');
+    const { rdl, review } = convertToRdl({ ...emptyDefinition(), layout: [{ name: 'PageHeaderArea1', sections: [{ name: 'PH', objects: [
+      { kind: 'chart', name: 'Chart1', position: { x: 0, y: 0 }, size: { width: 3000, height: 2000 }, chart: { values: ['Sum of Orders.Amount'], onChangeOf: 'Orders.Region' } },
+    ] }] }] }, { connections: [], tables: [], links: [] }, { reportName: 'PageChart' });
+    assert.ok(!rdl.includes('<Chart '));
+    assert.ok(review.some((r) => /no charts or cross-tabs in a page header/.test(r.message)));
+  });
+
+  it('escapes CSV cells Excel would run as formulas', () => {
+    const csv = formatHeadersCsv([{ report: 'Main report', area: 'Page Header', section: 'PH', kind: 'text', text: '=HYPERLINK("x")', object: 'T', x: 0, y: 0 }]);
+    assert.match(csv, /,"'=HYPERLINK\(""x""\)",/);
   });
 });

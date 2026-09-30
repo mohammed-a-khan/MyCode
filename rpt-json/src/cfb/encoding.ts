@@ -55,7 +55,13 @@ export function isoToFiletime(iso: string | null | undefined): bigint {
   const fraction = (m[7] ?? '').padEnd(7, '0');
   const base = Date.parse(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}.${fraction.slice(0, 3)}Z`);
   if (Number.isNaN(base)) throw new CfbError(`Invalid timestamp "${iso}"`);
-  return BigInt(base) * 10000n + BigInt(fraction.slice(3)) + FILETIME_UNIX_EPOCH;
+  // Date.parse rolls over impossible dates (Feb 30, 24:00); reject them instead.
+  const check = new Date(base);
+  const parts = [check.getUTCFullYear(), check.getUTCMonth() + 1, check.getUTCDate(), check.getUTCHours(), check.getUTCMinutes(), check.getUTCSeconds()];
+  if (parts.some((v, i) => v !== Number(m[i + 1]))) throw new CfbError(`Invalid timestamp "${iso}"`);
+  const ticks = BigInt(base) * 10000n + BigInt(fraction.slice(3)) + FILETIME_UNIX_EPOCH;
+  if (ticks < 0n || ticks >= 2n ** 64n) throw new CfbError(`Timestamp "${iso}" is outside the range a file can store (1601 onwards)`);
+  return ticks;
 }
 
 /** Upper-cases one UTF-16 code unit the way CFB name comparison expects. */

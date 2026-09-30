@@ -62,12 +62,14 @@ declare module 'node:fs/promises' {
 declare module 'node:path' {
   export function basename(path: string, suffix?: string): string;
   export function join(...paths: string[]): string;
+  export function resolve(...paths: string[]): string;
 }
 
 declare module 'node:zlib' {
   export interface ZlibOptions {
     level?: number;
     info?: boolean;
+    maxOutputLength?: number;
   }
   export function inflateSync(data: string | Uint8Array, options?: ZlibOptions): Buffer;
   export function deflateSync(data: string | Uint8Array, options?: ZlibOptions): Buffer;
@@ -112,6 +114,7 @@ declare module 'node:assert/strict' {
     match(value: string, pattern: RegExp, message?: string): void;
     throws(block: () => unknown, error?: ErrorMatcher, message?: string): void;
     doesNotThrow(block: () => unknown, message?: string): void;
+    fail(message?: string): never;
   }
   const assert: Assert;
   export default assert;

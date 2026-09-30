@@ -46,9 +46,13 @@ export function encryptedStreamKind(name: string): EncryptedStreamKind | undefin
 
 const dialectOf = (kind: RecordStream['kind']): Dialect => (kind === 'qeSession' ? 'query' : 'report');
 
+/** Largest decompressed report stream accepted (real ones are well under a megabyte). */
+const MAX_INFLATED = 256 * 1024 * 1024;
+
 /** Inflates a zlib stream and reports how many input bytes it used. */
 function inflateCounted(data: Uint8Array): { output: Uint8Array; used: number } {
-  const result = inflateSync(data, { info: true }) as unknown as { buffer: Buffer; engine: { bytesWritten: number } };
+  // A limit guards against a crafted stream that inflates to gigabytes.
+  const result = inflateSync(data, { info: true, maxOutputLength: MAX_INFLATED }) as unknown as { buffer: Buffer; engine: { bytesWritten: number } };
   return { output: new Uint8Array(result.buffer), used: result.engine.bytesWritten };
 }
 

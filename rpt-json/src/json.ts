@@ -129,7 +129,7 @@ function buildReportModels(root: CfbStorage): ReportModel[] {
           }
         }
       } catch (err) {
-        errors.push(`Contents: ${(err as Error).message}`);
+        errors.push(`Contents/PromptManager: ${(err as Error).message}`);
       }
       const qe = findStream(storage, 'QESession');
       if (qe) {
@@ -208,7 +208,8 @@ export function documentToJson(doc: CfbDocument, options: ToJsonOptions = {}): R
 const ENCODINGS: readonly string[] = ['base64', 'hex', 'utf8', 'utf16le'];
 
 function decodeData(text: string, encoding: DataEncoding, path: string): Uint8Array {
-  if (encoding === 'base64' && !/^[A-Za-z0-9+/]*={0,2}$/.test(text.replace(/\s+/g, ''))) {
+  const compact = text.replace(/\s+/g, '');
+  if (encoding === 'base64' && (!/^[A-Za-z0-9+/]*={0,2}$/.test(compact) || compact.replace(/=+$/, '').length % 4 === 1)) {
     throw new CfbError(`${path}: data is not valid base64`);
   }
   if (encoding === 'hex' && !/^([0-9a-fA-F]{2})*$/.test(text.replace(/\s+/g, ''))) {
@@ -265,7 +266,9 @@ export function jsonToDocument(input: unknown, options: FromJsonOptions = {}): C
     const { name, type, clsid, stateBits, created, modified } = value;
     if (typeof name !== 'string') fail(`${path}.name`, 'must be a string');
     if (clsid !== undefined && typeof clsid !== 'string') fail(`${path}.clsid`, 'must be a GUID string');
-    if (stateBits !== undefined && (typeof stateBits !== 'number' || !Number.isInteger(stateBits))) fail(`${path}.stateBits`, 'must be an integer');
+    if (stateBits !== undefined && (typeof stateBits !== 'number' || !Number.isInteger(stateBits) || stateBits < 0 || stateBits > 0xffffffff)) {
+      fail(`${path}.stateBits`, 'must be an integer 0-4294967295');
+    }
     for (const [key, ts] of [['created', created], ['modified', modified]] as const) {
       if (ts !== undefined && ts !== null && typeof ts !== 'string') fail(`${path}.${key}`, 'must be an ISO-8601 string');
     }
@@ -289,11 +292,13 @@ export function jsonToDocument(input: unknown, options: FromJsonOptions = {}): C
       if (!ENCODINGS.includes(encoding)) fail(`${path}.encoding`, `must be one of ${ENCODINGS.join(', ')}`);
       if (typeof value.data !== 'string') fail(`${path}.data`, 'must be a string');
       original = decodeData(value.data as string, encoding, `${path}.data`);
+      if (value.size !== undefined && (typeof value.size !== 'number' || !Number.isInteger(value.size))) fail(`${path}.size`, 'must be an integer');
+      if (value.sha256 !== undefined && typeof value.sha256 !== 'string') fail(`${path}.sha256`, 'must be a hex string');
       if (verify) {
         if (value.size !== undefined && value.size !== original.length) {
           fail(`${path}.size`, `declares ${String(value.size)} bytes but data decodes to ${original.length} (update or remove "size"/"sha256" after editing data)`);
         }
-        if (value.sha256 !== undefined && value.sha256 !== sha256(original)) {
+        if (value.sha256 !== undefined && (value.sha256 as string).toLowerCase() !== sha256(original)) {
           fail(`${path}.sha256`, 'does not match the decoded data (update or remove "size"/"sha256" after editing data)');
         }
       }
@@ -304,7 +309,14 @@ export function jsonToDocument(input: unknown, options: FromJsonOptions = {}): C
       if (!kind) return fail(`${path}.decoded`, 'only encrypted report streams (Contents, QESession, PromptManager, ReportParametersStream) can be decoded');
       const decoded = jsonToDecoded(value.decoded, kind, `${path}.decoded`, fail);
       // Reuse the original bytes when the decoded content is unchanged, so untouched streams stay byte-identical.
-      const data = original && sameContent(decoded, original) ? original : encodeDecoded(decoded, path, fail);
+      const unchanged = original !== undefined && sameContent(decoded, original);
+      // "data" whose sha256 is gone or no longer matches was edited by hand; with a different "decoded"
+      // one of the two edits would be lost, so ask which one is meant.
+      const dataEdited = original !== undefined && (typeof value.sha256 !== 'string' || value.sha256.toLowerCase() !== sha256(original));
+      if (!unchanged && dataEdited) {
+        return fail(`${path}`, 'has both edited "data" and a "decoded" form that differs from it; keep only the one you edited (remove "decoded" to use the raw data, or "data" to use the decoded content)');
+      }
+      const data = unchanged ? original! : encodeDecoded(decoded, path, fail);
       return { type: 'stream', ...common, data };
     }
     if (!original) return fail(`${path}.data`, 'must be a string (or provide "decoded")');

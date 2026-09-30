@@ -64,7 +64,23 @@ In the JSON, `metadata.reports[].definition` is the readable report (formulas, p
 `metadata.reports[].dataSource` holds the connection, tables, fields and joins. Edits to the decoded record text are
 written back when you run `to-rpt`. Test edited reports in Crystal before using them.
 
-## 5. Run the tests (optional)
+## 5. List header text
+
+The titles and labels in the report and page headers, group headers, the column headings above the detail rows
+(left to right) and chart titles, for the report and its subreports:
+
+```
+node src/cli.ts headers "C:\reports\Sales.rpt"                          # readable listing
+node src/cli.ts headers "C:\reports\Sales.rpt" headers.csv --csv        # CSV for Excel
+node src/cli.ts headers "C:\reports" all-headers.csv --csv               # every report in a folder
+node src/cli.ts headers "C:\reports\Sales.rpt" --json                   # JSON
+node src/cli.ts headers "C:\reports\Sales.rpt" --all                    # also footer and detail text, and fields
+```
+
+Embedded database fields appear as `{Table.Field}`. In CSV and JSON, text over several lines keeps its line breaks;
+the readable listing shows them as ` / `.
+
+## 6. Run the tests (optional)
 
 ```
 npm test
