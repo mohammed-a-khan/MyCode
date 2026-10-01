@@ -30,6 +30,8 @@ node src/cli.ts to-json  report.rpt report.json          # full JSON (original b
 node src/cli.ts to-rpt   report.json rebuilt.rpt
 node src/cli.ts to-rdl   report.rpt out/                 # SSRS .rdl (+ subreports) and a review checklist
 node src/cli.ts to-rdl   reports/ out/                   # every .rpt in a folder
+node src/cli.ts to-rdl   report.rpt out/ --template house.rdl              # in the style of an existing report
+node src/cli.ts to-rdl   --template house.rdl --combine out/All.rdl a.rpt b.rpt   # several reports in one .rdl
 node src/cli.ts headers  report.rpt                      # header text: titles, labels, column headings
 node src/cli.ts headers  reports/ headers.csv --csv      # every report in a folder, as CSV (or --json)
 node src/cli.ts inspect  report.rpt                      # just the readable model and stream catalog
@@ -46,6 +48,9 @@ node src/cli.ts verify   report.rpt                      # round-trip checks (se
 | `--no-verify`       | `to-rpt`  | Skip `size`/`sha256` checks on raw `data` (use after hand-editing it)          |
 | `--cfb-version 3\|4` | `to-rpt`  | Container version to write (default: same as the source)                       |
 | `--connection "..."` | `to-rdl`  | SQL Server connection string to use in every generated report                  |
+| `--shared-datasource <name>` | `to-rdl` | Use a shared data source on the report server instead of an embedded connection |
+| `--template <file.rdl>` | `to-rdl` | Lay each report out in the style of an existing SSRS report (see below)     |
+| `--combine <out.rdl>` | `to-rdl`  | With `--template`: put every input report into one `.rdl`, one block each     |
 
 `verify` runs two checks on a file:
 
@@ -81,6 +86,51 @@ and Report Builder.
 - **SQL command:** the command text is used as the query. Crystal command parameters (`{?name}`) become query
   parameters (`@name`) linked to report parameters.
 - **SQL expression fields** (`{%name}`): added to the `SELECT` as computed columns.
+
+### Rendering on the report server
+
+1. Upload the main `.rdl` and its `<name>_Subdocument_N.rdl` files into the same folder (subreports are found by
+   name).
+2. Data source: either generate with `--shared-datasource <name>` so the reports use your existing shared data source,
+   or, after uploading, open the report's **Manage → Data sources** and choose the shared data source or enter
+   credentials. Windows integrated security often fails on a server (the "double hop"), so a shared data source or
+   stored credentials is usually needed.
+3. The account the data source uses needs `EXECUTE` on the stored procedures, or `SELECT` on the tables, the Crystal
+   report read.
+4. Fonts used by the report must be installed on the report server for PDF export.
+5. Run the report, compare it with the Crystal output, and work through `<name>.review.md`.
+
+### House templates
+
+`--template house.rdl` lays each report out in the style of an existing SSRS report instead of copying the Crystal
+layout. Use a finished report of your house style, with its page header and footer, as the template.
+
+From the template:
+
+- the data source, page size and margins, page header and footer, and the datasets, images, code and parameters they
+  use (a dataset counts as used when the page header/footer, any style or a parameter refers to it);
+- the look of its first table, row by row: the title row, the column-heading row, the "no data" row, the detail row
+  and the totals row. Each cell's text box is copied, so fonts, colours, borders and style expressions (such as
+  colours read from a branding dataset, or alternating row colours) come along. A rectangle around the table, with
+  its page break, is copied too.
+
+From each report:
+
+- its dataset: the Crystal report's own query or stored procedure, read through the template's data source;
+- the title (the largest text in the report or page header), one column per detail field with its column heading,
+  number formats, and grand totals from the summaries in the footers, with the footer's label;
+- sorting: the record sorts, after the group fields.
+
+Report parameters with the same name as a template parameter (Crystal `@owner_id` and template `owner_id`) are the
+same parameter. The "no data" row shows when the dataset is empty; the template's message gets the report's title in
+place of the template's own (`NO SAMPLE LIST DATA ...` becomes `NO ORDERS DATA ...`).
+
+`--combine out.rdl a.rpt b.rpt ...` builds one report with a block per input report, in order, each with its own
+dataset, under one page header and footer. Every block always shows; an empty one shows its title, column headings
+and "no data" row.
+
+Group headers and footers, subreports, charts and other text are not part of this layout; the review checklist lists
+what was left out, and group subtotals become grand totals (also listed).
 
 ### Report elements
 

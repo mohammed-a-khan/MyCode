@@ -5,7 +5,8 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 import { buildMetadata, jsonToRpt, readCfb, rptToJson, type RptJson } from './index.ts';
 import { jsonToDocument, sha256 } from './json.ts';
-import { convertDocumentToSsrs, reviewMarkdown } from './ssrs/convert.ts';
+import { convertDocumentsWithTemplate, convertDocumentToSsrs, reviewMarkdown } from './ssrs/convert.ts';
+import { readHouseTemplate, type HouseTemplate } from './ssrs/house.ts';
 import { extractHeaders, formatHeadersCsv, formatHeadersText, type HeaderText } from './crystal/headers.ts';
 import { mkdir, readdir, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
@@ -16,7 +17,11 @@ Usage:
   rpt-json to-json <input.rpt> [output.json] [--hex] [--no-metadata] [--no-decode] [--no-original] [--compact]
   rpt-json to-rpt  <input.json> <output.rpt> [--no-verify] [--cfb-version 3|4]
   rpt-json to-rdl  <input.rpt|input.json|folder> [output-dir] [--connection "<connection string>"]
-                                            Convert to SSRS .rdl files (+ subreports) and a review checklist
+                   [--shared-datasource <name>] [--template <house.rdl>]
+                                            Convert to SSRS .rdl files (+ subreports) and a review checklist;
+                                            --template lays each report out in the style of an existing .rdl
+  rpt-json to-rdl  --template <house.rdl> --combine <output.rdl> <input.rpt|folder>...
+                                            Combine several reports into one .rdl, one block per report
   rpt-json headers <input.rpt|input.json|folder> [output-file] [--json | --csv] [--all]
                                             List header text: report/page/group headers, column headings,
                                             chart titles (--all adds footers, details and field objects)
@@ -127,11 +132,49 @@ async function main(argv: string[]): Promise<number> {
 
   if (command === 'to-rdl') {
     const connectionString = takeOption(args, '--connection');
+    const sharedDataSource = takeOption(args, '--shared-datasource');
+    const templatePath = takeOption(args, '--template');
+    const combine = takeOption(args, '--combine');
+    let template: HouseTemplate | undefined;
+    if (templatePath) {
+      try {
+        template = readHouseTemplate((await readFile(templatePath)).toString('utf8'));
+      } catch (err) {
+        throw new Error(`template ${templatePath}: ${(err as Error).message}`);
+      }
+      if (connectionString || sharedDataSource) console.error('NOTE --connection and --shared-datasource are ignored with --template: the template\'s data source is used');
+    }
+    const expand = async (path: string) => ((await stat(path)).isDirectory()
+      ? (await readdir(path)).filter((f) => /\.rpt$/i.test(f)).sort().map((f) => join(path, f))
+      : [path]);
+    const load = async (file: string) => {
+      const raw = await readFile(file);
+      return file.toLowerCase().endsWith('.json') ? jsonToDocument(JSON.parse(raw.toString('utf8'))) : readCfb(raw);
+    };
+
+    if (combine) {
+      if (!template) throw new Error('to-rdl: --combine needs --template');
+      const unknown = args.find((a) => a.startsWith('--'));
+      if (unknown) throw new Error(`to-rdl: unknown option ${unknown} (see --help)`);
+      if (!args.length) throw new Error('to-rdl --combine needs the .rpt files (or folders) to combine');
+      const files = (await Promise.all(args.map(expand))).flat();
+      if (!files.length) throw new Error('no .rpt files to combine');
+      const output = /\.rdl$/i.test(combine) ? combine : `${combine}.rdl`;
+      for (const file of files) differentFiles(file, output);
+      const documents = [];
+      for (const file of files) documents.push({ doc: await load(file), name: basename(file).replace(/\.(rpt|json)$/i, '') });
+      const report = convertDocumentsWithTemplate(template, documents, basename(output).replace(/\.rdl$/i, ''));
+      const outputDir = resolve(output, '..');
+      await mkdir(outputDir, { recursive: true });
+      await writeFile(output, report.rdl);
+      await writeFile(output.replace(/\.rdl$/i, '.review.md'), reviewMarkdown(files.map((f) => basename(f)).join(', '), [{ ...report, fileName: basename(output) }]));
+      console.error(`OK   ${output}: ${documents.length} report(s) combined, ${report.review.length} review item(s)`);
+      return 0;
+    }
+
     const [input, outputDir = '.'] = positionals(args, 'to-rdl', 2);
     if (!input) throw new Error('to-rdl needs an input .rpt/.json file or a folder of .rpt files');
-    const inputs = (await stat(input)).isDirectory()
-      ? (await readdir(input)).filter((f) => /\.rpt$/i.test(f)).sort().map((f) => join(input, f))
-      : [input];
+    const inputs = await expand(input);
     if (inputs.length === 0) throw new Error(`no .rpt files in ${input}`);
     await mkdir(outputDir, { recursive: true });
     let failures = 0;
@@ -139,15 +182,17 @@ async function main(argv: string[]): Promise<number> {
     const written = new Set<string>();
     for (const file of inputs) {
       try {
-        const raw = await readFile(file);
-        const doc = file.toLowerCase().endsWith('.json') ? jsonToDocument(JSON.parse(raw.toString('utf8'))) : readCfb(raw);
+        const doc = await load(file);
         const original = basename(file).replace(/\.(rpt|json)$/i, '');
         let base = original;
-        let reports = convertDocumentToSsrs(doc, base, { connectionString });
+        const convert = (name: string) => (template
+          ? [convertDocumentsWithTemplate(template, [{ doc, name: original }], name)]
+          : convertDocumentToSsrs(doc, name, { connectionString, sharedDataSource }));
+        let reports = convert(base);
         // Two inputs whose names clean up to the same file name ("A B" and "A_B") get a numbered suffix.
         for (let n = 2; reports.some((r) => written.has(r.fileName.toLowerCase())); n++) {
           base = `${original}_${n}`;
-          reports = convertDocumentToSsrs(doc, base, { connectionString });
+          reports = convert(base);
         }
         if (base !== original) console.error(`NOTE ${file}: written as ${reports[0]?.fileName} (another report already produced that name)`);
         for (const r of reports) written.add(r.fileName.toLowerCase());
