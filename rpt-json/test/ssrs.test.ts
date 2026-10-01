@@ -1043,6 +1043,12 @@ describe('subreports in the report body', () => {
     assert.ok(rdl.includes('<Value>Totals by region</Value>'));
   });
 
+  it('gives every table group, data region and dataset a unique name', () => {
+    const { rdl } = convertToRdl(main, src('Orders', 'Name'), { reportName: 'Main', subreports });
+    const names = [...rdl.matchAll(/<(?:Group|Tablix|Chart|DataSet) Name="([^"]+)"/g)].map((m) => m[1].toLowerCase());
+    assert.equal(new Set(names).size, names.length, `duplicates in ${names.join(', ')}`);
+  });
+
   it('keeps separate subreport files on request', () => {
     const { rdl, inlinedOnly } = convertToRdl(main, src('Orders', 'Name'), { reportName: 'Main', subreports, embedSubreports: false });
     assert.ok(rdl.includes('<Subreport ') && rdl.includes('<ReportName>Main_Subdocument_7</ReportName>'));
