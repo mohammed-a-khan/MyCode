@@ -35,6 +35,7 @@ node src/cli.ts to-rdl   --template house.rdl --combine out/All.rdl a.rpt b.rpt 
 node src/cli.ts headers  report.rpt                      # header text: titles, labels, column headings
 node src/cli.ts headers  reports/ headers.csv --csv      # every report in a folder, as CSV (or --json)
 node src/cli.ts inspect  report.rpt                      # just the readable model and stream catalog
+node src/cli.ts charts   report.rpt                      # how each chart is stored, names hidden (to share safely)
 node src/cli.ts verify   report.rpt                      # round-trip checks (see below)
 ```
 
@@ -49,6 +50,7 @@ node src/cli.ts verify   report.rpt                      # round-trip checks (se
 | `--cfb-version 3\|4` | `to-rpt`  | Container version to write (default: same as the source)                       |
 | `--connection "..."` | `to-rdl`  | SQL Server connection string to use in every generated report                  |
 | `--shared-datasource <name>` | `to-rdl` | Use a shared data source on the report server instead of an embedded connection |
+| `--separate-subreports` | `to-rdl` | Write every subreport as its own `.rdl` (by default those outside the table are built into the report) |
 | `--template <file.rdl>` | `to-rdl` | Lay each report out in the style of an existing SSRS report (see below)     |
 | `--combine <out.rdl>` | `to-rdl`  | With `--template`: put every input report into one `.rdl`, one block each     |
 
@@ -64,8 +66,11 @@ for f in reports/*.rpt; do node src/cli.ts verify "$f"; done
 
 ## Converting to SSRS
 
-`to-rdl` writes one `.rdl` per report, plus one per subreport (`<name>_Subdocument_N.rdl`), and a `<name>.review.md`
-checklist. The output uses the RDL 2016 schema, so it opens in SSRS 2016, 2017, 2019 and 2022, Power BI Report Server,
+`to-rdl` writes one `.rdl` per report and a `<name>.review.md` checklist. Subreports outside the table (report
+header/footer, page header/footer) are built into the report, each reading its own dataset, so there is nothing to
+deploy alongside it. A subreport inside the table (in a group header or the details) runs once per row; it stays a
+separate `<name>_Subdocument_N.rdl` shown through a subreport item. `--separate-subreports` keeps every subreport
+separate. The output uses the RDL 2016 schema, so it opens in SSRS 2016, 2017, 2019 and 2022, Power BI Report Server,
 and Report Builder.
 
 ### Data source
@@ -89,8 +94,8 @@ and Report Builder.
 
 ### Rendering on the report server
 
-1. Upload the main `.rdl` and its `<name>_Subdocument_N.rdl` files into the same folder (subreports are found by
-   name).
+1. Upload the `.rdl`, and any `<name>_Subdocument_N.rdl` files written next to it, into the same folder (subreports
+   are found by name; a missing one shows "subreport could not be displayed").
 2. Data source: either generate with `--shared-datasource <name>` so the reports use your existing shared data source,
    or, after uploading, open the report's **Manage → Data sources** and choose the shared data source or enter
    credentials. Windows integrated security often fails on a server (the "double hop"), so a shared data source or

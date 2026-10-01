@@ -224,6 +224,8 @@ export interface TimeFormatInfo {
 
 /** How a field shows its value: the number format for currency values and for other numbers, date and time. */
 export interface ValueFormat {
+  /** The field keeps Crystal's default format (not customised in the Format Editor). */
+  systemDefault?: boolean;
   currency?: NumberFormatInfo;
   number?: NumberFormatInfo;
   date?: DateFormatInfo;
@@ -651,6 +653,12 @@ function timeFormat(node: RecordNode): TimeFormatInfo | undefined {
 
 /** Reads a value-format record (number, date, time, date-time) into a format. */
 function readValueFormat(record: RecordNode, format: ValueFormat): void {
+  // The format group starts with a flag: 1 while the field keeps the default format, 0 once it is customised.
+  const flag = record.type === 0x00f1 ? firstChild(record, 0x00f0) : undefined;
+  if (flag) {
+    const b = ownBytes(flag);
+    if (b.length >= 4) format.systemDefault = u32(b, 0) === 1;
+  }
   const number = firstChild(record, 0x00f8);
   if (number && record.type === 0x00f9) {
     const info = numberFormat(number);
@@ -780,7 +788,12 @@ function buildLayout(records: RecordNode[]): AreaInfo[] {
       case OBJECT_POSITION:
         if (!object.position) object.position = position(record);
         break;
-      case TEXT_PARAGRAPH:
+      case TEXT_PARAGRAPH: {
+        // A text object's alignment is the paragraph's (byte 12: 1 left, 2 centre, 3 right, 4 justified); the
+        // first paragraph's applies to the whole text box.
+        const b = ownBytes(record);
+        // An alignment set on the object itself is kept when the paragraph just says left.
+        if (object.kind === 'text' && !object.runs?.length && b.length > 12 && ALIGNMENTS[b[12]] && (!object.align || b[12] !== 1)) object.align = ALIGNMENTS[b[12]];
         // A new paragraph after existing text is a line break.
         if (object.runs?.length) {
           // The plain text only gets a break after some text; runs keep it for fields too.
@@ -788,6 +801,7 @@ function buildLayout(records: RecordNode[]): AreaInfo[] {
           object.runs.push({ text: '\n' });
         }
         break;
+      }
       case TEXT_CONTENT: {
         const text = ownStrings(record).join('');
         object.text = (object.text ?? '') + text;

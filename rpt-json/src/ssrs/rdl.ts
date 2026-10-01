@@ -40,6 +40,11 @@ export interface RdlOptions {
   connectionString?: string;
   /** Name (or path) of a shared data source on the report server, used instead of an embedded connection. */
   sharedDataSource?: string;
+  /**
+   * Subreports outside the table (report header/footer) become part of the report, reading their own dataset,
+   * instead of separate .rdl files shown through subreport items (default true).
+   */
+  embedSubreports?: boolean;
   /** Subreports by their "Subdocument N" number: RDL name and link parameters (Crystal "Pm-" parameters). */
   subreports?: Map<number, SubreportInfo>;
   /** Image bytes by their "Embedding N" number. */
@@ -509,7 +514,9 @@ class RdlBuilder {
       return undefined;
     }
     const formula = { text };
-    const t = translateFormula(formula.text, this.formulaContext, { colors, codeName: this.codeNames.make(`C_${ref.name}_${ref.index}`) });
+    // Suppress conditions (Object_Visibility, Section_Visibility, ...) are True/False.
+    const boolean = !colors && /visib|suppress|new_?page|keep_?together/i.test(ref.name);
+    const t = translateFormula(formula.text, this.formulaContext, { colors, boolean, codeName: this.codeNames.make(`C_${ref.name}_${ref.index}`) });
     this.addCode(t);
     for (const issue of t.issues) this.note(`${item}: formula ${ref.name}`, issue);
     if (t.expression === '=Nothing') return undefined;
@@ -714,7 +721,8 @@ class RdlBuilder {
     const toolTip = conditions.toolTip ? this.conditionExpression(conditions.toolTip, false, item, scope) : undefined;
     const backColor = conditions.backColor ? this.conditionExpression(conditions.backColor, true, item, scope) : undefined;
     // Suppressed in Crystal: hidden (kept, so the item and any formula in it are still there to unhide).
-    const suppress = obj?.suppressed ? '=True' : conditions.suppress ? this.conditionExpression(conditions.suppress, false, item, scope) : undefined;
+    // A suppress formula decides on its own (as in Crystal); without one, the Suppress box does.
+    const suppress = conditions.suppress ? this.conditionExpression(conditions.suppress, false, item, scope) : obj?.suppressed ? '=True' : undefined;
     for (const key of Object.keys(conditions)) {
       if (!['fontColor', 'hyperlink', 'toolTip', 'backColor', 'suppress'].includes(key)) this.note(item, `formatting formula ${conditions[key].name} is not converted; set it on the text box manually`);
     }
@@ -756,9 +764,11 @@ class RdlBuilder {
     const ordered = [...section.objects.filter((o) => o.kind === 'box'), ...section.objects.filter((o) => o.kind !== 'box')];
     for (const obj of ordered) {
       const box = this.boxOf(obj, top);
-      if (obj.kind === 'subreport' && scope === 'page') {
-        // SSRS allows no subreport in a page header/footer: its content is placed there directly.
-        const inline = this.inlineSubreport(obj, box, area, hidden);
+      const embed = scope === 'body' && this.options.embedSubreports !== false && !this.options.inline;
+      if (obj.kind === 'subreport' && (scope === 'page' || embed)) {
+        // SSRS allows no subreport in a page header/footer: its content is placed there directly; outside the
+        // table, a subreport is built into the report too (one .rdl, nothing to deploy alongside it).
+        const inline = this.inlineSubreport(obj, box, area, hidden, scope === 'page' ? 'page' : 'body');
         if (inline) items.push(inline.item);
         bottom = Math.max(bottom, box.top - top + (inline?.height ?? box.height));
         continue;
@@ -771,11 +781,19 @@ class RdlBuilder {
     return { items, height: section.objects.length || section.height ? height : 0 };
   }
 
-  /** Places a subreport's content as items reading its own dataset (first row), inside a rectangle. */
-  private inlineSubreport(obj: ReportObject, box: Box, area: string, hidden?: string): { item: XmlElement; height: number } | null {
+  /**
+   * Places a subreport's content inside a rectangle, reading its own dataset: in a page header/footer as items
+   * showing the first row, in the body as its whole body (table and all).
+   */
+  private inlineSubreport(obj: ReportObject, box: Box, area: string, hidden: string | undefined, mode: 'page' | 'body'): { item: XmlElement; height: number } | null {
     const item = `subreport object "${obj.name}" in ${area}`;
     const info = obj.subreport ? this.options.subreports?.get(obj.subreport.index) : undefined;
     if (!info?.definition) {
+      if (mode === 'body') {
+        // Not decoded: fall back to a subreport item.
+        const fallback = this.reportItem(obj, 'body', area, box, hidden);
+        return fallback ? { item: fallback, height: box.height } : null;
+      }
       this.note(item, 'SSRS allows no subreport in a page header or footer, and the subreport could not be placed inline; move its content here manually');
       return null;
     }
@@ -788,7 +806,7 @@ class RdlBuilder {
       images: info.images,
       inline: { dataset, itemNames: this.itemNames, imageNames: this.imageNames, codeNames: this.codeNames },
     });
-    const result = child.buildInline();
+    const result = mode === 'page' ? child.buildInline() : child.buildEmbedded();
 
     // The subreport's data source: the main one when the connection matches (or it reads no database), otherwise its own.
     let dataSource = this.dataSourceName;
@@ -819,6 +837,7 @@ class RdlBuilder {
       if (!existing) this.extraParameters.push(entry);
     }
     if (info.links.length) this.note(item, 'is linked to the main report: its link parameters take the first row\'s values of the linked fields');
+    if (obj.subreport?.onDemand && mode === 'body') this.note(item, 'was an on-demand subreport in Crystal; it is now always shown');
     for (const code of result.codeFunctions) if (!this.codeFunctions.includes(code)) this.codeFunctions.push(code);
     // Crystal shared variables are shared with subreports: same-named class members are the same variable.
     Object.assign(this.codeMembers, result.codeMembers);
@@ -830,7 +849,7 @@ class RdlBuilder {
       if (n.item === 'Dataset' && !readsData) continue;
       this.note(`${item}: ${n.item}`, n.message);
     }
-    this.note(item, `SSRS allows no subreport in a page header or footer, so its content was placed here directly, reading dataset ${dataset} (first row)`);
+    if (mode === 'page') this.note(item, `SSRS allows no subreport in a page header or footer, so its content was placed here directly, reading dataset ${dataset} (first row)`);
 
     const height = Math.max(box.height, result.height);
     const rectangle = el('Rectangle', { Name: this.itemNames.make(obj.name || 'Subreport') },
@@ -1877,6 +1896,51 @@ class RdlBuilder {
     };
   }
 
+  /** The body: report header sections, the table, report footer sections. */
+  private bodyItems(areas: Classified): { items: XmlElement[]; height: number } {
+    const items: XmlElement[] = [];
+    let top = 0;
+    for (const section of areas.reportHeader) {
+      const placed = this.placeSection(section, top, 'body', 'Report Header');
+      items.push(...placed.items);
+      top += placed.height;
+    }
+    const table = this.buildTablix(areas, top);
+    if (table.tablix) {
+      items.push(table.tablix);
+      top += table.height + 0.1;
+    }
+    for (const section of areas.reportFooter) {
+      const placed = this.placeSection(section, top, 'body', 'Report Footer');
+      items.push(...placed.items);
+      top += placed.height;
+    }
+    return { items, height: top };
+  }
+
+  /** Builds a subreport as items for the body of another report: its whole body, with its table reading all rows. */
+  buildEmbedded(): InlineResult {
+    this.prepare();
+    const areas = this.classify(this.definition.layout);
+    const { items, height } = this.bodyItems(areas);
+    let width = 0;
+    for (const item of items) width = Math.max(width, itemRight(item));
+    const connectionString = this.connectionString();
+    const shared = this.sharedAssignments();
+    this.finishDataset();
+    return {
+      shared,
+      sharedFallbacks: this.sharedFallbacks,
+      items, height, width, connectionString,
+      dataset: (dataSourceName) => this.datasetElement(dataSourceName),
+      parameters: this.parameterEntries(),
+      codeFunctions: this.codeFunctions,
+      codeMembers: this.codeMembers,
+      embeddedImages: this.embeddedImages,
+      review: this.review,
+    };
+  }
+
   build(): RdlResult {
     const def = this.definition;
     this.prepare();
@@ -1894,23 +1958,7 @@ class RdlBuilder {
       section.objects = keep;
     }
 
-    const bodyItems: XmlElement[] = [];
-    let top = 0;
-    for (const section of areas.reportHeader) {
-      const placed = this.placeSection(section, top, 'body', 'Report Header');
-      bodyItems.push(...placed.items);
-      top += placed.height;
-    }
-    const table = this.buildTablix(areas, top);
-    if (table.tablix) {
-      bodyItems.push(table.tablix);
-      top += table.height + 0.1;
-    }
-    for (const section of areas.reportFooter) {
-      const placed = this.placeSection(section, top, 'body', 'Report Footer');
-      bodyItems.push(...placed.items);
-      top += placed.height;
-    }
+    const { items: bodyItems, height: top } = this.bodyItems(areas);
     const placeAll = (sections: SectionInfo[], label: string) => sections.reduce((acc, s) => {
       const placed = this.placeSection(s, acc.height, 'page', label);
       return { items: [...acc.items, ...placed.items], height: acc.height + placed.height };
@@ -2222,6 +2270,9 @@ export function timeFormatString(f: TimeFormatInfo): string {
 export function formatFor(format: ValueFormat, type: string | undefined): string | undefined {
   switch (type) {
     case 'currency':
+      // A field left at the default format shows currency values like other numbers (no symbol); a customised
+      // one uses its currency format.
+      if (format.systemDefault) return format.number && numberFormatString(format.number);
       return format.currency && numberFormatString(format.currency);
     case 'number':
     case 'integer':

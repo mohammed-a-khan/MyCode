@@ -7,6 +7,7 @@ import { buildMetadata, jsonToRpt, readCfb, rptToJson, type RptJson } from './in
 import { jsonToDocument, sha256 } from './json.ts';
 import { convertDocumentsWithTemplate, convertDocumentToSsrs, reviewMarkdown } from './ssrs/convert.ts';
 import { readHouseTemplate, type HouseTemplate } from './ssrs/house.ts';
+import { chartStructure } from './crystal/chartinfo.ts';
 import { extractHeaders, formatHeadersCsv, formatHeadersText, type HeaderText } from './crystal/headers.ts';
 import { mkdir, readdir, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
@@ -17,7 +18,7 @@ Usage:
   rpt-json to-json <input.rpt> [output.json] [--hex] [--no-metadata] [--no-decode] [--no-original] [--compact]
   rpt-json to-rpt  <input.json> <output.rpt> [--no-verify] [--cfb-version 3|4]
   rpt-json to-rdl  <input.rpt|input.json|folder> [output-dir] [--connection "<connection string>"]
-                   [--shared-datasource <name>] [--template <house.rdl>]
+                   [--shared-datasource <name>] [--template <house.rdl>] [--separate-subreports]
                                             Convert to SSRS .rdl files (+ subreports) and a review checklist;
                                             --template lays each report out in the style of an existing .rdl
   rpt-json to-rdl  --template <house.rdl> --combine <output.rdl> <input.rpt|folder>...
@@ -26,6 +27,8 @@ Usage:
                                             List header text: report/page/group headers, column headings,
                                             chart titles (--all adds footers, details and field objects)
   rpt-json inspect <input.rpt>              Print decoded metadata (no stream data)
+  rpt-json charts  <input.rpt>              Print how each chart is stored, with all names and text hidden
+                                            (safe to share when a chart does not convert)
   rpt-json verify  <input.rpt>              Round-trip rpt -> json -> rpt and compare every stream,
                                             then again with every encrypted stream re-encrypted
 
@@ -133,6 +136,7 @@ async function main(argv: string[]): Promise<number> {
   if (command === 'to-rdl') {
     const connectionString = takeOption(args, '--connection');
     const sharedDataSource = takeOption(args, '--shared-datasource');
+    const separateSubreports = takeFlag(args, '--separate-subreports');
     const templatePath = takeOption(args, '--template');
     const combine = takeOption(args, '--combine');
     let template: HouseTemplate | undefined;
@@ -187,7 +191,7 @@ async function main(argv: string[]): Promise<number> {
         let base = original;
         const convert = (name: string) => (template
           ? [convertDocumentsWithTemplate(template, [{ doc, name: original }], name)]
-          : convertDocumentToSsrs(doc, name, { connectionString, sharedDataSource }));
+          : convertDocumentToSsrs(doc, name, { connectionString, sharedDataSource, separateSubreports }));
         let reports = convert(base);
         // Two inputs whose names clean up to the same file name ("A B" and "A_B") get a numbered suffix.
         for (let n = 2; reports.some((r) => written.has(r.fileName.toLowerCase())); n++) {
@@ -209,6 +213,15 @@ async function main(argv: string[]): Promise<number> {
       }
     }
     return failures > 0 ? 1 : 0;
+  }
+
+  if (command === 'charts') {
+    const [input] = positionals(args, 'charts', 1);
+    if (!input) throw new Error('charts needs an input .rpt file');
+    const raw = await readFile(input);
+    const doc = input.toLowerCase().endsWith('.json') ? jsonToDocument(JSON.parse(raw.toString('utf8'))) : readCfb(raw);
+    process.stdout.write(chartStructure(doc));
+    return 0;
   }
 
   if (command === 'headers') {

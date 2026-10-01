@@ -19,6 +19,8 @@ export interface SsrsOptions {
   connectionString?: string;
   /** A shared data source on the report server, used instead of an embedded connection. */
   sharedDataSource?: string;
+  /** Keep every subreport as its own .rdl (by default those outside the table are built into the report). */
+  separateSubreports?: boolean;
 }
 
 const safeFileName = (name: string) => name.replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'Report';
@@ -61,6 +63,7 @@ export function convertDocumentToSsrs(doc: CfbDocument, baseName: string, option
       reportName,
       connectionString: options.connectionString,
       sharedDataSource: options.sharedDataSource,
+      embedSubreports: !options.separateSubreports,
       subreports: model.storage ? new Map() : subreports,
       subreport: Boolean(model.storage),
       images: embeddedImages(storageAt(doc.root, model.storage)),
