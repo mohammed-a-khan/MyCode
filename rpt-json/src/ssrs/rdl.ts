@@ -1301,7 +1301,7 @@ class RdlBuilder {
 
     // Details: a single row, or a static member per detail section.
     let member: XmlElement = el('TablixMember',
-      el('Group', { Name: 'Details' }, pageBreak(areas.detail)),
+      el('Group', { Name: this.itemNames.make('Details') }, pageBreak(areas.detail)),
       detailSorts.length ? el('SortExpressions', ...detailSorts.map((s) => el('SortExpression', el('Value', `=${s.expression}`), s.descending ? el('Direction', 'Descending') : null))) : null,
       detailMembers.length > 1 ? el('TablixMembers', ...detailMembers) : null,
       detailMembers.length === 1 ? (detailMembers[0].children.find((c) => typeof c === 'object' && c !== null && (c as XmlElement).name === 'Visibility') ?? null) : null);
