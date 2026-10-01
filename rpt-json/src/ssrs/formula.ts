@@ -1135,6 +1135,39 @@ export class Emitter {
     return false;
   }
 
+  /**
+   * Crystal InStr / InStrRev with typed arguments. VB has several InStr overloads; with untyped (Object) field
+   * values SSRS cannot choose one (error BC30519), so every argument is converted to the parameter's type.
+   *   InStr(text, search)  InStr(start, text, search)  InStr(text, search, compare)  InStr(start, text, search, compare)
+   *   InStrRev(text, search [, start [, compare]])
+   * Crystal's compare is 0 (case-sensitive) or 1 (case-insensitive).
+   */
+  private instr(key: 'instr' | 'instrrev', args: Node[]): string {
+    const text = (n: Node) => `CStr(${this.emit(n)})`;
+    const whole = (n: Node) => `CInt(${this.emit(n)})`;
+    const compare = (n: Node) => {
+      const value = this.emit(n);
+      if (value === '1') return 'CompareMethod.Text';
+      if (value === '0') return 'CompareMethod.Binary';
+      return `IIf(${value} = 1, CompareMethod.Text, CompareMethod.Binary)`;
+    };
+    if (key === 'instrrev') {
+      const parts = [text(args[0]), text(args[1])];
+      if (args[2]) parts.push(whole(args[2]));
+      if (args[3]) parts.push(compare(args[3]));
+      return `InStrRev(${parts.join(', ')})`;
+    }
+    if (args.length >= 4) return `InStr(${whole(args[0])}, ${text(args[1])}, ${text(args[2])}, ${compare(args[3])})`;
+    if (args.length === 3) {
+      // The start form begins with a number; the compare form begins with text and ends with 0 or 1.
+      const startForm = this.isNumberNode(args[0]) || (!this.isStringNode(args[0]) && this.isStringNode(args[2]));
+      return startForm
+        ? `InStr(${whole(args[0])}, ${text(args[1])}, ${text(args[2])})`
+        : `InStr(${text(args[0])}, ${text(args[1])}, ${compare(args[2])})`;
+    }
+    return `InStr(${args.map(text).join(', ')})`;
+  }
+
   private isNumberNode(node: Node): boolean {
     if (node.t === 'literal') return /^-?[\d.]+$/.test(node.vb);
     if (node.t === 'field' && !node.ref.startsWith('@') && !node.ref.startsWith('?')) return ['integer', 'number', 'currency'].includes(this.ctx.fieldType?.(node.ref) ?? '');
@@ -1258,7 +1291,7 @@ export class Emitter {
       if (args[1].t === 'literal' || this.isStringNode(args[1])) {
         // "x in <string>" tests for a substring.
         const [value, target] = a();
-        return `(InStr(${target}, ${value}) > 0)`;
+        return `(InStr(CStr(${target}), CStr(${value})) > 0)`;
       }
       this.note('tests a value against a range parameter or named date range; check the translated comparison');
       const [value, target] = a();
@@ -1398,6 +1431,7 @@ export class Emitter {
         this.note('uses InRepeatedGroupHeader; SSRS repeats header rows itself, False was used');
         return 'False';
     }
+    if (key === 'instr' || key === 'instrrev') return this.instr(key, args);
     const vb = SAME_ARGS[key];
     if (vb) return `${vb}(${a().join(', ')})`;
     const custom = this.ctx.customFunction?.(name);

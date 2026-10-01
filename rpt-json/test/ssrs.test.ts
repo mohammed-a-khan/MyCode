@@ -648,7 +648,7 @@ describe('audit fixes', () => {
     assert.equal(f('Truncate({Orders.Amount}, 2)'), '=(Fix(Fields!Amount.Value * 10 ^ 2) / 10 ^ 2)');
     assert.equal(f('ToText({Orders.Amount})'), '=FormatNumber(Fields!Amount.Value, 2)');
     assert.equal(f('{Orders.Name} startswith "A"'), '=CStr(Fields!Name.Value).StartsWith("A")');
-    assert.equal(f('"b" in "abc"'), '=(InStr("abc", "b") > 0)');
+    assert.equal(f('"b" in "abc"'), '=(InStr(CStr("abc"), CStr("b")) > 0)');
     assert.equal(f('Split({Orders.Name}, ",")[2]'), '=Code.CrSplit(Fields!Name.Value, ",")(2)');
     assert.match(f('if {Orders.Amount} <> 0 then 1 / {Orders.Amount} else 0'), /^=If\(/, 'a guarded division must not be evaluated');
   });
@@ -809,5 +809,18 @@ describe('XML reading', () => {
     assert.equal(x.attributes.a, '1&2');
     assert.deepEqual(x.children.map((c) => (typeof c === 'object' && c ? (c as { name: string }).name : c)), ['V', 'E', 'M']);
     assert.throws(() => parseXml('<R><A></R>'), /does not match/);
+  });
+});
+
+describe('InStr with typed arguments', () => {
+  // Untyped (Object) field values make VB's InStr overloads ambiguous in SSRS (BC30519): every argument is converted.
+  const t = (source: string) => translateFormula(source, ctx).expression;
+  it('translates each Crystal form', () => {
+    assert.equal(t('InStr({Orders.Note}, "x")'), '=InStr(CStr(Fields!Note.Value), CStr("x"))');
+    assert.equal(t('InStr({Orders.Note}, "x", 1) = 0'), '=(InStr(CStr(Fields!Note.Value), CStr("x"), CompareMethod.Text) = 0)');
+    assert.equal(t('InStr({Orders.Note}, "x", 0)'), '=InStr(CStr(Fields!Note.Value), CStr("x"), CompareMethod.Binary)');
+    assert.equal(t('InStr(2, {Orders.Note}, "x")'), '=InStr(CInt(2), CStr(Fields!Note.Value), CStr("x"))');
+    assert.equal(t('InStr(2, {Orders.Note}, "x", 1)'), '=InStr(CInt(2), CStr(Fields!Note.Value), CStr("x"), CompareMethod.Text)');
+    assert.equal(t('InStrRev({Orders.Note}, "x")'), '=InStrRev(CStr(Fields!Note.Value), CStr("x"))');
   });
 });
