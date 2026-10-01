@@ -182,9 +182,68 @@ export interface ChartInfo {
   graphType?: number;
 }
 
+/** A number format of a field (Crystal's Format Editor, Number tab). */
+export interface NumberFormatInfo {
+  decimals: number;
+  thousands: boolean;
+  leadingZero: boolean;
+  /** 0 none, 1 leading minus, 2 trailing minus, 3 brackets. */
+  negative: number;
+  /** 0 no symbol, 1 fixed, 2 floating. */
+  symbolType: number;
+  symbol: string;
+  /** 0 leading inside the negative sign, 1 leading outside, 2 trailing inside, 3 trailing outside. */
+  symbolPosition: number;
+}
+
+/** A date format (Date tab). */
+export interface DateFormatInfo {
+  /** 0 year-month-day, 1 day-month-year, 2 month-day-year. */
+  order: number;
+  /** 0 short (yy), 1 long (yyyy), 2 none. */
+  year: number;
+  /** 0 numeric, 1 leading zero, 2 short name, 3 long name, 4 none. */
+  month: number;
+  /** 0 numeric, 1 leading zero, 2 none. */
+  day: number;
+  /** 0 short name, 1 long name, 2 none. */
+  dayOfWeek: number;
+  /** Separators between the first and second, and the second and third parts. */
+  separators: [string, string];
+}
+
+/** A time format (Time tab). */
+export interface TimeFormatInfo {
+  hour12: boolean;
+  seconds: boolean;
+  am: string;
+  pm: string;
+  hourMinute: string;
+  minuteSecond: string;
+}
+
+/** How a field shows its value: the number format for currency values and for other numbers, date and time. */
+export interface ValueFormat {
+  currency?: NumberFormatInfo;
+  number?: NumberFormatInfo;
+  date?: DateFormatInfo;
+  time?: TimeFormatInfo;
+  /** 0 date then time, 1 time then date, 2 date only, 3 time only. */
+  dateTimeOrder?: number;
+  dateTimeSeparator?: string;
+}
+
 export interface ReportObject {
   kind: string;
   name: string;
+  /** Horizontal alignment set on the object (absent: Crystal's default for the value type). */
+  align?: 'left' | 'center' | 'right' | 'justify';
+  /** Suppressed (the Suppress box ticked): not shown, though a formula in it still runs. */
+  suppressed?: boolean;
+  /** Value format of a field object. */
+  format?: ValueFormat;
+  /** Value formats of a text object's embedded fields, in the order of embeddedFields. */
+  fieldFormats?: ValueFormat[];
   field?: string;
   text?: string;
   embeddedFields?: string[];
@@ -542,6 +601,80 @@ function namedConditions(node: RecordNode): Record<string, FormulaRef> | undefin
 }
 
 /** Walks the top-level record sequence, where areas, sections and objects follow each other in order. */
+
+/** Strings stored one after another from a position: [strings, position after them]. */
+function stringsFrom(bytes: Uint8Array, pos: number, count: number): [string[], number] {
+  const out: string[] = [];
+  for (let i = 0; i < count; i++) {
+    const s = stringAt(bytes, pos);
+    if (!s) {
+      // An empty string is a length of 1 holding just the terminating zero.
+      if (pos + 5 <= bytes.length && u32(bytes, pos) === 1 && bytes[pos + 4] === 0) {
+        out.push('');
+        pos += 5;
+        continue;
+      }
+      return [out, pos];
+    }
+    out.push(s.text);
+    pos += s.length;
+  }
+  return [out, pos];
+}
+
+/** Number format record: 14 flag bytes, then the thousands separator, decimal separator and currency symbol. */
+function numberFormat(node: RecordNode): NumberFormatInfo | undefined {
+  const b = ownBytes(node);
+  if (b.length < 14) return undefined;
+  const [strings] = stringsFrom(b, 14, 3);
+  return {
+    decimals: b[8], thousands: b[4] === 1, leadingZero: b[6] === 1, negative: b[2],
+    symbolType: b[10], symbol: strings[2] ?? '', symbolPosition: b[13],
+  };
+}
+
+/** Date format record: order, year, month, day, day of week, ..., then the separators. */
+function dateFormat(node: RecordNode): DateFormatInfo | undefined {
+  const b = ownBytes(node);
+  if (b.length < 8) return undefined;
+  const [strings] = stringsFrom(b, 8, 5);
+  return { order: b[0], year: b[1], month: b[2], day: b[3], dayOfWeek: b[4], separators: [strings[1] ?? '/', strings[2] ?? '/'] };
+}
+
+/** Time format record: 12/24-hour, ..., seconds; then the AM and PM strings and the separators. */
+function timeFormat(node: RecordNode): TimeFormatInfo | undefined {
+  const b = ownBytes(node);
+  if (b.length < 5) return undefined;
+  const [strings] = stringsFrom(b, 5, 4);
+  return { hour12: b[0] === 0, seconds: b[4] !== 2, am: strings[0] ?? 'AM', pm: strings[1] ?? 'PM', hourMinute: strings[2] ?? ':', minuteSecond: strings[3] ?? ':' };
+}
+
+/** Reads a value-format record (number, date, time, date-time) into a format. */
+function readValueFormat(record: RecordNode, format: ValueFormat): void {
+  const number = firstChild(record, 0x00f8);
+  if (number && record.type === 0x00f9) {
+    const info = numberFormat(number);
+    // The first number format is the one for currency values, the second for other numbers.
+    if (info) {
+      if (!format.currency) format.currency = info;
+      else if (!format.number) format.number = info;
+    }
+  }
+  const date = firstChild(record, 0x00f2);
+  if (date && record.type === 0x00f3) format.date = dateFormat(date);
+  const time = firstChild(record, 0x00f6);
+  if (time && record.type === 0x00f7) format.time = timeFormat(time);
+  const order = firstChild(record, 0x00f4);
+  if (order && record.type === 0x00f5) {
+    const b = ownBytes(order);
+    if (b.length) format.dateTimeOrder = b[0];
+    const [strings] = stringsFrom(b, 1, 1);
+    if (strings[0] !== undefined) format.dateTimeSeparator = strings[0];
+  }
+}
+
+const ALIGNMENTS: Record<number, ReportObject['align']> = { 1: 'left', 2: 'center', 3: 'right', 4: 'justify' };
+
 function buildLayout(records: RecordNode[]): AreaInfo[] {
   const areas: AreaInfo[] = [];
   let section: SectionInfo | undefined;
@@ -706,6 +839,26 @@ function buildLayout(records: RecordNode[]): AreaInfo[] {
       case 0x00fb: {
         const conditions = namedConditions(record);
         if (conditions) object.conditions = { ...object.conditions, ...conditions };
+        if (record.type === 0x00fd && !object.align) {
+          // Object format: the third byte is the horizontal alignment.
+          const common = firstChild(record, 0x00fc);
+          const b = common ? ownBytes(common) : undefined;
+          const align = b && b.length > 2 ? ALIGNMENTS[b[2]] : undefined;
+          if (align) object.align = align;
+          // The second byte is 1 for a visible object and 0 for a suppressed one.
+          if (b && b.length > 1 && b[1] === 0) object.suppressed = true;
+        }
+        if (record.type !== 0x00fd) {
+          // Value formats belong to the field object, or to the text object's latest embedded field.
+          const embedded = object.embeddedFields?.length ?? 0;
+          if (object.kind === 'text' && embedded) {
+            const formats = (object.fieldFormats ??= []);
+            while (formats.length < embedded) formats.push({});
+            readValueFormat(record, formats[embedded - 1]);
+          } else if (object.kind === 'field') {
+            readValueFormat(record, (object.format ??= {}));
+          }
+        }
         break;
       }
       case OLE_ITEM: {

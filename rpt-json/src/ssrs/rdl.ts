@@ -16,6 +16,10 @@
 import type {
   AreaInfo,
   BorderInfo,
+  DateFormatInfo,
+  NumberFormatInfo,
+  TimeFormatInfo,
+  ValueFormat,
   DataSourceInfo,
   FormulaInfo,
   FormulaRef,
@@ -27,7 +31,7 @@ import type {
 import { classifyAreas } from '../crystal/areas.ts';
 import { detailColumnHeadings } from '../crystal/headers.ts';
 import { CODE_HELPERS, SPECIAL_FIELDS, translateFormula, translateToSql, vbString, type FormulaContext, type Translation } from './formula.ts';
-import { el, toXml, type XmlElement } from './xml.ts';
+import { el, escapeXml, toXml, type XmlElement } from './xml.ts';
 
 export interface RdlOptions {
   /** Name of the report (used for ids and review notes). */
@@ -65,6 +69,10 @@ interface InlineResult {
   codeMembers: Record<string, string>;
   embeddedImages: XmlElement[];
   review: ReviewNote[];
+  /** Shared variables the report sets from its own data: variable (lower case) -> expression scoped to its dataset. */
+  shared: Map<string, string>;
+  /** Translations of the formulas in it that read shared variables, for when no value is known. */
+  sharedFallbacks: Map<string, string>;
 }
 
 export interface ParameterEntry {
@@ -281,13 +289,21 @@ class RdlBuilder {
   /** Subreports (by "Subdocument N" number) placed inline, and those kept as subreport items. */
   private readonly inlinedSubreports = new Set<number>();
   private readonly referencedSubreports = new Set<number>();
+  /** Values of shared variables set by subreports placed inline (null: set to different values). */
+  private readonly sharedValues = new Map<string, string | null>();
+  /** Expressions to use for shared variables whose value is not known from a subreport. */
+  private readonly sharedFallbacks = new Map<string, string>();
   private cachedConnectionString?: string;
+  /** The data source's name: a shared data source keeps its own name ("/Data Sources/Sales" -> Sales). */
+  private readonly dataSourceName: string;
 
   constructor(definition: ReportDefinition, source: DataSourceInfo, options: RdlOptions) {
     this.definition = definition;
     this.source = source;
     this.options = options;
     this.dataset = options.inline?.dataset ?? DATASET;
+    const shared = options.sharedDataSource?.split('/').filter(Boolean).pop();
+    this.dataSourceName = shared ? sanitizeName(shared) : DATASOURCE;
     this.datasetNames.make(DATASET);
     if (options.inline) {
       // Global (not Shared) variables stay separate per placed copy of a subreport.
@@ -463,8 +479,17 @@ class RdlBuilder {
     this.addCode(t);
     for (const issue of t.issues) this.note(`Formula {@${formula.name}}`, issue);
     const expression = t.expression.slice(1);
+    // A formula that only reads a shared variable: the value a subreport placed inline sets it to, filled in
+    // when the report is written (a dataset field would be computed before any subreport has run).
+    const variable = sharedRead(formula.text);
+    if (variable) {
+      this.sharedFallbacks.set(variable, `(${expression})`);
+      const token = sharedToken(variable);
+      this.formulaResults.set(key, token);
+      return token;
+    }
     let result: string;
-    if (AGGREGATE_CALL.test(expression) || expression.includes('Globals!') || expression.includes('Me.Value')) {
+    if (AGGREGATE_CALL.test(expression) || expression.includes('Globals!') || expression.includes('Me.Value') || expression.includes(SHARED_TOKEN)) {
       result = `(${expression})`;
     } else {
       const fieldName = this.fieldNames.make(`F_${formula.name}`);
@@ -508,6 +533,24 @@ class RdlBuilder {
   }
 
   // ---- expressions for report objects ------------------------------------------------------
+
+  /** The value type of a field reference, when known (for applying its Crystal format). */
+  private valueTypeOf(ref: string): string | undefined {
+    const special = ref.toLowerCase();
+    if (['print date', 'data date', 'modification date', 'current date'].includes(special)) return 'date';
+    if (['print time', 'data time', 'modification time'].includes(special)) return 'time';
+    if (['page number', 'total page count', 'record number', 'group number'].includes(special)) return 'integer';
+    if (ref.startsWith('?')) return this.parameterInfo(ref.slice(1))?.valueType;
+    const summary = SUMMARY_NAME.exec(ref);
+    if (summary) {
+      const operation = summary[1].toLowerCase();
+      if (operation === 'count' || operation === 'distinct count') return 'integer';
+      const inner = this.valueTypeOf(summary[2]);
+      return operation === 'average' && inner === 'integer' ? 'number' : inner;
+    }
+    if (ref.startsWith('@') || ref.startsWith('#') || ref.startsWith('%')) return undefined;
+    return this.formulaContext.fieldType?.(ref);
+  }
 
   /** Expression (without "=") and format for a field object's reference. */
   private fieldObjectValue(ref: string, scope: Scope, item: string): { expression: string; format?: string } {
@@ -590,14 +633,22 @@ class RdlBuilder {
     const item = `${obj.kind} object "${obj.name}"`;
     if (obj.kind === 'field' && obj.field) {
       const { expression, format } = this.fieldObjectValue(obj.field, scope, item);
-      return { value: `=${expression}`, format };
+      return { value: `=${expression}`, format: (obj.format && formatFor(obj.format, this.valueTypeOf(obj.field))) ?? format };
     }
     if (obj.kind === 'text') {
       const text = obj.text ?? '';
       if (obj.embeddedFields?.length) {
         // Text and embedded fields in their original order; tabs become spaces (text boxes do not tab).
         const runs = obj.runs ?? [{ text }, ...obj.embeddedFields.map((field) => ({ field }))];
-        const parts = runs.map((r) => ('field' in r ? this.fieldObjectValue(r.field, scope, item).expression : vbString(r.text.replace(/\t+/g, '    '))));
+        let fieldIndex = 0;
+        const parts = runs.map((r) => {
+          if (!('field' in r)) return vbString(r.text.replace(/\t+/g, '    '));
+          const { expression } = this.fieldObjectValue(r.field, scope, item);
+          // An embedded field shows with its own format (in text, a value is shown as Crystal formats it).
+          const own = obj.fieldFormats?.[fieldIndex++];
+          const format = own && formatFor(own, this.valueTypeOf(r.field));
+          return format ? `Format(${expression}, ${vbString(format)})` : expression;
+        });
         return { value: `=${parts.join(' & ')}` };
       }
       // Multi-line text becomes an expression so each line break is kept (vbCrLf).
@@ -660,7 +711,8 @@ class RdlBuilder {
     const hyperlink = conditions.hyperlink ? this.conditionExpression(conditions.hyperlink, false, item, scope) : undefined;
     const toolTip = conditions.toolTip ? this.conditionExpression(conditions.toolTip, false, item, scope) : undefined;
     const backColor = conditions.backColor ? this.conditionExpression(conditions.backColor, true, item, scope) : undefined;
-    const suppress = conditions.suppress ? this.conditionExpression(conditions.suppress, false, item, scope) : undefined;
+    // Suppressed in Crystal: hidden (kept, so the item and any formula in it are still there to unhide).
+    const suppress = obj?.suppressed ? '=True' : conditions.suppress ? this.conditionExpression(conditions.suppress, false, item, scope) : undefined;
     for (const key of Object.keys(conditions)) {
       if (!['fontColor', 'hyperlink', 'toolTip', 'backColor', 'suppress'].includes(key)) this.note(item, `formatting formula ${conditions[key].name} is not converted; set it on the text box manually`);
     }
@@ -670,7 +722,7 @@ class RdlBuilder {
       el('KeepTogether', 'true'),
       el('Paragraphs', el('Paragraph',
         el('TextRuns', el('TextRun', el('Value', value), this.textRunStyle(obj, format, scope))),
-        el('Style'))),
+        el('Style', obj?.align ? el('TextAlign', TEXT_ALIGN[obj.align]) : null))),
       hyperlink ? el('ActionInfo', el('Actions', el('Action', el('Hyperlink', hyperlink)))) : null,
       toolTip ? el('ToolTip', toolTip) : null,
       box ? el('Top', inches(box.top)) : null,
@@ -737,7 +789,7 @@ class RdlBuilder {
     const result = child.buildInline();
 
     // The subreport's data source: the main one when the connection matches (or it reads no database), otherwise its own.
-    let dataSource = DATASOURCE;
+    let dataSource = this.dataSourceName;
     const readsData = (info.dataSource?.tables.length ?? 0) > 0;
     if (readsData && !this.options.sharedDataSource && result.connectionString !== this.connectionString()) {
       const existing = this.extraDataSources.find((d) => d.connectionString === result.connectionString);
@@ -745,6 +797,11 @@ class RdlBuilder {
       if (!existing) this.extraDataSources.push({ name: dataSource, connectionString: result.connectionString });
     }
     this.extraDataSets.push(result.dataset(dataSource));
+    for (const [variable, fallback] of result.sharedFallbacks) if (!this.sharedFallbacks.has(variable)) this.sharedFallbacks.set(variable, fallback);
+    for (const [variable, value] of result.shared) {
+      const known = this.sharedValues.get(variable);
+      this.sharedValues.set(variable, known === undefined || known === value ? value : null);
+    }
     for (const p of result.parameters) {
       // A linked subreport's "Pm-Table.Field" parameter takes the main report's field, unprompted.
       const link = info.links.find((l) => l.parameter.toLowerCase() === p.name.toLowerCase());
@@ -766,7 +823,7 @@ class RdlBuilder {
     this.embeddedImages.push(...result.embeddedImages);
     for (const n of result.review) {
       // Notes about a connection it shares with the main report are already in the main report's notes.
-      if (n.item === 'Data source' && dataSource === DATASOURCE) continue;
+      if (n.item === 'Data source' && dataSource === this.dataSourceName) continue;
       // Placed inline, a subreport without a database simply shows its formulas and parameters.
       if (n.item === 'Dataset' && !readsData) continue;
       this.note(`${item}: ${n.item}`, n.message);
@@ -1603,6 +1660,38 @@ class RdlBuilder {
     for (const p of def.parameters) this.parameterName(p.name);
   }
 
+  /**
+   * Shared variables this report sets from its data ("shared StringVar x; x := {Table.Field}"), as expressions
+   * reading its dataset's first row: what the variables hold once the report has printed (in a page header, a
+   * subreport prints one record).
+   */
+  private sharedAssignments(): Map<string, string> {
+    const out = new Map<string, string | null>();
+    for (const formula of this.definition.formulas) {
+      const assignment = sharedAssignment(formula.text);
+      if (!assignment) continue;
+      const t = translateFormula(assignment.value, this.formulaContext);
+      if (t.code || t.issues.length || t.expression === '=Nothing') continue;
+      const value = scopeOutsideRegion(t.expression.slice(1), this.dataset);
+      const known = out.get(assignment.name);
+      out.set(assignment.name, known === undefined || known === value ? value : null);
+    }
+    return new Map([...out].filter((e): e is [string, string] => e[1] !== null));
+  }
+
+  /** Fills in the shared variables read by formulas: the subreport's value, or the formula's own translation. */
+  private resolveShared(xml: string, escape = escapeXml): string {
+    return xml.replace(new RegExp(`${SHARED_TOKEN}([a-z0-9_]+)__`, 'g'), (_, variable: string) => {
+      const value = this.sharedValues.get(variable);
+      if (value) {
+        this.note(`Shared variable ${variable}`, `is set by a subreport placed in the page header; its value there (${value}) is used directly`);
+        return escape(`(${value})`);
+      }
+      if (value === null) this.note(`Shared variable ${variable}`, 'is set to different values by several subreports; the formula reading it was kept as custom code, check it');
+      return escape(this.sharedFallbacks.get(variable) ?? 'Nothing');
+    });
+  }
+
   /** Builds the report as items for a page header/footer of another report: every section, stacked, reading the first row. */
   buildInline(): InlineResult {
     this.prepare();
@@ -1625,8 +1714,11 @@ class RdlBuilder {
     let width = 0;
     for (const item of items) width = Math.max(width, itemRight(item));
     const connectionString = this.connectionString();
+    const shared = this.sharedAssignments();
     this.finishDataset();
     return {
+      shared,
+      sharedFallbacks: this.sharedFallbacks,
       items, height: top, width, connectionString,
       dataset: (dataSourceName) => this.datasetElement(dataSourceName),
       parameters: this.parameterEntries(),
@@ -1651,7 +1743,7 @@ class RdlBuilder {
 
     // Columns: the detail fields (and texts with embedded fields), left to right.
     const detailObjects = areas.detail.flatMap((s) => s.objects)
-      .filter((o) => (o.kind === 'field' && o.field) || (o.kind === 'text' && o.embeddedFields?.length))
+      .filter((o) => !o.suppressed && ((o.kind === 'field' && o.field) || (o.kind === 'text' && o.embeddedFields?.length)))
       .sort((a, b) => (a.position?.x ?? 0) - (b.position?.x ?? 0));
     const columns: BlockColumn[] = detailObjects.map((obj, i) => {
       placed.add(obj);
@@ -1696,7 +1788,7 @@ class RdlBuilder {
     let totalLabel: string | undefined;
     for (const { sections, level } of footers) {
       for (const section of sections) {
-        const summaries = section.objects.filter((o) => o.kind === 'field' && o.field && (SUMMARY_NAME.test(o.field) || o.field.startsWith('#')));
+        const summaries = section.objects.filter((o) => !o.suppressed && o.kind === 'field' && o.field && (SUMMARY_NAME.test(o.field) || o.field.startsWith('#')));
         let used = false;
         for (const obj of summaries) {
           const column = columnOf(obj);
@@ -1725,7 +1817,7 @@ class RdlBuilder {
 
     // Title: the largest text in the report header or page header that is not a column heading.
     const titleObject = [...areas.reportHeader, ...areas.pageHeader].flatMap((s) => s.objects)
-      .filter((o) => o.kind === 'text' && !o.embeddedFields?.length && (o.text ?? '').trim() && !headingObjects.has(o))
+      .filter((o) => o.kind === 'text' && !o.suppressed && !o.embeddedFields?.length && (o.text ?? '').trim() && !headingObjects.has(o))
       .sort((a, b) => (b.style?.size ?? 0) - (a.style?.size ?? 0) || (a.position?.y ?? 0) - (b.position?.y ?? 0))[0];
     if (titleObject) placed.add(titleObject);
 
@@ -1751,7 +1843,7 @@ class RdlBuilder {
     for (const area of def.layout) {
       for (const section of area.sections) {
         for (const obj of section.objects) {
-          if (placed.has(obj) || obj.kind === 'line' || obj.kind === 'box') continue;
+          if (placed.has(obj) || obj.suppressed || obj.kind === 'line' || obj.kind === 'box') continue;
           if (obj.kind === 'text' && !(obj.text ?? '').trim() && !obj.embeddedFields?.length) continue;
           left.push(`${obj.kind} "${obj.name}"${obj.kind === 'text' ? ` (${(obj.text ?? '').trim().slice(0, 40)})` : obj.field ? ` (${obj.field})` : ''}`);
         }
@@ -1762,6 +1854,13 @@ class RdlBuilder {
     }
 
     this.finishDataset();
+    // No subreport runs in a house layout's header: shared variables keep their formulas' own translation.
+    const resolve = (text: string) => this.resolveShared(text, (t) => t);
+    for (const column of columns) {
+      column.value = resolve(column.value);
+      if (column.total) column.total.value = resolve(column.total.value);
+    }
+    for (const sort of order) sort.expression = resolve(sort.expression);
     return {
       title: titleObject ? (titleObject.text ?? '').trim().replace(/\s*\n\s*/g, ' ') : undefined,
       totalLabel,
@@ -1846,22 +1945,22 @@ class RdlBuilder {
       el('df:DefaultFontFamily', 'Arial'),
       el('AutoRefresh', '0'),
       el('DataSources', this.options.sharedDataSource
-        ? el('DataSource', { Name: DATASOURCE },
+        ? el('DataSource', { Name: this.dataSourceName },
           el('DataSourceReference', this.options.sharedDataSource),
           el('rd:SecurityType', 'None'),
-          el('rd:DataSourceID', reportId(`${this.options.reportName}/${DATASOURCE}`)))
-        : el('DataSource', { Name: DATASOURCE },
+          el('rd:DataSourceID', reportId(`${this.options.reportName}/${this.dataSourceName}`)))
+        : el('DataSource', { Name: this.dataSourceName },
           el('rd:SecurityType', 'Integrated'),
           el('ConnectionProperties',
             el('DataProvider', 'SQL'),
             el('ConnectString', this.connectionString()),
             el('IntegratedSecurity', 'true')),
-          el('rd:DataSourceID', reportId(`${this.options.reportName}/${DATASOURCE}`))),
+          el('rd:DataSourceID', reportId(`${this.options.reportName}/${this.dataSourceName}`))),
         ...this.extraDataSources.map((d) => el('DataSource', { Name: d.name },
           el('rd:SecurityType', 'Integrated'),
           el('ConnectionProperties', el('DataProvider', 'SQL'), el('ConnectString', d.connectionString), el('IntegratedSecurity', 'true')),
           el('rd:DataSourceID', reportId(`${this.options.reportName}/${d.name}`))))),
-      el('DataSets', this.datasetElement(DATASOURCE), ...this.extraDataSets),
+      el('DataSets', this.datasetElement(this.dataSourceName), ...this.extraDataSets),
       el('ReportSections', el('ReportSection',
         el('Body', el('ReportItems', ...bodyItems), el('Height', inches(Math.max(top, DEFAULT_HEIGHT))), el('Style')),
         el('Width', inches(Math.max(width, 1))),
@@ -1888,7 +1987,8 @@ class RdlBuilder {
       if (!used && f.text.trim()) this.note(`Formula {@${f.name}}`, 'is a formatting formula that no object uses in a decoded property; check whether it is still needed');
     }
     const inlinedOnly = [...this.inlinedSubreports].filter((n) => !this.referencedSubreports.has(n));
-    return { rdl: toXml(report), review: this.review, ...(inlinedOnly.length ? { inlinedOnly } : {}) };
+    const rdl = this.resolveShared(toXml(report));
+    return { rdl, review: this.review, ...(inlinedOnly.length ? { inlinedOnly } : {}) };
   }
 }
 
@@ -2067,4 +2167,137 @@ export function chartStyle(family: number | undefined, graphType: number | undef
     default:
       return withNote({ type: 'Column' }, `SSRS has no ${name} chart; a column chart was used (a gauge can be added by hand)`);
   }
+}
+
+const TEXT_ALIGN: Record<NonNullable<ReportObject['align']>, string> = { left: 'Left', center: 'Center', right: 'Right', justify: 'Justify' };
+
+/** A literal in a .NET format string. */
+const literalText = (text: string) => (text ? `'${text.replace(/'/g, "\\'")}'` : '');
+
+/** A .NET format string for a Crystal number format. */
+export function numberFormatString(f: NumberFormatInfo): string {
+  // Without a leading zero, values below 1 show as .50; whole numbers still show 0.
+  const zero = f.leadingZero || f.decimals === 0;
+  const whole = f.thousands ? (zero ? '#,0' : '#,#') : zero ? '0' : '#';
+  const body = whole + (f.decimals > 0 ? `.${'0'.repeat(Math.min(f.decimals, 15))}` : '');
+  const symbol = f.symbolType > 0 && f.symbol ? literalText(f.symbol) : '';
+  const trailing = f.symbolPosition >= 2;
+  const positive = symbol ? (trailing ? body + symbol : symbol + body) : body;
+  // Positions 1 and 3 (Crystal's default) put the sign or brackets around the number with its symbol: ($1.00);
+  // 0 and 2 keep the symbol outside them: $(1.00).
+  const outside = symbol && (f.symbolPosition === 0 || f.symbolPosition === 2);
+  const wrap = (core: string) => (f.negative === 3 ? `(${core})` : f.negative === 2 ? `${core}-` : f.negative === 0 ? core : `-${core}`);
+  const negative = outside ? (trailing ? wrap(body) + symbol : symbol + wrap(body)) : wrap(positive);
+  return `${positive};${negative}`;
+}
+
+/** A .NET format string for a Crystal date format. */
+export function dateFormatString(f: DateFormatInfo): string {
+  const year = ['yy', 'yyyy'][f.year];
+  const month = ['M', 'MM', 'MMM', 'MMMM'][f.month];
+  const day = ['d', 'dd'][f.day];
+  const parts = (f.order === 1 ? [day, month, year] : f.order === 2 ? [month, day, year] : [year, month, day]);
+  let out = '';
+  parts.forEach((part, i) => {
+    if (!part) return;
+    if (out) out += literalText(f.separators[Math.min(i, 2) - 1] ?? f.separators[0]);
+    out += part;
+  });
+  const weekday = ['ddd', 'dddd'][f.dayOfWeek];
+  if (weekday) out = out ? `${weekday}', '${out}` : weekday;
+  return out.length === 1 ? `%${out}` : out;
+}
+
+/** A .NET format string for a Crystal time format. */
+export function timeFormatString(f: TimeFormatInfo): string {
+  let out = `${f.hour12 ? 'h' : 'HH'}${literalText(f.hourMinute || ':')}mm`;
+  if (f.seconds) out += `${literalText(f.minuteSecond || ':')}ss`;
+  if (f.hour12) out += `${/^\s/.test(f.am) ? ' ' : ''}tt`;
+  return out;
+}
+
+/** The format Crystal shows a value of a type with, as a .NET format string; undefined when not decided by the format. */
+export function formatFor(format: ValueFormat, type: string | undefined): string | undefined {
+  switch (type) {
+    case 'currency':
+      return format.currency && numberFormatString(format.currency);
+    case 'number':
+    case 'integer':
+      return format.number && numberFormatString(format.number);
+    case 'date':
+      return format.date && dateFormatString(format.date);
+    case 'time':
+      return format.time && timeFormatString(format.time);
+    case 'dateTime': {
+      const date = format.date && dateFormatString(format.date);
+      const time = format.time && timeFormatString(format.time);
+      const separator = literalText(format.dateTimeSeparator?.trim() ? format.dateTimeSeparator : ' ');
+      switch (format.dateTimeOrder ?? 0) {
+        case 2: return date;
+        case 3: return time;
+        case 1: return time && date ? `${time}${separator}${date}` : undefined;
+        default: return date && time ? `${date}${separator}${time}` : undefined;
+      }
+    }
+    default:
+      return undefined;
+  }
+}
+
+/** Placeholder for a shared variable's value in expressions, replaced when the report is written. */
+const SHARED_TOKEN = '__CrShared_';
+const sharedToken = (variable: string) => `${SHARED_TOKEN}${variable}__`;
+
+/** Statements of a formula without comments, empty statements and evaluation-time markers. */
+function formulaStatements(text: string): string[] | undefined {
+  // Split on ";" outside strings and {field} references (stored procedure fields read {proc;1.field}).
+  const statements: string[] = [];
+  let current = '';
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '/' && text[i + 1] === '/') {
+      while (i < text.length && text[i] !== '\n') i++;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === '{') {
+      const close = c === '{' ? '}' : c;
+      const end = text.indexOf(close, i + 1);
+      if (end < 0) return undefined;
+      current += text.slice(i, end + 1);
+      i = end;
+      continue;
+    }
+    if (c === ';') {
+      statements.push(current);
+      current = '';
+      continue;
+    }
+    current += c;
+  }
+  statements.push(current);
+  return statements.map((s) => s.trim())
+    .filter((s) => s && !/^(WhilePrintingRecords|WhileReadingRecords|BeforeReadingRecords|EvaluateAfter\s*\(.*\))$/i.test(s));
+}
+
+/** "shared StringVar x; x := <value>" (or "shared StringVar x := <value>"): the variable and the value's source text. */
+export function sharedAssignment(text: string): { name: string; value: string } | undefined {
+  const statements = formulaStatements(text);
+  if (!statements) return undefined;
+  if (statements.length === 1) {
+    const m = /^shared\s+\w+var\s+(\w+)\s*:=\s*([\s\S]+)$/i.exec(statements[0]);
+    return m ? { name: m[1].toLowerCase(), value: m[2].trim() } : undefined;
+  }
+  if (statements.length !== 2) return undefined;
+  const declaration = /^shared\s+\w+var\s+(\w+)$/i.exec(statements[0]);
+  if (!declaration) return undefined;
+  const m = /^(\w+)\s*:=\s*([\s\S]+)$/.exec(statements[1]);
+  return m && m[1].toLowerCase() === declaration[1].toLowerCase() ? { name: m[1].toLowerCase(), value: m[2].trim() } : undefined;
+}
+
+/** "shared StringVar x; x": the variable a formula only reads. */
+export function sharedRead(text: string): string | undefined {
+  const statements = formulaStatements(text);
+  if (!statements || statements.length !== 2) return undefined;
+  const declaration = /^shared\s+\w+var\s+(\w+)$/i.exec(statements[0]);
+  return declaration && statements[1].toLowerCase() === declaration[1].toLowerCase() ? declaration[1].toLowerCase() : undefined;
 }

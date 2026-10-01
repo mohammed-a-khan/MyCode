@@ -8,7 +8,7 @@ import { convertDocumentToSsrs } from '../src/ssrs/convert.ts';
 import { extractHeaders, formatHeadersCsv, formatHeadersText } from '../src/crystal/headers.ts';
 import { CODE_HELPERS, crystalColor, translateFormula, translateToSql, vbString, type FormulaContext } from '../src/ssrs/formula.ts';
 import { isBasicSyntax } from '../src/ssrs/basic.ts';
-import { chartStyle, convertToRdl, scopeOutsideRegion, substituteCommandParameters } from '../src/ssrs/rdl.ts';
+import { chartStyle, convertToRdl, dateFormatString, formatFor, numberFormatString, scopeOutsideRegion, substituteCommandParameters } from '../src/ssrs/rdl.ts';
 import { classifyAreas } from '../src/crystal/areas.ts';
 import { buildHouseReport, readHouseTemplate } from '../src/ssrs/house.ts';
 import { parseXml } from '../src/ssrs/xml.ts';
@@ -800,6 +800,7 @@ describe('house template layout', () => {
     const { rdl } = convertToRdl({ ...emptyDefinition(), layout: detailLayout('usp_Holdings;1.Name') }, source, { reportName: 'Shared', sharedDataSource: '/Data Sources/SharedDb' });
     assert.ok(rdl.includes('<DataSourceReference>/Data Sources/SharedDb</DataSourceReference>'));
     assert.ok(!rdl.includes('<ConnectString>'));
+    assert.ok(rdl.includes('<DataSource Name="SharedDb">') && rdl.includes('<DataSourceName>SharedDb</DataSourceName>'), 'named after the shared data source');
   });
 });
 
@@ -822,5 +823,100 @@ describe('InStr with typed arguments', () => {
     assert.equal(t('InStr(2, {Orders.Note}, "x")'), '=InStr(CInt(2), CStr(Fields!Note.Value), CStr("x"))');
     assert.equal(t('InStr(2, {Orders.Note}, "x", 1)'), '=InStr(CInt(2), CStr(Fields!Note.Value), CStr("x"), CompareMethod.Text)');
     assert.equal(t('InStrRev({Orders.Note}, "x")'), '=InStrRev(CStr(Fields!Note.Value), CStr("x"))');
+  });
+});
+
+describe('Crystal value formats', () => {
+  const number = (over: object) => ({ decimals: 2, thousands: true, leadingZero: true, negative: 1, symbolType: 0, symbol: '', symbolPosition: 0, ...over });
+  it('builds number formats: decimals, symbols, negatives', () => {
+    assert.equal(numberFormatString(number({ decimals: 4 })), '#,0.0000;-#,0.0000');
+    assert.equal(numberFormatString(number({ negative: 3, symbolType: 2, symbol: '$', symbolPosition: 1 })), "'$'#,0.00;('$'#,0.00)");
+    assert.equal(numberFormatString(number({ negative: 3, symbolType: 0, symbol: '$', symbolPosition: 1 })), '#,0.00;(#,0.00)', 'no symbol when it is switched off');
+    assert.equal(numberFormatString(number({ symbolType: 2, symbol: '%', symbolPosition: 3 })), "#,0.00'%';-#,0.00'%'", 'a percent sign is a literal');
+    assert.equal(numberFormatString(number({ decimals: 0, thousands: false, leadingZero: false })), '0;-0');
+  });
+  it('builds date formats and picks the format for the value type', () => {
+    const date = { order: 2, year: 1, month: 1, day: 1, dayOfWeek: 2, separators: ['/', '/'] as [string, string] };
+    assert.equal(dateFormatString(date), "MM'/'dd'/'yyyy");
+    assert.equal(dateFormatString({ ...date, month: 3, separators: [' ', ', '] }), "MMMM' 'dd', 'yyyy");
+    assert.equal(dateFormatString({ ...date, order: 0, year: 0 }), "yy'/'MM'/'dd");
+    const format = { currency: number({ symbolType: 2, symbol: '$', symbolPosition: 1 }), number: number({ decimals: 4 }), date, dateTimeOrder: 2 };
+    assert.equal(formatFor(format, 'number'), '#,0.0000;-#,0.0000');
+    assert.equal(formatFor(format, 'currency'), "'$'#,0.00;-'$'#,0.00");
+    assert.equal(formatFor(format, 'dateTime'), "MM'/'dd'/'yyyy", 'date only');
+    assert.equal(formatFor(format, 'string'), undefined);
+  });
+  it('applies the decoded format and alignment to a field', () => {
+    const source: DataSourceInfo = { connections: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Price', type: 'number' }] }], links: [] };
+    const definition = { ...emptyDefinition(), layout: [{ name: 'DetailArea1', sections: [{ name: 'D', objects: [
+      { kind: 'field', name: 'P', field: 'T.Price', position: { x: 0, y: 0 }, align: 'center' as const, format: { number: number({ decimals: 4 }) } },
+    ] }] }] };
+    const { rdl } = convertToRdl(definition, source, { reportName: 'Formats' });
+    assert.ok(rdl.includes('<Format>#,0.0000;-#,0.0000</Format>'));
+    assert.ok(rdl.includes('<TextAlign>Center</TextAlign>'));
+  });
+});
+
+describe('shared variables from a page-header subreport', () => {
+  // The header subreport copies its own data into shared variables (in suppressed fields); the main report's page
+  // footer shows them next to the page number.
+  const header: ReportDefinition = {
+    ...emptyDefinition(),
+    formulas: [
+      { name: 'SetOwner', index: 0, kind: 'formula', text: 'WhilePrintingRecords;\r\nshared StringVar  ownername;\r\nownername := {usp_Header;1.owner_name};\r\n', referencedFields: [] },
+    ],
+    layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 600, objects: [
+        { kind: 'field', name: 'title1', field: 'usp_Header;1.title', position: { x: 0, y: 0 }, size: { width: 5000, height: 300 } },
+        { kind: 'field', name: 'setter1', field: '@SetOwner', suppressed: true, position: { x: 0, y: 300 }, size: { width: 3000, height: 230 } },
+      ] }] },
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF', height: 0, objects: [] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 0, objects: [] }] },
+    ],
+  };
+  const main: ReportDefinition = {
+    ...emptyDefinition(),
+    formulas: [{ name: 'OwnerName', index: 0, kind: 'formula', text: 'WhilePrintingRecords;\r\nshared StringVar ownername;\r\nownername ;\r\n', referencedFields: [] }],
+    layout: [
+      { name: 'PageHeaderArea1', sections: [{ name: 'PH', height: 600, objects: [{ kind: 'subreport', name: 'Header1', subreport: { index: 1, onDemand: false }, position: { x: 0, y: 0 }, size: { width: 9000, height: 600 } }] }] },
+      { name: 'PageFooterArea1', sections: [{ name: 'PF', height: 300, objects: [
+        { kind: 'field', name: 'owner2', field: '@OwnerName', position: { x: 0, y: 0 }, size: { width: 4000, height: 230 } },
+        { kind: 'field', name: 'page1', field: 'Page Number', position: { x: 8000, y: 0 }, size: { width: 1000, height: 230 } },
+      ] }] },
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 0, objects: [] }] },
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF', height: 0, objects: [] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 300, objects: [{ kind: 'field', name: 'name1', field: 'Holdings.Name', position: { x: 0, y: 0 }, size: { width: 3000, height: 240 } }] }] },
+    ],
+  };
+  const source = (table: string, fields: string[]): DataSourceInfo => ({
+    connections: [], links: [],
+    tables: [{ alias: table, name: table, kind: table.includes(';') ? 'storedProcedure' : 'table', fields: fields.map((name) => ({ name, type: 'string' })) }],
+  });
+
+  it('shows the subreport\'s value in the footer, hides suppressed items and keeps the page number', () => {
+    const { rdl, review } = convertToRdl(main, source('Holdings', ['Name']), {
+      reportName: 'Main',
+      subreports: new Map([[1, { name: 'Main_Subdocument_1', links: [], definition: header, dataSource: source('usp_Header;1', ['title', 'owner_name']) }]]),
+    });
+    assertBalancedXml(rdl);
+    assert.ok(!rdl.includes('__CrShared_'), 'no placeholder is left');
+    const footer = rdl.slice(rdl.indexOf('<PageFooter>'), rdl.indexOf('</PageFooter>'));
+    assert.ok(footer.includes('First(Fields!owner_name.Value, "DataSet_Main_Subdocument_1")'), 'the footer reads the header subreport\'s data');
+    assert.ok(footer.includes('Globals!PageNumber'), 'the page number is in the footer');
+    assert.ok(!rdl.includes('<Field Name="F_OwnerName">'), 'not a dataset field (computed before the header runs)');
+    const setter = rdl.slice(rdl.indexOf('<Textbox Name="setter1">'));
+    assert.ok(setter.slice(0, setter.indexOf('</Textbox>')).includes('<Hidden>=True</Hidden>'), 'a suppressed item is hidden');
+    assert.ok(review.some((r) => r.item === 'Shared variable ownername'));
+  });
+
+  it('points the main and the inline subreport\'s datasets at one shared data source', () => {
+    const { rdl } = convertToRdl(main, source('Holdings', ['Name']), {
+      reportName: 'Main',
+      sharedDataSource: '/DataSources/SalesDb',
+      subreports: new Map([[1, { name: 'Main_Subdocument_1', links: [], definition: header, dataSource: { ...source('usp_Header;1', ['title', 'owner_name']), connections: [{ driver: 'ODBC (RDO)', properties: { Server: 'otherhost', Database: 'Other' } }] } }]]),
+    });
+    assert.equal((rdl.match(/<DataSource Name=/g) ?? []).length, 1);
+    assert.ok(rdl.includes('<DataSource Name="SalesDb">') && rdl.includes('<DataSourceReference>/DataSources/SalesDb</DataSourceReference>'));
+    assert.equal((rdl.match(/<DataSourceName>SalesDb<\/DataSourceName>/g) ?? []).length, 2);
   });
 });
