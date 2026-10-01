@@ -8,7 +8,7 @@
  * of the generated function, as for Crystal syntax formulas.
  */
 
-import { customCodeNote, Emitter, extractArguments, NAMES, vbString, type FormulaContext, type Node, type Translation } from './formula.ts';
+import { customCodeNote, Emitter, extractArguments, NAMES, optionalParameter, vbString, type FormulaContext, type Node, type Translation } from './formula.ts';
 
 type BasicToken =
   | { k: 'nl' }
@@ -220,15 +220,22 @@ class BasicTranslator {
           i += 2;
         }
       }
-      let defaultValue = '';
+      let defaultValue: string | undefined;
       if (isOp(st[i], '=')) {
         const end = this.findTopLevel(st, i + 1, [',', ')']);
-        defaultValue = ` = ${this.expression(st.slice(i + 1, end))}`;
+        defaultValue = this.expression(st.slice(i + 1, end));
         i = end;
       }
       const vb = this.variableName(token.v, 'p_');
       this.variables.set(token.v.toLowerCase(), { vb, array });
-      this.params.push(`${optional ? 'Optional ' : ''}${byRef ? 'ByRef' : 'ByVal'} ${vb}${array ? '()' : ''} As ${array ? 'Object' : type}${defaultValue}`);
+      if (optional && defaultValue !== undefined && !array) {
+        // VB needs a constant default; an expression is computed at the start instead.
+        const { declaration, init } = optionalParameter(vb, type, defaultValue);
+        this.params.push(byRef ? declaration.replace('ByVal', 'ByRef') : declaration);
+        if (init) this.lines.unshift(`    ${init}`);
+      } else {
+        this.params.push(`${optional ? 'Optional ' : ''}${byRef ? 'ByRef' : 'ByVal'} ${vb}${array ? '()' : ''} As ${array ? 'Object' : type}${defaultValue !== undefined ? ` = ${defaultValue}` : optional ? ' = Nothing' : ''}`);
+      }
       if (isOp(st[i], ',')) i++;
     }
   }
