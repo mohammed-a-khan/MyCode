@@ -99,7 +99,7 @@ function columnHeadings(section: SectionInfo, detailObjects: ReportObject[]): Ma
     return text.length > 0 && text.length <= 60 && !o.runs?.some((r) => 'field' in r);
   };
   const candidates = section.objects
-    .filter((o) => o.kind === 'text' && o.position && isLabel(o))
+    .filter((o) => o.kind === 'text' && !o.suppressed && o.position && isLabel(o))
     .map((o) => ({ obj: o, column: columnOf(o) }))
     .filter((c) => c.column >= 0);
   const result = new Map<ReportObject, number>();
@@ -165,6 +165,8 @@ function reportHeaders(definition: ReportDefinition, report: string, subreport: 
       const columnOrder = [...headings.keys()].sort((a, b) => (a.position?.x ?? 0) - (b.position?.x ?? 0));
       const objects = [...section.objects].sort((a, b) => (a.position?.y ?? 0) - (b.position?.y ?? 0) || (a.position?.x ?? 0) - (b.position?.x ?? 0));
       for (const obj of objects) {
+        // Suppressed objects do not print (listed only with --all).
+        if (obj.suppressed && !options.all) continue;
         const base = { ...(options.file ? { file: options.file } : {}), report, area, section: section.name, object: obj.name, x: round(obj.position?.x), y: round(obj.position?.y) };
         if (obj.kind === 'text') {
           const text = objectText(obj);
