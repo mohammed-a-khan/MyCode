@@ -104,7 +104,19 @@ export function reviewMarkdown(sourceName: string, reports: ConvertedReport[]): 
   for (const report of reports) {
     lines.push(`## ${report.fileName}${report.storage ? ` (subreport ${report.storage})` : ''}`, '');
     if (report.review.length === 0) lines.push('No manual review items.', '');
-    for (const note of report.review) lines.push(`- [ ] **${note.item}**: ${note.message}`);
+    // Items sharing a message are listed together, so each kind of check appears once.
+    const byMessage = new Map<string, string[]>();
+    for (const note of report.review) {
+      // The custom code function's name goes with its item, so notes about converted formulas group too.
+      const code = / \((Code\.\w+)\)/.exec(note.message);
+      const message = code ? note.message.replace(code[0], '') : note.message;
+      const item = code ? `${note.item} (${code[1]})` : note.item;
+      byMessage.set(message, [...(byMessage.get(message) ?? []), item]);
+    }
+    for (const [message, items] of byMessage) {
+      lines.push(items.length === 1 ? `- [ ] **${items[0]}**: ${message}` : `- [ ] ${message} (${items.length} items)`);
+      if (items.length > 1) for (const item of items) lines.push(`  - ${item}`);
+    }
     lines.push('');
   }
   return lines.join('\n');

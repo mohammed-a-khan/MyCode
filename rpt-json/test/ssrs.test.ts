@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import type { ChartInfo, DataSourceInfo, ReportDefinition } from '../src/crystal/model.ts';
 import { readCfb } from '../src/index.ts';
-import { convertDocumentToSsrs } from '../src/ssrs/convert.ts';
+import { convertDocumentToSsrs, reviewMarkdown } from '../src/ssrs/convert.ts';
 import { extractHeaders, formatHeadersCsv, formatHeadersText } from '../src/crystal/headers.ts';
 import { CODE_HELPERS, crystalColor, translateFormula, translateToSql, vbString, type FormulaContext } from '../src/ssrs/formula.ts';
 import { isBasicSyntax } from '../src/ssrs/basic.ts';
@@ -999,7 +999,7 @@ describe('suppressed objects', () => {
       layout: layout({ conditions: { suppress: { name: 'Object_Visibility', index: 0 } } }),
     };
     const { rdl } = convertToRdl(definition, source, { reportName: 'S' });
-    assert.ok(!rdl.includes('<Hidden>=True</Hidden>') && rdl.includes('Globals!PageNumber'));
+    assert.ok(!rdl.includes('<Hidden>=True</Hidden>') && rdl.includes('<Hidden>=(Nothing = 1)</Hidden>'), 'the formula decides, with the page number left blank');
   });
 });
 
@@ -1049,6 +1049,19 @@ describe('subreports in the report body', () => {
     assert.equal(new Set(names).size, names.length, `duplicates in ${names.join(', ')}`);
   });
 
+  it('leaves page numbers in the body blank: SSRS allows them only in the page header or footer', () => {
+    const withPage: ReportDefinition = {
+      ...sub,
+      layout: sub.layout.map((a) => a.name !== 'ReportFooterArea1' ? a : { ...a, sections: [{ name: 'RF', height: 240, objects: [{ kind: 'field', name: 'PageNumber1', field: 'Page Number', position: { x: 0, y: 0 }, size: { width: 1000, height: 240 } }] }] }),
+    };
+    const pages = new Map([[7, { ...subreports.get(7)!, definition: withPage }]]);
+    const { rdl, review } = convertToRdl(main, src('Orders', 'Name'), { reportName: 'Main', subreports: pages });
+    const body = rdl.slice(rdl.indexOf('<Body>'), rdl.indexOf('</Body>'));
+    assert.ok(body.includes('PageNumber1'), 'the box is still there');
+    assert.ok(!/Globals!(Overall)?(PageNumber|TotalPages)/.test(body));
+    assert.ok(review.some((r) => /left blank/.test(r.message)));
+  });
+
   it('keeps separate subreport files on request', () => {
     const { rdl, inlinedOnly } = convertToRdl(main, src('Orders', 'Name'), { reportName: 'Main', subreports, embedSubreports: false });
     assert.ok(rdl.includes('<Subreport ') && rdl.includes('<ReportName>Main_Subdocument_7</ReportName>'));
@@ -1085,5 +1098,21 @@ describe('charts that summarise fields themselves', () => {
     const chart = { values: ['Average of usp_Tests;1.result'], onChangeOf: 'usp_Tests;1.test_name', family: 3, graphType: 31 };
     const { rdl } = convertToRdl({ ...emptyDefinition(), layout: layout(chart) }, source, { reportName: 'Tests', subreport: true });
     assert.ok(rdl.includes('<Y>=Avg(Fields!result.Value)</Y>') && rdl.includes('<Type>Shape</Type>'));
+  });
+});
+
+describe('review checklist', () => {
+  it('lists the items sharing a message under one check', () => {
+    const md = reviewMarkdown('Sample.rpt', [{ fileName: 'Sample.rdl', storage: '', rdl: '', review: [
+      { item: 'Section A', message: 'was hidden' }, { item: 'Box 1', message: 'is new' }, { item: 'Section B', message: 'was hidden' },
+    ] }]);
+    assert.ok(md.includes('- [ ] was hidden (2 items)\n  - Section A\n  - Section B'));
+    assert.ok(md.includes('- [ ] **Box 1**: is new'));
+    assert.equal(md.match(/- \[ \]/g)?.length, 2);
+    const code = reviewMarkdown('Sample.rpt', [{ fileName: 'Sample.rdl', storage: '', rdl: '', review: [
+      { item: 'Formula {@A}', message: 'was converted to custom code (Code.F_A); review the VB function' },
+      { item: 'Formula {@B}', message: 'was converted to custom code (Code.F_B); review the VB function' },
+    ] }]);
+    assert.ok(code.includes('- [ ] was converted to custom code; review the VB function (2 items)\n  - Formula {@A} (Code.F_A)\n  - Formula {@B} (Code.F_B)'));
   });
 });
