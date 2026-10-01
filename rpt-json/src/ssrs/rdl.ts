@@ -563,7 +563,7 @@ class RdlBuilder {
   private fieldObjectValue(ref: string, scope: Scope, item: string): { expression: string; format?: string } {
     const special = SPECIAL_FIELDS[ref.toLowerCase()];
     if (special) {
-      if (scope !== 'page' && special.includes('Globals!Page')) this.note(item, 'page numbers are only available in the page header or footer in SSRS');
+      if (scope !== 'page' && special.includes('Globals!Page')) this.note(item, 'SSRS shows page numbers only in the page header or footer, so this one was left blank');
       return { expression: special, format: special.includes('ExecutionTime') ? 'd' : undefined };
     }
     const groupName = /^Group #(\d+) Name$/i.exec(ref);
@@ -1711,6 +1711,18 @@ class RdlBuilder {
     return new Map([...out].filter((e): e is [string, string] => e[1] !== null));
   }
 
+  /** SSRS refuses page numbers outside the page header and footer: in the body they are left blank. */
+  private withoutBodyPageNumbers(xml: string): string {
+    const start = xml.indexOf('<Body>');
+    const end = xml.indexOf('</Body>');
+    if (start < 0 || end < start) return xml;
+    const body = xml.slice(start, end);
+    const cleaned = body.replace(PAGE_GLOBALS, 'Nothing');
+    if (cleaned === body) return xml;
+    this.note('Page numbers', 'SSRS shows page numbers only in the page header or footer; those in the body (often inside a subreport) were left blank');
+    return xml.slice(0, start) + cleaned + xml.slice(end);
+  }
+
   /** Fills in the shared variables read by formulas: the subreport's value, or the formula's own translation. */
   private resolveShared(xml: string, escape = escapeXml): string {
     return xml.replace(new RegExp(`${SHARED_TOKEN}([a-z0-9_]+)__`, 'g'), (_, variable: string) => {
@@ -2048,10 +2060,12 @@ class RdlBuilder {
       if (!used && f.text.trim()) this.note(`Formula {@${f.name}}`, 'is a formatting formula that no object uses in a decoded property; check whether it is still needed');
     }
     const inlinedOnly = [...this.inlinedSubreports].filter((n) => !this.referencedSubreports.has(n));
-    const rdl = this.resolveShared(toXml(report));
+    const rdl = this.withoutBodyPageNumbers(this.resolveShared(toXml(report)));
     return { rdl, review: this.review, ...(inlinedOnly.length ? { inlinedOnly } : {}) };
   }
 }
+
+const PAGE_GLOBALS = /Globals!(?:Overall)?(?:PageNumber|TotalPages)\b/g;
 
 const SCOPED_AGGREGATES = ['Sum', 'Count', 'Avg', 'Max', 'Min', 'CountDistinct', 'StDev', 'StDevP', 'Var', 'VarP', 'First', 'Last'];
 
