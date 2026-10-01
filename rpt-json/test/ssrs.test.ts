@@ -909,6 +909,38 @@ describe('shared variables from a page-header subreport', () => {
     assert.ok(review.some((r) => r.item === 'Shared variable ownername'));
   });
 
+  it('never nests First aggregates when a footer formula mixes a shared variable with a main-report field', () => {
+    const mixed: ReportDefinition = {
+      ...main,
+      formulas: [
+        ...main.formulas,
+        { name: 'ShowOwner', index: 1, kind: 'formula', text: 'If InStr({@OwnerName}, "x", 1) > 0 then {Holdings.Name} else {@OwnerName}', referencedFields: [] },
+      ],
+      layout: main.layout.map((a) => (a.name === 'PageFooterArea1'
+        ? { ...a, sections: [{ name: 'PF', height: 300, objects: [{ kind: 'field', name: 'show1', field: '@ShowOwner', position: { x: 0, y: 0 }, size: { width: 4000, height: 230 } }] }] }
+        : a)),
+    };
+    const { rdl } = convertToRdl(mixed, source('Holdings', ['Name']), {
+      reportName: 'Main',
+      subreports: new Map([[1, { name: 'Main_Subdocument_1', links: [], definition: header, dataSource: source('usp_Header;1', ['title', 'owner_name']) }]]),
+    });
+    const value = /<Textbox Name="show1">[\s\S]*?<Value>([^<]*)<\/Value>/.exec(rdl)?.[1] ?? '';
+    assert.ok(value.includes('First(Fields!owner_name.Value, "DataSet_Main_Subdocument_1")'), value);
+    assert.ok(value.includes('First(Fields!Name.Value, "DataSet1")'), value);
+    // No First(...) inside another First(...).
+    const depth = (text: string) => {
+      let max = 0;
+      const stack: boolean[] = [];
+      for (let i = 0; i < text.length; i++) {
+        if (text.startsWith('First(', i)) { stack.push(true); i += 5; max = Math.max(max, stack.filter(Boolean).length); }
+        else if (text[i] === '(') stack.push(false);
+        else if (text[i] === ')') stack.pop();
+      }
+      return max;
+    };
+    assert.equal(depth(value), 1, value);
+  });
+
   it('points the main and the inline subreport\'s datasets at one shared data source', () => {
     const { rdl } = convertToRdl(main, source('Holdings', ['Name']), {
       reportName: 'Main',
