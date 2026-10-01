@@ -1469,14 +1469,18 @@ class CodeWriter {
   }
 
   write(program: Program, name: string): string {
+    const defaults: string[] = [];
     const params = (program.params ?? []).map((p) => {
       const info = { vb: `p_${p.name.replace(/\W/g, '_')}`, vtype: p.vtype, array: p.array, range: p.range };
       this.emitter.variables.set(p.name.toLowerCase(), info);
       // A Crystal range is passed as a two-element array: (0) start, (1) end.
       const type = p.range || p.array ? 'Object()' : VB_TYPES[p.vtype] ?? 'Object';
-      const optional = p.optional ? ` = ${this.emitter.emit(p.optional)}` : '';
-      return `${p.optional ? 'Optional ' : ''}ByVal ${info.vb} As ${type}${optional}`;
+      if (!p.optional) return `ByVal ${info.vb} As ${type}`;
+      const { declaration, init } = optionalParameter(info.vb, type, this.emitter.emit(p.optional));
+      if (init) defaults.push(`    ${init}`);
+      return declaration;
     });
+    this.lines.push(...defaults);
     this.statements(program.body, '    ', true);
     return [`Public Function ${name}(${params.join(', ')}) As Object`, ...this.declarations, ...this.lines, '    Return Nothing', 'End Function'].join('\n');
   }
@@ -1584,7 +1588,8 @@ function needsCode(tokens: Token[]): boolean {
 }
 
 /** Aggregate / report references that custom code cannot evaluate itself: they become arguments. */
-const ARGUMENT_REFERENCE = /\b(Sum|Count|Avg|Max|Min|CountDistinct|StDev|StDevP|Var|VarP|First|Last|Previous|RowNumber|RunningValue)\(|Fields!\w+\.Value|Parameters!\w+\.Value|Globals!\w+|Me\.Value/g;
+// __CrShared_x__ is a shared variable's value, filled in later with a dataset aggregate: an argument too.
+const ARGUMENT_REFERENCE = /\b(Sum|Count|Avg|Max|Min|CountDistinct|StDev|StDevP|Var|VarP|First|Last|Previous|RowNumber|RunningValue)\(|Fields!\w+\.Value|Parameters!\w+\.Value|Globals!\w+|Me\.Value|__CrShared_[a-z0-9_]+?__/g;
 
 /** Replaces field/parameter/aggregate references in VB code with parameters; returns the argument list. */
 export function extractArguments(code: string): { code: string; args: string[] } {
@@ -1853,4 +1858,26 @@ export function translateToSql(source: string, ctx: SqlContext): string | undefi
   } catch {
     return undefined;
   }
+}
+
+/** A VB constant: a number, string, date literal, True, False or Nothing. */
+const VB_CONSTANT = /^(-?\d+(\.\d+)?(E[+-]?\d+)?|"(?:[^"]|"")*"|#[^#]+#|True|False|Nothing)$/i;
+
+/**
+ * An optional VB parameter. VB requires a constant default of the parameter's type; a Crystal default that is an
+ * expression (Color(239, 235, 220), CurrentDate, ...) becomes Nothing, replaced by the expression at the start.
+ */
+export function optionalParameter(vb: string, type: string, defaultValue: string): { declaration: string; init?: string } {
+  const value = defaultValue.trim().replace(/^\((.*)\)$/, '$1').trim();
+  if (VB_CONSTANT.test(value)) {
+    const isString = value.startsWith('"');
+    const numeric = ['Double', 'Decimal', 'Integer', 'Long'].includes(type);
+    // A text default for a number parameter: the parameter takes any value.
+    const finalType = (isString && numeric) || (!isString && type === 'String' && !/^Nothing$/i.test(value)) ? 'Object' : type;
+    return { declaration: `Optional ByVal ${vb} As ${finalType} = ${value}` };
+  }
+  return {
+    declaration: `Optional ByVal ${vb} As Object = Nothing`,
+    init: `If ${vb} Is Nothing Then ${vb} = ${defaultValue}`,
+  };
 }

@@ -452,6 +452,10 @@ describe('chart types, margins, subreports and Basic syntax', () => {
     const fn = translateFormula('Function Twice (x As Number, Optional y As Number = 1) As Number\r\n  Twice = x * 2 + y\r\nEnd Function', ctx, { codeName: 'F_Twice' });
     assert.equal(fn.expression, '=Code.F_Twice()');
     assert.match(fn.code!, /Public Function F_Twice\(ByVal p_x As Double, Optional ByVal p_y As Double = 1\) As Object/);
+    // VB needs a constant default: an expression default is computed in the function instead.
+    const colour = translateFormula('Function (numberVar row, optional numberVar shade := Color(239, 235, 220))\r\nif row mod 2 = 0 then shade else crNoColor', ctx, { codeName: 'F_Shade' });
+    assert.match(colour.code!, /Optional ByVal p_shade As Object = Nothing\)/);
+    assert.match(colour.code!, /If p_shade Is Nothing Then p_shade = /);
     assert.match(fn.code!, /result = p_x \* 2 \+ p_y/);
     const array = translateFormula('Local StringVar Array a := ["x", "y"]; a[1]', ctx, { codeName: 'F_A' });
     assert.match(array.code!, /v_a = New Object\(\) \{Nothing, "x", "y"\}/);
@@ -939,6 +943,29 @@ describe('shared variables from a page-header subreport', () => {
       return max;
     };
     assert.equal(depth(value), 1, value);
+  });
+
+  it('passes a shared variable\'s value into custom code as an argument', () => {
+    const coded: ReportDefinition = {
+      ...main,
+      formulas: [
+        ...main.formulas,
+        { name: 'ShowOwner', index: 1, kind: 'formula', text: 'WhilePrintingRecords;\r\nstringvar x := {@OwnerName};\r\nif len(x) > 3 then x else "";', referencedFields: [] },
+      ],
+      layout: main.layout.map((a) => (a.name === 'PageFooterArea1'
+        ? { ...a, sections: [{ name: 'PF', height: 300, objects: [{ kind: 'field', name: 'show2', field: '@ShowOwner', position: { x: 0, y: 0 }, size: { width: 4000, height: 230 } }] }] }
+        : a)),
+    };
+    const { rdl } = convertToRdl(coded, source('Holdings', ['Name']), {
+      reportName: 'Main',
+      subreports: new Map([[1, { name: 'Main_Subdocument_1', links: [], definition: header, dataSource: source('usp_Header;1', ['title', 'owner_name']) }]]),
+    });
+    const code = rdl.slice(rdl.indexOf('<Code>'), rdl.indexOf('</Code>'));
+    assert.ok(!code.includes('First(') && !code.includes('Fields!') && !code.includes('__CrShared_'), code);
+    assert.ok(code.includes('Public Function F_ShowOwner(ByVal a1 As Object)'), code);
+    const value = /<Textbox Name="show2">[\s\S]*?<Value>([^<]*)<\/Value>/.exec(rdl)?.[1] ?? '';
+    assert.ok(/Code\.F_ShowOwner\(\(*First\(Fields!owner_name\.Value, "DataSet_Main_Subdocument_1"\)\)*\)/.test(value), value);
+    assert.ok(!rdl.includes('<Field Name="F_ShowOwner">'), 'not a dataset field');
   });
 
   it('points the main and the inline subreport\'s datasets at one shared data source', () => {
