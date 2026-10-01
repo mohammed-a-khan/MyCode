@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import type { DataSourceInfo, ReportDefinition } from '../src/crystal/model.ts';
+import type { ChartInfo, DataSourceInfo, ReportDefinition } from '../src/crystal/model.ts';
 import { readCfb } from '../src/index.ts';
 import { convertDocumentToSsrs } from '../src/ssrs/convert.ts';
 import { extractHeaders, formatHeadersCsv, formatHeadersText } from '../src/crystal/headers.ts';
@@ -1047,5 +1047,37 @@ describe('subreports in the report body', () => {
     const { rdl, inlinedOnly } = convertToRdl(main, src('Orders', 'Name'), { reportName: 'Main', subreports, embedSubreports: false });
     assert.ok(rdl.includes('<Subreport ') && rdl.includes('<ReportName>Main_Subdocument_7</ReportName>'));
     assert.equal(inlinedOnly, undefined);
+  });
+});
+
+describe('charts that summarise fields themselves', () => {
+  const source: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'usp_Tests;1', name: 'usp_Tests;1', kind: 'storedProcedure', fields: [
+    { name: 'test_name', type: 'string' }, { name: 'as_of', type: 'date' }, { name: 'result', type: 'number' },
+  ] }] };
+  const layout = (chart: ChartInfo) => [
+    { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 3000, objects: [{ kind: 'chart', name: 'Graph1', position: { x: 0, y: 0 }, size: { width: 7000, height: 3000 }, chart }] }] },
+    { name: 'ReportFooterArea1', sections: [{ name: 'RF', objects: [] }] },
+    { name: 'DetailArea1', sections: [{ name: 'D', objects: [] }] },
+  ];
+  it('draws one line per series value, over the category', () => {
+    const chart = { values: ['Sum of usp_Tests;1.result'], onChangeOf: 'usp_Tests;1.as_of', series: 'usp_Tests;1.test_name', family: 1, graphType: 10 };
+    const { rdl, review } = convertToRdl({ ...emptyDefinition(), layout: layout(chart) }, source, { reportName: 'Tests', subreport: true });
+    assert.ok(!review.some((r) => r.message.includes('could not be determined')));
+    const series = rdl.slice(rdl.indexOf('<ChartSeriesHierarchy>'), rdl.indexOf('</ChartSeriesHierarchy>'));
+    assert.ok(series.includes('<GroupExpression>=Fields!test_name.Value</GroupExpression>'), series);
+    const categories = rdl.slice(rdl.indexOf('<ChartCategoryHierarchy>'), rdl.indexOf('</ChartCategoryHierarchy>'));
+    assert.ok(categories.includes('<GroupExpression>=Fields!as_of.Value</GroupExpression>'));
+    assert.ok(rdl.includes('<Y>=Sum(Fields!result.Value)</Y>'));
+  });
+  it('draws an "all records" chart with no category, and reads the layout from the right byte', () => {
+    const chart = { values: ['Sum of usp_Tests;1.result'], layoutCode: 0, family: 0, graphType: 0 };
+    const { rdl, review } = convertToRdl({ ...emptyDefinition(), layout: layout(chart) }, source, { reportName: 'Tests', subreport: true });
+    assert.ok(!review.some((r) => r.message.includes('could not be determined')));
+    assert.ok(rdl.includes('<Chart Name="Graph1">') && !rdl.includes('_Category"'));
+  });
+  it('draws a pie of one value per category', () => {
+    const chart = { values: ['Average of usp_Tests;1.result'], onChangeOf: 'usp_Tests;1.test_name', family: 3, graphType: 31 };
+    const { rdl } = convertToRdl({ ...emptyDefinition(), layout: layout(chart) }, source, { reportName: 'Tests', subreport: true });
+    assert.ok(rdl.includes('<Y>=Avg(Fields!result.Value)</Y>') && rdl.includes('<Type>Shape</Type>'));
   });
 });

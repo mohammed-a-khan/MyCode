@@ -104,8 +104,13 @@ const VALUE_TYPES: Record<number, string> = {
   20: 'blob',
 };
 
-/** Summary operation codes (first word of a summary record). */
-const SUMMARY_OPERATIONS: Record<number, string> = { 0: 'sum' };
+/** Summary operations by the first byte of a summary record (Crystal's summary operation numbers). */
+const SUMMARY_OPERATIONS: Record<number, string> = {
+  0: 'sum', 1: 'average', 2: 'variance', 3: 'standard deviation', 4: 'maximum', 5: 'minimum', 6: 'count',
+  7: 'pop. variance', 8: 'pop. standard deviation', 9: 'distinct count', 13: 'median', 17: 'mode',
+};
+/** A summary in a chart: "Sum of {field}" etc. */
+const SUMMARY_WRAPPER = 0x007f;
 
 const SELECTION_FORMULAS: Record<string, keyof SelectionFormulas> = {
   'Record Selection': 'record',
@@ -172,7 +177,7 @@ export interface ChartInfo {
   title?: string;
   categoryTitle?: string;
   valueTitle?: string;
-  /** Raw layout code (2 = group chart, 1 = cross-tab chart, 8 = map). */
+  /** Chart layout: 0 advanced ("on change of" fields of its own), 1 group, 2 cross-tab. */
   layoutCode?: number;
   /** Raw chart style code: the family byte and the graph type byte together. */
   styleCode?: number;
@@ -180,6 +185,8 @@ export interface ChartInfo {
   family?: number;
   /** Crystal graph type (CrGraphType: 0 side-by-side bar, 1 stacked bar, 30 pie, 31 3D pie, 40 doughnut, ...). */
   graphType?: number;
+  /** A second "on change of" field: one series per value of it (several lines or bar colours). */
+  series?: string;
 }
 
 /** A number format of a field (Crystal's Format Editor, Number tab). */
@@ -886,9 +893,31 @@ function buildLayout(records: RecordNode[]): AreaInfo[] {
       case CHART_ON_CHANGE_OF:
         if (object.chart) object.chart.onChangeOf = nonEmpty(ownStrings(record))[0];
         break;
+      case SUMMARY_WRAPPER: {
+        // A chart that summarises fields itself ("on change of" a field): each summary is a value it shows.
+        const summary = object.chart ? firstChild(record, SUMMARY) : undefined;
+        const field = summary ? nonEmpty(ownStrings(summary))[0] : undefined;
+        if (object.chart && summary && field) {
+          const operation = SUMMARY_OPERATIONS[ownBytes(summary)[0] ?? 0] ?? 'sum';
+          const value = `${operation[0].toUpperCase()}${operation.slice(1)} of ${field}`;
+          if (!object.chart.values.includes(value)) object.chart.values.push(value);
+        }
+        break;
+      }
+      case GROUP: {
+        // The chart's "on change of" fields: the first gives the categories, a second one the series.
+        const field = object.chart ? nonEmpty(ownStrings(record))[0] : undefined;
+        if (object.chart && field) {
+          if (!object.chart.onChangeOf) object.chart.onChangeOf = field;
+          else if (!object.chart.series && field !== object.chart.onChangeOf) object.chart.series = field;
+        }
+        break;
+      }
       case CHART_LAYOUT: {
         const b = ownBytes(record);
-        if (object.chart && b.length) object.chart.layoutCode = b[b.length - 1];
+        // Third byte: the chart's layout (0 advanced: "on change of" fields, 1 group, 2 cross-tab); the last two
+        // bytes are an id.
+        if (object.chart && b.length >= 3) object.chart.layoutCode = b[2];
         break;
       }
       case CHART_TITLES: {
@@ -1000,7 +1029,7 @@ export function buildReportDefinition(records: RecordNode[]): ReportDefinition {
     if (!summary) continue;
     const { name } = namedValue(summary);
     const field = nonEmpty(ownStrings(summary))[0];
-    const operationCode = u32(ownBytes(summary), 0);
+    const operationCode = ownBytes(summary)[0] ?? 0;
     const evaluate = nonEmpty(ownStrings(node))[0];
     if (name && field) {
       report.runningTotals.push({ name, field, operation: SUMMARY_OPERATIONS[operationCode] ?? `code${operationCode}`, ...(evaluate ? { evaluateOnChangeOf: evaluate } : {}) });
