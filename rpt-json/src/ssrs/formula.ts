@@ -948,6 +948,8 @@ export class Emitter {
   /** Names of CODE_HELPERS functions used. */
   readonly helpers = new Set<string>();
   inCode = false;
+  /** The formula's result is True/False: an "if" without "else" defaults to False. */
+  booleanResult = false;
   readonly ctx: FormulaContext;
 
   constructor(ctx: FormulaContext, issues: string[]) {
@@ -1205,6 +1207,7 @@ export class Emitter {
         if (v.vtype === 'booleanvar') return 'False';
       }
     }
+    if (this.booleanResult) return 'False';
     if (!this.isDate(node)) this.note('has an "if" without "else" whose result type is unknown; Crystal returns that type\'s default value there, SSRS returns Nothing');
     return 'Nothing';
   }
@@ -1632,6 +1635,8 @@ export interface TranslateOptions {
   codeName?: string;
   /** The formula returns a colour (Font_Color, Back_Color, ...): convert Crystal colour numbers. */
   colors?: boolean;
+  /** The formula returns True/False (suppress conditions): an "if" without "else" gives False, as in Crystal. */
+  boolean?: boolean;
 }
 
 export function translateFormula(source: string, ctx: FormulaContext, options: TranslateOptions = {}): Translation {
@@ -1654,6 +1659,7 @@ export function translateFormula(source: string, ctx: FormulaContext, options: T
     const tree = parser.parseFormula();
     issues.push(...parser.issues);
     const emitter = new Emitter(ctx, issues);
+    emitter.booleanResult = options.boolean ?? false;
     const expression = `=${emitter.result(tree, options.colors ?? false)}`;
     return { expression, issues, helpers: [...emitter.helpers] };
   } catch (err) {

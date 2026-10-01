@@ -46,7 +46,7 @@ For each report you get:
 | File                              | What it is                                                     |
 |-----------------------------------|----------------------------------------------------------------|
 | `Sales.rdl`                       | The SSRS report (RDL 2016: SSRS 2016–2022, Power BI Report Server, Report Builder) |
-| `Sales_Subdocument_1.rdl`, …      | One per subreport; upload them next to the main report         |
+| `Sales_Subdocument_1.rdl`, …      | Only for subreports inside the table (per row); upload them next to the main report. Other subreports are built into `Sales.rdl` |
 | `Sales.review.md`                 | Checklist of what a person should check or finish              |
 
 Then open the `.rdl` in Report Builder or Visual Studio (SSRS project), work through `review.md`, and deploy.

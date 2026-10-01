@@ -847,6 +847,8 @@ describe('Crystal value formats', () => {
     const format = { currency: number({ symbolType: 2, symbol: '$', symbolPosition: 1 }), number: number({ decimals: 4 }), date, dateTimeOrder: 2 };
     assert.equal(formatFor(format, 'number'), '#,0.0000;-#,0.0000');
     assert.equal(formatFor(format, 'currency'), "'$'#,0.00;-'$'#,0.00");
+    // Left at the default format, a currency value shows like a number: no symbol.
+    assert.equal(formatFor({ ...format, systemDefault: true }, 'currency'), '#,0.0000;-#,0.0000');
     assert.equal(formatFor(format, 'dateTime'), "MM'/'dd'/'yyyy", 'date only');
     assert.equal(formatFor(format, 'string'), undefined);
   });
@@ -977,5 +979,73 @@ describe('shared variables from a page-header subreport', () => {
     assert.equal((rdl.match(/<DataSource Name=/g) ?? []).length, 1);
     assert.ok(rdl.includes('<DataSource Name="SalesDb">') && rdl.includes('<DataSourceReference>/DataSources/SalesDb</DataSourceReference>'));
     assert.equal((rdl.match(/<DataSourceName>SalesDb<\/DataSourceName>/g) ?? []).length, 2);
+  });
+});
+
+describe('suppressed objects', () => {
+  const source: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Note', type: 'string' }] }] };
+  const layout = (extra: object) => [{ name: 'DetailArea1', sections: [{ name: 'D', objects: [
+    { kind: 'field', name: 'N', field: 'T.Note', position: { x: 0, y: 0 }, suppressed: true, ...extra },
+  ] }] }];
+  it('hides an object with the Suppress box ticked', () => {
+    const { rdl } = convertToRdl({ ...emptyDefinition(), layout: layout({}) }, source, { reportName: 'S' });
+    assert.ok(rdl.includes('<Hidden>=True</Hidden>'));
+  });
+  it('lets a suppress formula decide over the Suppress box, as Crystal does', () => {
+    const definition = {
+      ...emptyDefinition(),
+      formulas: [{ name: 'Object_Visibility', index: 0, kind: 'conditionalFormat' as const, text: 'PageNumber = 1', referencedFields: [] }],
+      formulaTexts: ['PageNumber = 1'],
+      layout: layout({ conditions: { suppress: { name: 'Object_Visibility', index: 0 } } }),
+    };
+    const { rdl } = convertToRdl(definition, source, { reportName: 'S' });
+    assert.ok(!rdl.includes('<Hidden>=True</Hidden>') && rdl.includes('Globals!PageNumber'));
+  });
+});
+
+describe('True/False formatting formulas', () => {
+  it('gives False for an "if" without "else" in a suppress condition', () => {
+    const t = translateFormula('if {Orders.Region} = "BC" then true', ctx, { boolean: true });
+    assert.equal(t.expression, '=IIf((Fields!Region.Value = "BC"), True, False)');
+    assert.ok(!t.issues.some((i) => i.includes('without "else"')));
+  });
+});
+
+describe('subreports in the report body', () => {
+  const sub: ReportDefinition = {
+    ...emptyDefinition(),
+    layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 300, objects: [{ kind: 'text', name: 'SubTitle', text: 'Totals by region', position: { x: 0, y: 0 }, size: { width: 3000, height: 240 } }] }] },
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF', height: 0, objects: [] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [{ kind: 'field', name: 'region1', field: 'Regions.Region', position: { x: 0, y: 0 }, size: { width: 2000, height: 240 } }] }] },
+    ],
+  };
+  const main: ReportDefinition = {
+    ...emptyDefinition(),
+    layout: [
+      { name: 'PageHeaderArea1', sections: [{ name: 'PH', objects: [] }] },
+      { name: 'PageFooterArea1', sections: [{ name: 'PF', objects: [] }] },
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', objects: [] }] },
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF', height: 400, objects: [{ kind: 'subreport', name: 'Sub1', subreport: { index: 7, onDemand: false }, position: { x: 0, y: 0 }, size: { width: 6000, height: 400 } }] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [{ kind: 'field', name: 'n', field: 'Orders.Name', position: { x: 0, y: 0 }, size: { width: 3000, height: 240 } }] }] },
+    ],
+  };
+  const src = (table: string, field: string): DataSourceInfo => ({ connections: [], links: [], tables: [{ alias: table, name: table, kind: 'table', fields: [{ name: field, type: 'string' }] }] });
+  const subreports = new Map([[7, { name: 'Main_Subdocument_7', links: [], definition: sub, dataSource: src('Regions', 'Region') }]]);
+
+  it('builds a report-footer subreport into the report: one .rdl, its own table and dataset', () => {
+    const { rdl, inlinedOnly } = convertToRdl(main, src('Orders', 'Name'), { reportName: 'Main', subreports });
+    assertBalancedXml(rdl);
+    assert.ok(!rdl.includes('<Subreport '), 'no subreport item');
+    assert.deepEqual(inlinedOnly, [7], 'no separate file needed');
+    assert.ok(rdl.includes('<DataSet Name="DataSet_Main_Subdocument_7">'));
+    assert.ok(/<DataSetName>DataSet_Main_Subdocument_7<\/DataSetName>/.test(rdl), 'its table reads its own dataset');
+    assert.ok(rdl.includes('<Value>Totals by region</Value>'));
+  });
+
+  it('keeps separate subreport files on request', () => {
+    const { rdl, inlinedOnly } = convertToRdl(main, src('Orders', 'Name'), { reportName: 'Main', subreports, embedSubreports: false });
+    assert.ok(rdl.includes('<Subreport ') && rdl.includes('<ReportName>Main_Subdocument_7</ReportName>'));
+    assert.equal(inlinedOnly, undefined);
   });
 });
