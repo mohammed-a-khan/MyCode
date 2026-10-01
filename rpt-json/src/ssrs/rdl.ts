@@ -625,7 +625,9 @@ class RdlBuilder {
   /** Outside a data region, field references must be wrapped in an aggregate with a dataset scope. */
   private scoped(expression: string, scope: Scope): string {
     if (scope === 'row' || !expression.includes('Fields!')) return expression;
-    if (!AGGREGATE_CALL.test(expression)) return `First(${expression}, ${vbString(this.dataset)})`;
+    // A shared variable's value is filled in later with its own First(..., subreport dataset): wrapping the whole
+    // expression would nest aggregates, so each field reference is scoped on its own.
+    if (!AGGREGATE_CALL.test(expression) && !expression.includes(SHARED_TOKEN)) return `First(${expression}, ${vbString(this.dataset)})`;
     return scopeOutsideRegion(expression, this.dataset);
   }
 
