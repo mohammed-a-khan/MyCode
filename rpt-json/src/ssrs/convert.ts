@@ -3,6 +3,7 @@
 import { buildMetadata } from '../json.ts';
 import type { CfbDocument, CfbNode, CfbStorage } from '../cfb/types.ts';
 import { convertToRdl, sanitizeName, type ReviewNote, type SubreportInfo } from './rdl.ts';
+import { buildHouseReport, type HouseInput, type HouseTemplate } from './house.ts';
 
 export interface ConvertedReport {
   /** File name for the .rdl (without directory). */
@@ -16,6 +17,8 @@ export interface ConvertedReport {
 export interface SsrsOptions {
   /** Overrides the generated connection string for every report. */
   connectionString?: string;
+  /** A shared data source on the report server, used instead of an embedded connection. */
+  sharedDataSource?: string;
 }
 
 const safeFileName = (name: string) => name.replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'Report';
@@ -57,6 +60,7 @@ export function convertDocumentToSsrs(doc: CfbDocument, baseName: string, option
     const { rdl, review, inlinedOnly } = convertToRdl(model.definition, model.dataSource, {
       reportName,
       connectionString: options.connectionString,
+      sharedDataSource: options.sharedDataSource,
       subreports: model.storage ? new Map() : subreports,
       subreport: Boolean(model.storage),
       images: embeddedImages(storageAt(doc.root, model.storage)),
@@ -101,4 +105,28 @@ export function reviewMarkdown(sourceName: string, reports: ConvertedReport[]): 
     lines.push('');
   }
   return lines.join('\n');
+}
+
+/**
+ * One SSRS report laid out with a house template, from one or more .rpt files (one block each, in order).
+ * Only each file's main report is used; its subreports are listed in the review notes.
+ */
+export function convertDocumentsWithTemplate(template: HouseTemplate, documents: { doc: CfbDocument; name: string }[], reportName: string): ConvertedReport {
+  const names = new Set<string>();
+  const inputs: HouseInput[] = [];
+  const notes: ReviewNote[] = [];
+  for (const { doc, name } of documents) {
+    const main = (buildMetadata(doc).reports ?? []).find((m) => !m.storage);
+    if (!main?.definition) {
+      notes.push({ item: name, message: `could not be decoded: ${(main?.errors ?? []).join('; ') || 'no report definition'}` });
+      continue;
+    }
+    let base = safeFileName(name);
+    for (let n = 2; names.has(base.toLowerCase()); n++) base = `${safeFileName(name)}_${n}`;
+    names.add(base.toLowerCase());
+    inputs.push({ name: base, definition: main.definition, dataSource: main.dataSource });
+  }
+  if (!inputs.length) throw new Error('none of the reports could be decoded');
+  const { rdl, review } = buildHouseReport(template, inputs, reportName);
+  return { fileName: `${safeFileName(reportName)}.rdl`, storage: '', rdl, review: [...notes, ...review] };
 }

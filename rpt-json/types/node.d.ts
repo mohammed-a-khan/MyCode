@@ -6,6 +6,12 @@
  * type checker; at run time Node provides the real implementations.
  */
 
+interface ImportMeta {
+  /** Directory of the current module (Node 20.11+). */
+  dirname: string;
+  filename: string;
+}
+
 type BufferEncoding = 'utf8' | 'utf-8' | 'hex' | 'base64' | 'latin1' | 'binary' | 'ascii' | 'utf16le';
 
 declare class Buffer extends Uint8Array {
@@ -47,6 +53,7 @@ declare const process: {
 
 declare module 'node:fs' {
   export function readFileSync(path: string): Buffer;
+  export function readFileSync(path: string, encoding: BufferEncoding): string;
   export function readdirSync(path: string): string[];
 }
 

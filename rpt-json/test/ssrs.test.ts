@@ -10,6 +10,8 @@ import { CODE_HELPERS, crystalColor, translateFormula, translateToSql, vbString,
 import { isBasicSyntax } from '../src/ssrs/basic.ts';
 import { chartStyle, convertToRdl, scopeOutsideRegion, substituteCommandParameters } from '../src/ssrs/rdl.ts';
 import { classifyAreas } from '../src/crystal/areas.ts';
+import { buildHouseReport, readHouseTemplate } from '../src/ssrs/house.ts';
+import { parseXml } from '../src/ssrs/xml.ts';
 
 const ctx: FormulaContext = {
   field: (table, column) => (table === 'Orders' ? column.replace(/\W/g, '_') : undefined),
@@ -705,5 +707,107 @@ describe('audit fixes', () => {
   it('escapes CSV cells Excel would run as formulas', () => {
     const csv = formatHeadersCsv([{ report: 'Main report', area: 'Page Header', section: 'PH', kind: 'text', text: '=HYPERLINK("x")', object: 'T', x: 0, y: 0 }]);
     assert.match(csv, /,"'=HYPERLINK\(""x""\)",/);
+  });
+});
+
+describe('house template layout', () => {
+  const templateXml = readFileSync(join(import.meta.dirname, 'fixtures', 'house-template.rdl'), 'utf8');
+  const template = readHouseTemplate(templateXml);
+  const text = (name: string, value: string, x: number, y: number, size = 10) =>
+    ({ kind: 'text', name, text: value, runs: [{ text: value }], position: { x, y }, size: { width: 1400, height: 240 }, style: { size } });
+  const field = (name: string, ref: string, x: number) => ({ kind: 'field', name, field: ref, position: { x, y: 0 }, size: { width: 1400, height: 240 } });
+  const source: DataSourceInfo = {
+    connections: [],
+    tables: [{ alias: 'usp_Holdings;1', name: 'usp_Holdings;1', kind: 'storedProcedure', fields: [
+      { name: 'Name', type: 'string' }, { name: 'Units', type: 'integer' }, { name: 'Value', type: 'currency' },
+    ] }],
+    links: [],
+  };
+  const report = (title: string): ReportDefinition => ({
+    ...emptyDefinition(),
+    parameters: [{ name: '@owner_id', prompt: 'Owner', valueType: 'number' }, { name: '@region', prompt: 'Region', valueType: 'string' }],
+    layout: [
+      { name: 'PageHeaderArea1', sections: [{ name: 'PH', objects: [
+        text('Title', title, 0, 0, 16),
+        text('H1', 'Holding', 0, 400), text('H2', 'Units', 2880, 400), text('H3', 'Value', 5760, 400),
+      ] }] },
+      { name: 'PageFooterArea1', sections: [{ name: 'PF', objects: [field('Page', 'Page Number', 0)] }] },
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', objects: [] }] },
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF', objects: [text('TotalText', 'Grand total:', 0, 0), field('Sum', 'Sum of usp_Holdings;1.Value', 5760)] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', objects: [
+        field('N', 'usp_Holdings;1.Name', 0), field('U', 'usp_Holdings;1.Units', 2880), field('V', 'usp_Holdings;1.Value', 5760),
+      ] }] },
+    ],
+  });
+
+  it('reads the template: data source, support datasets, page header and table rows', () => {
+    assert.equal(template.dataSourceName, 'SharedDb');
+    assert.deepEqual(template.supportDataSets.map((d) => d.attributes.Name), ['Theme', 'PageInfo']);
+    assert.deepEqual(template.tableDataSets, ['SampleList']);
+    assert.equal(template.title?.text, 'Sample List');
+    assert.equal(template.noData?.text, 'NO SAMPLE LIST DATA FOR THIS PERIOD');
+    assert.equal(template.total?.text, 'Totals:');
+    assert.ok(template.heading && template.detail && template.rectangle);
+    assert.ok(template.warnings.some((w) => w.includes('Placeholder')), 'an unused template dataset is reported');
+  });
+
+  it('lays a report out with the template and keeps the report\'s own data', () => {
+    const { rdl, review } = buildHouseReport(template, [{ name: 'Holdings', definition: report('Holdings Detail'), dataSource: source }], 'Holdings');
+    const doc = parseXml(rdl);
+    assert.equal(doc.name, 'Report');
+    // The report's own stored procedure, through the template's data source.
+    assert.ok(rdl.includes('<DataSet Name="Holdings">') && rdl.includes('<CommandText>[usp_Holdings]</CommandText>'));
+    assert.ok(/<DataSet Name="Holdings">\s*<Query>\s*<DataSourceName>SharedDb<\/DataSourceName>/.test(rdl));
+    assert.ok(!rdl.includes('usp_SampleList') && !rdl.includes('"SampleList"'), 'the template\'s own table data is gone');
+    assert.ok(rdl.includes('dbo.usp_Theme') && rdl.includes('dbo.usp_PageInfo'), 'branding and header datasets are kept');
+    // Title, headings, values, totals in the template's cells.
+    for (const value of ['<Value>Holdings Detail</Value>', '<Value>Holding</Value>', '<Value>Units</Value>', '<Value>=Fields!Name.Value</Value>',
+      '<Value>=Sum(Fields!Value.Value)</Value>', '<Value>Grand total:</Value>', '<Value>="NO HOLDINGS DETAIL DATA FOR THIS PERIOD"</Value>']) {
+      assert.ok(rdl.includes(value), value);
+    }
+    assert.ok(rdl.includes('First(Fields!ColumnHead_font_family.Value, "Theme")'), 'styles come from the template');
+    assert.ok(rdl.includes('ROWNUMBER(NOTHING) MOD 2'), 'alternating row colours are kept');
+    assert.ok(rdl.includes('<Format>#,0;(#,0)</Format>'), 'whole numbers get the template format without decimals');
+    assert.ok(rdl.includes('<Hidden>=CountRows("Holdings") &gt; 0</Hidden>'), 'the no-data row shows only without rows');
+    assert.ok(rdl.includes('<BreakLocation>End</BreakLocation>') && rdl.includes('<Rectangle Name="Holdings_Block">'));
+    // Page header and footer, logo and parameters come from the template; the report's own parameter is added once.
+    assert.ok(rdl.includes('<Textbox Name="Hdr_Owner">') && rdl.includes('<EmbeddedImage Name="Logo">'));
+    assert.equal((rdl.match(/<ReportParameter Name="owner_id">/g) ?? []).length, 1);
+    assert.ok(rdl.includes('<ReportParameter Name="region">'));
+    assert.ok(review.some((r) => r.item === 'Layout' && r.message.includes('Page Number')), 'items left out are listed');
+  });
+
+  it('combines several reports into one, one block each', () => {
+    const { rdl } = buildHouseReport(template, [
+      { name: 'Holdings', definition: report('Holdings Detail'), dataSource: source },
+      { name: 'Holdings_Prior', definition: report('Prior Holdings'), dataSource: source },
+    ], 'Combined');
+    assert.ok(rdl.includes('<DataSet Name="Holdings">') && rdl.includes('<DataSet Name="Holdings_Prior">'));
+    assert.ok(rdl.includes('<Rectangle Name="Holdings_Block">') && rdl.includes('<Rectangle Name="Holdings_Prior_Block">'));
+    assert.ok(rdl.includes('<Value>Prior Holdings</Value>') && rdl.includes('CountRows("Holdings_Prior")'));
+    const names = [...rdl.matchAll(/<(?:Textbox|Tablix|Rectangle|Group) Name="([^"]+)"/g)].map((m) => m[1].toLowerCase());
+    assert.equal(new Set(names).size, names.length, 'item names are unique');
+    assert.equal((rdl.match(/<ReportParameter Name="region">/g) ?? []).length, 1, 'shared parameters appear once');
+    assert.equal((rdl.match(/<PageHeader>/g) ?? []).length, 1);
+  });
+
+  it('rejects a template without a table to copy', () => {
+    const bare = templateXml.replace(/<Body>[\s\S]*<\/Body>/, '<Body><ReportItems /><Height>1in</Height></Body>');
+    assert.throws(() => readHouseTemplate(bare), /no table/);
+  });
+
+  it('points a plain conversion at a shared data source', () => {
+    const { rdl } = convertToRdl({ ...emptyDefinition(), layout: detailLayout('usp_Holdings;1.Name') }, source, { reportName: 'Shared', sharedDataSource: '/Data Sources/SharedDb' });
+    assert.ok(rdl.includes('<DataSourceReference>/Data Sources/SharedDb</DataSourceReference>'));
+    assert.ok(!rdl.includes('<ConnectString>'));
+  });
+});
+
+describe('XML reading', () => {
+  it('parses elements, attributes, entities and CDATA', () => {
+    const x = parseXml('<?xml version="1.0"?><!-- c --><R a="1&amp;2"><V>=a &lt; b</V><E/><M><![CDATA[<raw>]]></M></R>');
+    assert.equal(x.attributes.a, '1&2');
+    assert.deepEqual(x.children.map((c) => (typeof c === 'object' && c ? (c as { name: string }).name : c)), ['V', 'E', 'M']);
+    assert.throws(() => parseXml('<R><A></R>'), /does not match/);
   });
 });

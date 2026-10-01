@@ -71,7 +71,7 @@ const extent = (obj: ReportObject) => ({ left: obj.position?.x ?? 0, right: (obj
  * column headings; a single one counts when it lines up with its column's left or right edge and nothing
  * else (a field value) shares its row, as a form label would.
  */
-function columnHeadings(section: SectionInfo, detailObjects: ReportObject[]): Set<ReportObject> {
+function columnHeadings(section: SectionInfo, detailObjects: ReportObject[]): Map<ReportObject, number> {
   const columns = detailObjects.filter((o) => o.position).map(extent);
   /** The detail column a text heads, if any. */
   const columnOf = (obj: ReportObject): number => {
@@ -102,11 +102,13 @@ function columnHeadings(section: SectionInfo, detailObjects: ReportObject[]): Se
     .filter((o) => o.kind === 'text' && o.position && isLabel(o))
     .map((o) => ({ obj: o, column: columnOf(o) }))
     .filter((c) => c.column >= 0);
-  const result = new Set<ReportObject>();
+  const result = new Map<ReportObject, number>();
+  // A row that also shows values (fields, or text with fields) holds form labels, not column headings.
+  const showsValues = (obj: ReportObject) => section.objects.some((o) => o !== obj && sameRow(o, obj) && (o.kind === 'field' || o.runs?.some((r) => 'field' in r)));
   for (const c of candidates) {
     const row = candidates.filter((o) => sameRow(o.obj, c.obj));
-    if (new Set(row.map((o) => o.column)).size >= 2) {
-      result.add(c.obj);
+    if (new Set(row.map((o) => o.column)).size >= 2 && !showsValues(c.obj)) {
+      result.set(c.obj, c.column);
       continue;
     }
     const col = columns[c.column];
@@ -114,9 +116,43 @@ function columnHeadings(section: SectionInfo, detailObjects: ReportObject[]): Se
     const narrow = e.right - e.left <= 1.5 * (col.right - col.left || 1);
     const aligned = narrow && (Math.abs(e.left - col.left) <= 144 || Math.abs(e.right - col.right) <= 144);
     const alone = !section.objects.some((o) => o !== c.obj && o.position && sameRow(o, c.obj));
-    if (row.length === 1 && aligned && alone) result.add(c.obj);
+    if (row.length === 1 && aligned && alone) result.set(c.obj, c.column);
   }
   return result;
+}
+
+/**
+ * The heading of each detail column: text objects in the page header, report header or group headers that
+ * label a detail object's column (the first area with a heading for a column wins). Lines of a heading are
+ * joined with a space.
+ */
+export function detailColumnHeadings(definition: ReportDefinition, subreport = false): { headings: Map<ReportObject, string>; headingObjects: Set<ReportObject> } {
+  const areas = classifyAreas(definition.layout, subreport);
+  const detailObjects = areas.detail.flatMap((s) => s.objects);
+  const positioned = detailObjects.filter((o) => o.position);
+  const levels = [...areas.groupHeaders.keys()].sort((a, b) => a - b);
+  const sections = [...areas.pageHeader, ...areas.reportHeader, ...levels.flatMap((l) => areas.groupHeaders.get(l) ?? [])];
+  // Every heading found, with the number of headings on its row: the row labelling most columns wins, then
+  // the row nearest the details (later section, lower in it).
+  const found: { heading: ReportObject; column: number; rowSize: number; order: number }[] = [];
+  sections.forEach((section, order) => {
+    const map = columnHeadings(section, detailObjects);
+    for (const [heading, column] of map) {
+      const y = heading.position?.y ?? 0;
+      const rowSize = [...map.keys()].filter((h) => Math.abs((h.position?.y ?? 0) - y) <= 120).length;
+      found.push({ heading, column, rowSize, order: order * 1e6 + y });
+    }
+  });
+  found.sort((a, b) => b.rowSize - a.rowSize || b.order - a.order);
+  const headings = new Map<ReportObject, string>();
+  const headingObjects = new Set<ReportObject>();
+  for (const { heading, column } of found) {
+    const target = positioned[column];
+    if (!target || headings.has(target)) continue;
+    headings.set(target, objectText(heading).replace(/\n/g, ' '));
+    headingObjects.add(heading);
+  }
+  return { headings, headingObjects };
 }
 
 function reportHeaders(definition: ReportDefinition, report: string, subreport: boolean, options: HeaderOptions): HeaderText[] {
@@ -125,8 +161,8 @@ function reportHeaders(definition: ReportDefinition, report: string, subreport: 
   const out: HeaderText[] = [];
   for (const [area, sections] of orderedAreas(areas, options.all ?? false)) {
     for (const section of sections) {
-      const headings = area === 'Details' ? new Set<ReportObject>() : columnHeadings(section, detailObjects);
-      const columnOrder = [...headings].sort((a, b) => (a.position?.x ?? 0) - (b.position?.x ?? 0));
+      const headings = area === 'Details' ? new Map<ReportObject, number>() : columnHeadings(section, detailObjects);
+      const columnOrder = [...headings.keys()].sort((a, b) => (a.position?.x ?? 0) - (b.position?.x ?? 0));
       const objects = [...section.objects].sort((a, b) => (a.position?.y ?? 0) - (b.position?.y ?? 0) || (a.position?.x ?? 0) - (b.position?.x ?? 0));
       for (const obj of objects) {
         const base = { ...(options.file ? { file: options.file } : {}), report, area, section: section.name, object: obj.name, x: round(obj.position?.x), y: round(obj.position?.y) };

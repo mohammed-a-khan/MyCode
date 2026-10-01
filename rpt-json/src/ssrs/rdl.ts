@@ -25,6 +25,7 @@ import type {
   TableInfo,
 } from '../crystal/model.ts';
 import { classifyAreas } from '../crystal/areas.ts';
+import { detailColumnHeadings } from '../crystal/headers.ts';
 import { CODE_HELPERS, SPECIAL_FIELDS, translateFormula, translateToSql, vbString, type FormulaContext, type Translation } from './formula.ts';
 import { el, toXml, type XmlElement } from './xml.ts';
 
@@ -33,6 +34,8 @@ export interface RdlOptions {
   reportName: string;
   /** Overrides the generated connection string. */
   connectionString?: string;
+  /** Name (or path) of a shared data source on the report server, used instead of an embedded connection. */
+  sharedDataSource?: string;
   /** Subreports by their "Subdocument N" number: RDL name and link parameters (Crystal "Pm-" parameters). */
   subreports?: Map<number, SubreportInfo>;
   /** Image bytes by their "Embedding N" number. */
@@ -43,7 +46,7 @@ export interface RdlOptions {
   inline?: InlineTarget;
 }
 
-interface InlineTarget {
+export interface InlineTarget {
   dataset: string;
   itemNames: NameSet;
   imageNames: NameSet;
@@ -64,7 +67,7 @@ interface InlineResult {
   review: ReviewNote[];
 }
 
-interface ParameterEntry {
+export interface ParameterEntry {
   name: string;
   type: string;
   prompt: string;
@@ -106,6 +109,61 @@ export interface RdlResult {
   inlinedOnly?: number[];
 }
 
+/** One detail column of a report laid out as a plain list (see buildBlock). */
+export interface BlockColumn {
+  /** Base for item names (the field's name). */
+  name: string;
+  heading: string;
+  /** Value expression (with "="). */
+  value: string;
+  format?: string;
+  numeric: boolean;
+  /** Width in inches, from the Crystal object. */
+  width: number;
+  /** Grand total for the column (expression with "="), from a summary in a footer. */
+  total?: { value: string; format?: string };
+}
+
+/** A report reduced to a list: title, detail columns with headings and totals, and its data. */
+export interface BlockParts {
+  title?: string;
+  totalLabel?: string;
+  columns: BlockColumn[];
+  sorts: { expression: string; descending: boolean }[];
+  datasetName: string;
+  dataset: (dataSourceName: string) => XmlElement;
+  parameters: ParameterEntry[];
+  codeFunctions: string[];
+  codeMembers: Record<string, string>;
+  review: ReviewNote[];
+}
+
+/** Builds a report as a list block (used to lay it out with a house template). */
+export function convertToBlock(definition: ReportDefinition, dataSource: DataSourceInfo | undefined, options: RdlOptions & { inline: InlineTarget }): BlockParts {
+  return new RdlBuilder(definition, dataSource ?? { connections: [], tables: [], links: [] }, options).buildBlock();
+}
+
+/** A ReportParameter element. */
+export function parameterElement(p: ParameterEntry): XmlElement {
+  return el('ReportParameter', { Name: p.name },
+    el('DataType', p.type),
+    p.nullable ? el('Nullable', 'true') : null,
+    p.defaultFrom ? el('DefaultValue', el('DataSetReference', el('DataSetName', p.defaultFrom.dataset), el('ValueField', p.defaultFrom.field))) : null,
+    el('Prompt', p.prompt),
+    p.hidden ? el('Hidden', 'true') : null,
+    p.multiple ? el('MultiValue', 'true') : null);
+}
+
+/** The ReportParametersLayout for parameters, four to a row. */
+export function parametersLayout(names: string[]): XmlElement | null {
+  if (!names.length) return null;
+  return el('ReportParametersLayout', el('GridLayoutDefinition',
+    el('NumberOfColumns', String(Math.min(4, names.length))),
+    el('NumberOfRows', String(Math.ceil(names.length / 4))),
+    el('CellDefinitions', ...names.map((name, i) => el('CellDefinition',
+      el('ColumnIndex', String(i % 4)), el('RowIndex', String(Math.floor(i / 4))), el('ParameterName', name))))));
+}
+
 const RDL_NS = 'http://schemas.microsoft.com/sqlserver/reporting/2016/01/reportdefinition';
 const RD_NS = 'http://schemas.microsoft.com/SQLServer/reporting/reportdesigner';
 const DATASET = 'DataSet1';
@@ -142,7 +200,7 @@ const SUMMARY_NAME = new RegExp(`^(${Object.keys(SUMMARY_OPERATIONS).map((k) => 
 const AGGREGATE_CALL = /\b(Sum|Count|Avg|Max|Min|CountDistinct|StDev|StDevP|Var|VarP|First|Last|Previous|RowNumber|RunningValue)\(/;
 const BORDER_STYLES: Record<number, string> = { 1: 'Solid', 2: 'Dashed', 3: 'Dotted', 4: 'Double' };
 
-class NameSet {
+export class NameSet {
   private readonly used = new Set<string>();
 
   /** A CLS-compliant identifier, unique within this set. */
@@ -681,7 +739,7 @@ class RdlBuilder {
     // The subreport's data source: the main one when the connection matches (or it reads no database), otherwise its own.
     let dataSource = DATASOURCE;
     const readsData = (info.dataSource?.tables.length ?? 0) > 0;
-    if (readsData && result.connectionString !== this.connectionString()) {
+    if (readsData && !this.options.sharedDataSource && result.connectionString !== this.connectionString()) {
       const existing = this.extraDataSources.find((d) => d.connectionString === result.connectionString);
       dataSource = existing?.name ?? `DataSource${this.extraDataSources.length + 2}`;
       if (!existing) this.extraDataSources.push({ name: dataSource, connectionString: result.connectionString });
@@ -1579,6 +1637,145 @@ class RdlBuilder {
     };
   }
 
+  /**
+   * Builds the report as a list block: a title, one column per detail object (with its column heading),
+   * grand totals from the summaries in the footers, and the report's dataset. Used to lay a report out with a
+   * house template; anything else in the report is listed in the review notes.
+   */
+  buildBlock(): BlockParts {
+    const def = this.definition;
+    this.prepare();
+    const areas = this.classify(def.layout);
+    const { headings, headingObjects } = detailColumnHeadings(def, this.options.subreport);
+    const placed = new Set<ReportObject>(headingObjects);
+
+    // Columns: the detail fields (and texts with embedded fields), left to right.
+    const detailObjects = areas.detail.flatMap((s) => s.objects)
+      .filter((o) => (o.kind === 'field' && o.field) || (o.kind === 'text' && o.embeddedFields?.length))
+      .sort((a, b) => (a.position?.x ?? 0) - (b.position?.x ?? 0));
+    const columns: BlockColumn[] = detailObjects.map((obj, i) => {
+      placed.add(obj);
+      const { value, format } = this.objectValue(obj, 'row');
+      const ref = obj.field ?? '';
+      const type = this.formulaContext.fieldType?.(ref);
+      const numeric = ['integer', 'number', 'currency'].includes(type ?? '') || (!!format && /^[NCP]\d*$|[#0]/.test(format));
+      const base = ref.replace(/^[@?#%]/, '').split('.').pop() || obj.name || 'Column';
+      return {
+        name: base,
+        heading: headings.get(obj) ?? base.replace(/_/g, ' '),
+        value, format, numeric,
+        // The space up to the next column (Crystal leaves gaps between objects), the object's own width for the last.
+        width: Math.max(twipsToInches(i + 1 < detailObjects.length
+          ? (detailObjects[i + 1].position?.x ?? 0) - (obj.position?.x ?? 0)
+          : obj.size?.width ?? TWIPS_PER_INCH), 0.3),
+      };
+    });
+    for (const obj of detailObjects) if (!headings.has(obj)) this.note(`${obj.kind} object "${obj.name}"`, 'no column heading was found above it; its field name was used as the heading');
+
+    // Totals: summaries in the report footer, then in the group footers (outermost first), under the column they overlap.
+    const extent = (o: ReportObject) => ({ left: o.position?.x ?? 0, right: (o.position?.x ?? 0) + (o.size?.width ?? 0) });
+    const columnOf = (o: ReportObject) => {
+      const e = extent(o);
+      let best = -1;
+      let bestOverlap = 0;
+      detailObjects.forEach((d, i) => {
+        const c = extent(d);
+        const overlap = Math.min(e.right, c.right) - Math.max(e.left, c.left);
+        if (overlap > bestOverlap) {
+          best = i;
+          bestOverlap = overlap;
+        }
+      });
+      return best;
+    };
+    const levels = [...areas.groupFooters.keys()].sort((a, b) => a - b);
+    const footers: { sections: SectionInfo[]; level?: number }[] = [
+      { sections: areas.reportFooter },
+      ...levels.map((level) => ({ sections: areas.groupFooters.get(level) ?? [], level })),
+    ];
+    let totalLabel: string | undefined;
+    for (const { sections, level } of footers) {
+      for (const section of sections) {
+        const summaries = section.objects.filter((o) => o.kind === 'field' && o.field && (SUMMARY_NAME.test(o.field) || o.field.startsWith('#')));
+        let used = false;
+        for (const obj of summaries) {
+          const column = columnOf(obj);
+          if (column < 0 || columns[column].total) continue;
+          const { value, format } = this.objectValue(obj, 'row');
+          // At table level a total covers every row: a group scope would not exist there.
+          let total = value;
+          for (const group of this.groupNames) total = total.split(`, ${vbString(group)})`).join(')');
+          columns[column].total = { value: total, format: format ?? columns[column].format };
+          placed.add(obj);
+          used = true;
+          if (level !== undefined && !this.isConstantGroup(this.groupFields[level - 1])) {
+            this.note(`${obj.kind} object "${obj.name}"`, `was a subtotal per ${this.groupFields[level - 1]}; the house layout shows it as a grand total`);
+          }
+        }
+        if (used && totalLabel === undefined) {
+          const label = section.objects.filter((o) => o.kind === 'text' && !o.embeddedFields?.length && (o.text ?? '').trim())
+            .sort((a, b) => (a.position?.x ?? 0) - (b.position?.x ?? 0))[0];
+          if (label) {
+            totalLabel = (label.text ?? '').trim();
+            placed.add(label);
+          }
+        }
+      }
+    }
+
+    // Title: the largest text in the report header or page header that is not a column heading.
+    const titleObject = [...areas.reportHeader, ...areas.pageHeader].flatMap((s) => s.objects)
+      .filter((o) => o.kind === 'text' && !o.embeddedFields?.length && (o.text ?? '').trim() && !headingObjects.has(o))
+      .sort((a, b) => (b.style?.size ?? 0) - (a.style?.size ?? 0) || (a.position?.y ?? 0) - (b.position?.y ?? 0))[0];
+    if (titleObject) placed.add(titleObject);
+
+    // Sorting: group fields (groups become a sort order), then the record sorts.
+    const sorts = def.sorts ?? def.sortFields.map((field) => ({ field, descending: false, bySummary: false }));
+    const order: { expression: string; descending: boolean }[] = [];
+    this.groupFields.forEach((field, i) => {
+      if (this.isConstantGroup(field)) return;
+      const expression = this.fieldObjectValue(field, 'row', `Group ${i + 1}`).expression;
+      if (expression === 'Nothing') return;
+      const sort = sorts.find((x) => !x.bySummary && x.field.toLowerCase() === field.toLowerCase());
+      order.push({ expression: `=${expression}`, descending: sort?.descending ?? false });
+      this.note(`Group ${i + 1}`, `the report was grouped by ${field}; the house layout lists the rows sorted by it, without group headers or footers`);
+    });
+    for (const sort of sorts) {
+      if (sort.bySummary || this.groupFields.some((g) => g.toLowerCase() === sort.field.toLowerCase())) continue;
+      const expression = this.fieldObjectValue(sort.field, 'row', 'Record sort').expression;
+      if (expression !== 'Nothing') order.push({ expression: `=${expression}`, descending: sort.descending });
+    }
+
+    // Everything else is not part of the house layout.
+    const left: string[] = [];
+    for (const area of def.layout) {
+      for (const section of area.sections) {
+        for (const obj of section.objects) {
+          if (placed.has(obj) || obj.kind === 'line' || obj.kind === 'box') continue;
+          if (obj.kind === 'text' && !(obj.text ?? '').trim() && !obj.embeddedFields?.length) continue;
+          left.push(`${obj.kind} "${obj.name}"${obj.kind === 'text' ? ` (${(obj.text ?? '').trim().slice(0, 40)})` : obj.field ? ` (${obj.field})` : ''}`);
+        }
+      }
+    }
+    if (left.length) {
+      this.note('Layout', `the house layout shows the title, column headings, detail columns and totals; these items were left out (the template's page header and footer replace the report's): ${left.join(', ')}`);
+    }
+
+    this.finishDataset();
+    return {
+      title: titleObject ? (titleObject.text ?? '').trim().replace(/\s*\n\s*/g, ' ') : undefined,
+      totalLabel,
+      columns,
+      sorts: order,
+      datasetName: this.dataset,
+      dataset: (dataSourceName) => this.datasetElement(dataSourceName),
+      parameters: this.parameterEntries(),
+      codeFunctions: this.codeFunctions,
+      codeMembers: this.codeMembers,
+      review: this.review,
+    };
+  }
+
   build(): RdlResult {
     const def = this.definition;
     this.prepare();
@@ -1634,30 +1831,32 @@ class RdlBuilder {
     // A subreport's margins never apply: it prints inside the main report.
     if (!def.margins && !this.options.subreport) this.note('Page', 'the report uses the printer default margins; 0.25in margins were used');
 
+    if (this.options.sharedDataSource) {
+      this.note('Data source', `uses the shared data source "${this.options.sharedDataSource}" on the report server; it must point to the database the Crystal report read`);
+    }
     this.finishDataset();
     // Parameters of subreports placed inline are added unless the main report has one of the same name.
     const ownParameters = this.parameterEntries();
     const parameterList = [...ownParameters, ...this.extraParameters.filter((p) => !ownParameters.some((o) => o.name.toLowerCase() === p.name.toLowerCase()))];
-    const parameters = parameterList.map((p) => el('ReportParameter', { Name: p.name },
-      el('DataType', p.type),
-      p.nullable ? el('Nullable', 'true') : null,
-      p.defaultFrom ? el('DefaultValue', el('DataSetReference', el('DataSetName', p.defaultFrom.dataset), el('ValueField', p.defaultFrom.field))) : null,
-      el('Prompt', p.prompt),
-      p.hidden ? el('Hidden', 'true') : null,
-      p.multiple ? el('MultiValue', 'true') : null));
+    const parameters = parameterList.map(parameterElement);
 
     const report = el('Report', { MustUnderstand: 'df', xmlns: RDL_NS, 'xmlns:rd': RD_NS, 'xmlns:df': `${RDL_NS}/defaultfontfamily` },
       el('rd:ReportUnitType', 'Inch'),
       el('rd:ReportID', reportId(this.options.reportName)),
       el('df:DefaultFontFamily', 'Arial'),
       el('AutoRefresh', '0'),
-      el('DataSources', el('DataSource', { Name: DATASOURCE },
-        el('rd:SecurityType', 'Integrated'),
-        el('ConnectionProperties',
-          el('DataProvider', 'SQL'),
-          el('ConnectString', this.connectionString()),
-          el('IntegratedSecurity', 'true')),
-        el('rd:DataSourceID', reportId(`${this.options.reportName}/${DATASOURCE}`))),
+      el('DataSources', this.options.sharedDataSource
+        ? el('DataSource', { Name: DATASOURCE },
+          el('DataSourceReference', this.options.sharedDataSource),
+          el('rd:SecurityType', 'None'),
+          el('rd:DataSourceID', reportId(`${this.options.reportName}/${DATASOURCE}`)))
+        : el('DataSource', { Name: DATASOURCE },
+          el('rd:SecurityType', 'Integrated'),
+          el('ConnectionProperties',
+            el('DataProvider', 'SQL'),
+            el('ConnectString', this.connectionString()),
+            el('IntegratedSecurity', 'true')),
+          el('rd:DataSourceID', reportId(`${this.options.reportName}/${DATASOURCE}`))),
         ...this.extraDataSources.map((d) => el('DataSource', { Name: d.name },
           el('rd:SecurityType', 'Integrated'),
           el('ConnectionProperties', el('DataProvider', 'SQL'), el('ConnectString', d.connectionString), el('IntegratedSecurity', 'true')),
@@ -1675,11 +1874,7 @@ class RdlBuilder {
           el('TopMargin', inches(margins.top)), el('BottomMargin', inches(margins.bottom)),
           el('Style')))),
       parameters.length ? el('ReportParameters', ...parameters) : null,
-      parameters.length ? el('ReportParametersLayout', el('GridLayoutDefinition',
-        el('NumberOfColumns', String(Math.min(4, parameters.length))),
-        el('NumberOfRows', String(Math.ceil(parameters.length / 4))),
-        el('CellDefinitions', ...parameterList.map((p, i) => el('CellDefinition',
-          el('ColumnIndex', String(i % 4)), el('RowIndex', String(Math.floor(i / 4))), el('ParameterName', p.name)))))) : null,
+      parametersLayout(parameterList.map((p) => p.name)),
       this.codeFunctions.length ? el('Code', [
         ...Object.entries(this.codeMembers).map(([name, type]) => `Dim ${name} As ${type}`),
         ...this.codeFunctions,

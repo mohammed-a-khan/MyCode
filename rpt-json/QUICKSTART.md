@@ -51,6 +51,33 @@ For each report you get:
 
 Then open the `.rdl` in Report Builder or Visual Studio (SSRS project), work through `review.md`, and deploy.
 
+Use your server's shared data source instead of a connection string:
+
+```
+node src/cli.ts to-rdl "C:\reports" "C:\out" --shared-datasource "MySharedDataSource"
+```
+
+To render on the report server: upload the `.rdl` files (main report and its `_Subdocument_N` files) into one
+folder, make sure the data source is the shared one (or set its credentials under **Manage → Data sources**), and run
+the report. The data source account needs access to the procedures or tables the Crystal report used.
+
+### In your house style
+
+Give an existing SSRS report of your house style (with its page header and footer) as a template. Each Crystal report
+keeps its own data, laid out with the template's title row, column headings, detail and totals rows, fonts, colours
+and page header/footer:
+
+```
+node src/cli.ts to-rdl "C:\reports\Sales.rpt" "C:\out" --template "C:\templates\House.rdl"
+```
+
+Several Crystal reports in one SSRS report, one block per report (each on its own page if the template's table has a
+page break):
+
+```
+node src/cli.ts to-rdl --template "C:\templates\House.rdl" --combine "C:\out\Combined.rdl" "C:\reports\A.rpt" "C:\reports\B.rpt"
+```
+
 ## 4. Convert to JSON and back
 
 ```
