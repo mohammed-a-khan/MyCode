@@ -1027,22 +1027,31 @@ class RdlBuilder {
 
   private chart(obj: ReportObject, box: Box, item: string): XmlElement | null {
     const chart = obj.chart;
-    if (chart?.layoutCode === 8) {
-      this.note(item, 'maps are not converted; use an SSRS map');
-      return null;
-    }
-    // Values: the chart's own summaries, or those of a cross-tab it charts.
+    // Layout 2 charts a cross-tab: its summaries and columns.
     const crossTab = this.definition.layout.flatMap((a) => a.sections.flatMap((s) => s.objects)).find((o) => o.crossTab)?.crossTab;
-    const values = chart?.values.length ? chart.values : chart?.layoutCode === 1 && crossTab ? crossTab.summaries : [];
-    const category = chart?.onChangeOf ?? (chart?.layoutCode === 1 && crossTab ? crossTab.columns[0] : this.groupFields[0]);
-    if (!chart || values.length === 0 || !category) {
+    const ofCrossTab = chart?.layoutCode === 2 && crossTab;
+    const values = chart?.values.length ? chart.values : ofCrossTab ? crossTab.summaries : [];
+    // Categories: the chart's "on change of" field, a cross-tab's column, or (a group chart) the first group; an
+    // advanced chart "for all records" has none and shows one point per value.
+    const category = chart?.onChangeOf ?? (ofCrossTab ? crossTab.columns[0] : chart?.layoutCode === 0 ? undefined : this.groupFields[0]);
+    if (!chart || values.length === 0 || (!category && chart.layoutCode !== 0)) {
       this.note(item, 'the chart data could not be determined; recreate the chart');
       return null;
     }
     const style = chartStyle(chart.family, chart.graphType);
     if (style.note) this.note(item, style.note);
-    const categoryExpression = this.fieldObjectValue(category, 'row', item).expression;
+    const categoryExpression = category ? this.fieldObjectValue(category, 'row', item).expression : undefined;
     const chartName = this.itemNames.make(obj.name || 'Chart');
+    // A second "on change of" field: one series per value of it.
+    const seriesExpression = chart.series ? this.fieldObjectValue(chart.series, 'row', item).expression : undefined;
+    const valueMembers = values.map((v) => el('ChartMember', el('Label', v)));
+    const seriesHierarchy = seriesExpression && seriesExpression !== 'Nothing'
+      ? [el('ChartMember',
+        el('Group', { Name: this.itemNames.make(`${chartName}_Series`) }, el('GroupExpressions', el('GroupExpression', `=${seriesExpression}`))),
+        el('SortExpressions', el('SortExpression', el('Value', `=${seriesExpression}`))),
+        values.length > 1 ? el('ChartMembers', ...valueMembers) : null,
+        el('Label', `=${seriesExpression}`))]
+      : valueMembers;
     const axis = (title: string | undefined, name: string) => el('ChartAxis', { Name: name },
       el('Style', el('FontSize', '8pt')),
       el('ChartAxisTitle', el('Caption', title ?? ''), el('Style', el('FontSize', '8pt'))),
@@ -1069,11 +1078,13 @@ class RdlBuilder {
         el('ChartSmartLabel', el('CalloutLineColor', 'Black'), el('MinMovingDistance', '0pt')));
     });
     return el('Chart', { Name: chartName },
-      el('ChartCategoryHierarchy', el('ChartMembers', el('ChartMember',
-        el('Group', { Name: this.itemNames.make(`${chartName}_Category`) }, el('GroupExpressions', el('GroupExpression', `=${categoryExpression}`))),
-        el('SortExpressions', el('SortExpression', el('Value', `=${categoryExpression}`))),
-        el('Label', `=${categoryExpression}`)))),
-      el('ChartSeriesHierarchy', el('ChartMembers', ...values.map((v) => el('ChartMember', el('Label', v))))),
+      el('ChartCategoryHierarchy', el('ChartMembers', categoryExpression
+        ? el('ChartMember',
+          el('Group', { Name: this.itemNames.make(`${chartName}_Category`) }, el('GroupExpressions', el('GroupExpression', `=${categoryExpression}`))),
+          el('SortExpressions', el('SortExpression', el('Value', `=${categoryExpression}`))),
+          el('Label', `=${categoryExpression}`))
+        : el('ChartMember', el('Label', chart.title ?? '')))),
+      el('ChartSeriesHierarchy', el('ChartMembers', ...seriesHierarchy)),
       el('ChartData', el('ChartSeriesCollection', ...series)),
       el('ChartAreas', el('ChartArea', { Name: 'Default' },
         el('ChartCategoryAxes', axis(chart.categoryTitle, 'Primary')),
