@@ -25,6 +25,8 @@ export interface SsrsOptions {
   pageNumber?: boolean;
   /** Parameter values to convert for: suppress formulas that depend only on them are decided at conversion. */
   parameterValues?: Record<string, string>;
+  /** Number format for chart value axes the .rpt does not show (e.g. "0.00%"). */
+  chartAxisFormat?: string;
 }
 
 const safeFileName = (name: string) => name.replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'Report';
@@ -70,6 +72,7 @@ export function convertDocumentToSsrs(doc: CfbDocument, baseName: string, option
       embedSubreports: !options.separateSubreports,
       pageNumber: options.pageNumber,
       parameterValues: options.parameterValues,
+      chartAxisFormat: options.chartAxisFormat,
       subreports: model.storage ? new Map() : subreports,
       subreport: Boolean(model.storage),
       images: embeddedImages(storageAt(doc.root, model.storage)),

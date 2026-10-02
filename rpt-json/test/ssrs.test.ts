@@ -443,9 +443,9 @@ describe('chart types, margins, subreports and Basic syntax', () => {
     assert.ok(!isBasicSyntax('if {Orders.Amount} > 0 then "a" else "b"'));
     const t = translateFormula(source, ctx, { codeName: 'F_Last' });
     assert.equal(t.expression, '=Code.F_Last(Fields!Name.Value, Parameters!Title.Value)');
-    assert.deepEqual(t.helpers, ['CrSplit']);
+    assert.deepEqual(t.helpers, ['CrSplit', 'CrToText'], 'CStr of a value whose type is decided at run time');
     assert.match(t.code!, /Public Function F_Last\(ByVal a1 As Object, ByVal a2 As Object\) As Object\n {4}Dim result As Object = Nothing\n {4}Dim v_parts\(\) As Object\n {4}Dim v_n As Double/);
-    assert.match(t.code!, /v_parts = CrSplit\(a1, "\\\\"\)\n {4}v_n = UBound\(v_parts\)\n {4}If v_n > 1 Then\n {8}result = v_parts\(v_n\) & " of " & CStr\(v_n\)\n {4}Else\n {8}result = System\.Uri\.UnescapeDataString/);
+    assert.match(t.code!, /v_parts = CrSplit\(a1, "\\\\"\)\n {4}v_n = UBound\(v_parts\)\n {4}If v_n > 1 Then\n {8}result = v_parts\(v_n\) & " of " & CrToText\(v_n\)\n {4}Else\n {8}result = System\.Uri\.UnescapeDataString/);
     assert.match(t.code!, /End If\n {4}Return result\nEnd Function$/);
   });
 
@@ -1159,6 +1159,13 @@ describe('chart options', () => {
     assert.ok(rdl.includes('<Label>#AXISLABEL #VALY{0.00%}</Label>') && rdl.includes('<Value>Outside</Value>'));
     assert.ok(/<ChartLegend Name="Default">\s*<Hidden>true<\/Hidden>/.test(rdl));
   });
+  it('uses the given axis format for a chart whose own format is not stored', () => {
+    const { rdl } = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 1, graphType: 13,
+      legend: { visible: true, position: 2 }, dataLabels: { kind: 0, format: 0 } }), source, { reportName: 'C', subreport: true, chartAxisFormat: '0.00%' });
+    const values = rdl.slice(rdl.indexOf('<ChartValueAxes>'), rdl.indexOf('</ChartValueAxes>'));
+    assert.ok(values.includes('<Format>0.00%</Format>'), values);
+  });
+
   it('puts the legend where Crystal does and leaves points unlabelled when it does', () => {
     const { rdl } = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 1, graphType: 13,
       legend: { visible: true, position: 2 }, dataLabels: { kind: 0, format: 0 } }), source, { reportName: 'C', subreport: true });
@@ -1371,5 +1378,40 @@ describe('layout summary', { skip: !process.env.RPT_SAMPLES_DIR && 'set RPT_SAMP
     const found = outputs.find((o) => o.startsWith('=='));
     assert.ok(found, 'some sample has a subreport with "total" in a text');
     assert.ok(/\[total\]/.test(found!) && !/"[A-Za-z][^"]*[a-z ][^"]*"/.test(found!), 'only placeholders and the searched text are shown');
+  });
+});
+
+describe('tables framed in a group header', () => {
+  // A frame and column lines drawn in group header 1 that run down to group footer 1 (positions in twips).
+  const source: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [
+    { name: 'Kind', type: 'string' }, { name: 'Name', type: 'string' }, { name: 'Low', type: 'number' }, { name: 'High', type: 'number' },
+  ] }] };
+  const text = (name: string, x: number, y: number) => ({ kind: 'text', name, text: name, position: { x, y }, size: { width: 1200, height: 210 } });
+  const field = (name: string, ref: string, x: number) => ({ kind: 'field', name, field: ref, position: { x, y: 0 }, size: { width: 1200, height: 180 } });
+  const definition = (): ReportDefinition => ({
+    ...emptyDefinition(),
+    groups: ['T.Kind'],
+    layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 0, suppressed: true, objects: [] }] },
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF', height: 0, suppressed: true, objects: [] }] },
+      { name: 'GroupHeaderArea1', sections: [{ name: 'GH1', height: 900, objects: [
+        { kind: 'box', name: 'Frame', position: { x: 45, y: 25 }, size: { width: 4100, height: 1400 }, border: { sides: [1, 1, 1, 1] } },
+        text('Heading', 120, 70),
+        { kind: 'line', name: 'Rule', position: { x: 1450, y: 360 }, size: { width: 0, height: 1050 }, border: { sides: [1, 0, 0, 0] } },
+        { kind: 'line', name: 'Under', position: { x: 45, y: 840 }, size: { width: 4100, height: 0 }, border: { sides: [0, 0, 1, 0] } },
+      ] }] },
+      { name: 'GroupFooterArea1', sections: [{ name: 'GF1', height: 30, objects: [] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 195, objects: [field('NameCell', 'T.Name', 120), field('LowCell', 'T.Low', 1500), field('HighCell', 'T.High', 2900)] }] },
+    ],
+  });
+
+  it('draws the column line down every row and closes the frame below the group', () => {
+    const { rdl } = convertToRdl(definition(), source, { reportName: 'G', subreport: true });
+    const cell = (name: string) => { const at = rdl.indexOf(`<Textbox Name="${name}">`); return rdl.slice(at, rdl.indexOf('</Textbox>', at)); };
+    assert.ok(cell('LowCell').includes('<LeftBorder>'), 'the column line runs down the data');
+    assert.ok(cell('NameCell').includes('<LeftBorder>') && cell('HighCell').includes('<RightBorder>'), 'the frame\'s sides');
+    assert.ok(rdl.includes('Group1Frame'), 'a closing row for the frame\'s bottom edge');
+    const frame = rdl.slice(rdl.indexOf('<Rectangle Name="Frame">'), rdl.indexOf('</Rectangle>', rdl.indexOf('<Rectangle Name="Frame">')));
+    assert.ok(frame.includes('<TopBorder>') && !frame.includes('<BottomBorder>'), 'the cut box has no bottom edge across the next row');
   });
 });

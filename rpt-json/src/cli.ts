@@ -20,12 +20,14 @@ Usage:
   rpt-json to-rpt  <input.json> <output.rpt> [--no-verify] [--cfb-version 3|4]
   rpt-json to-rdl  <input.rpt|input.json|folder> [output-dir] [--connection "<connection string>"]
                    [--shared-datasource <name>] [--template <house.rdl>] [--separate-subreports]
-                   [--page-number] [--parameter name=value]...
+                   [--page-number] [--parameter name=value]... [--chart-axis-format <format>]
                                             Convert to SSRS .rdl files (+ subreports) and a review checklist;
                                             --template lays each report out in the style of an existing .rdl;
                                             --page-number adds "Page N" at the right of the page footer;
                                             --parameter converts for that parameter value: what its suppress
-                                            formulas hide is left out (repeat for more parameters)
+                                            formulas hide is left out (repeat for more parameters);
+                                            --chart-axis-format sets the value-axis format of charts whose
+                                            format the .rpt does not show, e.g. "0.00%"
   rpt-json to-rdl  --template <house.rdl> --combine <output.rdl> <input.rpt|folder>...
                                             Combine several reports into one .rdl, one block per report
   rpt-json headers <input.rpt|input.json|folder> [output-file] [--json | --csv] [--all]
@@ -33,8 +35,9 @@ Usage:
                                             chart titles (--all adds footers, details and field objects)
   rpt-json inspect <input.rpt>              Print decoded metadata (no stream data)
   rpt-json charts  <input.rpt>              Print how each chart is stored, with all names and text hidden
-  rpt-json layout  <input.rpt> <text>...    Print the layout of each subreport showing one of the texts, one line
-                                            per section and object, with all other names and text hidden
+  rpt-json layout  <input.rpt> <text>...    Print the layout of each subreport showing one of the texts (or "#N" for
+                                            Subdocument N) and of main-report sections showing them, one line per
+                                            section and object, with all other names and text hidden
                                             (safe to share when a chart does not convert)
   rpt-json verify  <input.rpt>              Round-trip rpt -> json -> rpt and compare every stream,
                                             then again with every encrypted stream re-encrypted
@@ -145,6 +148,7 @@ async function main(argv: string[]): Promise<number> {
     const sharedDataSource = takeOption(args, '--shared-datasource');
     const separateSubreports = takeFlag(args, '--separate-subreports');
     const pageNumber = takeFlag(args, '--page-number');
+    const chartAxisFormat = takeOption(args, '--chart-axis-format');
     let parameterValues: Record<string, string> | undefined;
     for (let p = takeOption(args, '--parameter'); p !== undefined; p = takeOption(args, '--parameter')) {
       const eq = p.indexOf('=');
@@ -205,7 +209,7 @@ async function main(argv: string[]): Promise<number> {
         let base = original;
         const convert = (name: string) => (template
           ? [convertDocumentsWithTemplate(template, [{ doc, name: original }], name)]
-          : convertDocumentToSsrs(doc, name, { connectionString, sharedDataSource, separateSubreports, pageNumber, parameterValues }));
+          : convertDocumentToSsrs(doc, name, { connectionString, sharedDataSource, separateSubreports, pageNumber, parameterValues, chartAxisFormat }));
         let reports = convert(base);
         // Two inputs whose names clean up to the same file name ("A B" and "A_B") get a numbered suffix.
         for (let n = 2; reports.some((r) => written.has(r.fileName.toLowerCase())); n++) {

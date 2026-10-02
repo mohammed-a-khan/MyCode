@@ -52,6 +52,11 @@ export interface RdlOptions {
    * decided here, so what it hides is left out (and takes no space, as in Crystal).
    */
   parameterValues?: Record<string, string>;
+  /**
+   * Number format for chart value axes whose format the .rpt does not show (it is in Crystal's encrypted chart
+   * data), e.g. "0.00%"; charts with value labels use their labels' format.
+   */
+  chartAxisFormat?: string;
   /** Subreports by their "Subdocument N" number: RDL name and link parameters (Crystal "Pm-" parameters). */
   subreports?: Map<number, SubreportInfo>;
   /** Image bytes by their "Embedding N" number. */
@@ -836,6 +841,7 @@ class RdlBuilder {
       subreport: true,
       images: info.images,
       parameterValues: this.options.parameterValues,
+      chartAxisFormat: this.options.chartAxisFormat,
       inline: { dataset, itemNames: this.itemNames, imageNames: this.imageNames, codeNames: this.codeNames },
     });
     const result = mode === 'page' ? child.buildInline() : child.buildEmbedded();
@@ -1140,7 +1146,7 @@ class RdlBuilder {
       el('ChartData', el('ChartSeriesCollection', ...series)),
       el('ChartAreas', el('ChartArea', { Name: 'Default' },
         el('ChartCategoryAxes', axis(chart.categoryTitle, 'Primary')),
-        el('ChartValueAxes', axis(chart.valueTitle, 'Primary', labelFormat)),
+        el('ChartValueAxes', axis(chart.valueTitle, 'Primary', labelFormat ?? (isPie ? undefined : this.options.chartAxisFormat))),
         style.threeD ? el('ChartThreeDProperties', el('Enabled', 'true'), el('Rotation', '20'), el('Inclination', '20')) : null,
         el('Style'))),
       // The legend as Crystal has it (shown or not, and where); a bar per colour has none by default.
@@ -1224,7 +1230,7 @@ class RdlBuilder {
     return !!formula && formula.referencedFields.length === 0 && !/[{]/.test(formula.text);
   }
 
-  private tableRow(columns: Column[], section: SectionInfo, rowName: string, area: string): { row: XmlElement; height: number; hidden?: string } {
+  private tableRow(columns: Column[], section: SectionInfo, rowName: string, area: string, minHeight = MIN_ROW_HEIGHT): { row: XmlElement; height: number; hidden?: string } {
     const suppress = section.conditions?.suppress;
     const hidden = suppress ? this.conditionExpression(suppress, false, `Section ${section.name}`) : undefined;
     const background = section.conditions?.backColor ? this.conditionExpression(section.conditions.backColor, true, `Section ${section.name}`) : undefined;
@@ -1271,7 +1277,7 @@ class RdlBuilder {
       cells[this.columnIndex(columns, obj.position?.x ?? 0)] = obj;
       rowHeight = Math.max(rowHeight, twipsToInches(obj.size?.height ?? 0) + twipsToInches(obj.position?.y ?? 0));
     }
-    const height = Math.max(rowHeight, Math.min(sectionHeight, rowHeight + 0.1), MIN_ROW_HEIGHT);
+    const height = Math.max(rowHeight, Math.min(sectionHeight, rowHeight + 0.1), minHeight);
     const row = el('TablixRow',
       el('Height', inches(height)),
       el('TablixCells', ...cells.map((obj, i) => {
@@ -1338,12 +1344,12 @@ class RdlBuilder {
     const rows: XmlElement[] = [];
     let height = 0;
     /** Adds a row per section with content; returns the static members for them. */
-    const addRows = (sections: SectionInfo[] | undefined, name: string, area: string, keepWith: 'After' | 'Before' | null, always = false): XmlElement[] => {
+    const addRows = (sections: SectionInfo[] | undefined, name: string, area: string, keepWith: 'After' | 'Before' | null, always = false, minHeight?: number): XmlElement[] => {
       const members: XmlElement[] = [];
       const withContent = (sections ?? []).filter((s) => s.objects.length > 0);
       const list = withContent.length === 0 && always ? [{ name: `${name} (empty)`, objects: [] } as SectionInfo] : withContent;
       list.forEach((section, i) => {
-        const r = this.tableRow(columns, section, list.length > 1 ? `${name}_${i + 1}` : name, area);
+        const r = this.tableRow(columns, section, list.length > 1 ? `${name}_${i + 1}` : name, area, minHeight);
         rows.push(r.row);
         height += r.height;
         members.push(el('TablixMember',
@@ -1367,7 +1373,14 @@ class RdlBuilder {
     }
     const detailMembers = addRows(areas.detail, 'Detail', 'Details', null, true);
     const footerMembers: XmlElement[][] = [];
-    for (let level = levels; level >= 1; level--) footerMembers[level - 1] = addRows(areas.groupFooters.get(level), `Group${level}Footer`, `Group Footer ${level}`, 'Before');
+    for (let level = levels; level >= 1; level--) {
+      footerMembers[level - 1] = addRows(areas.groupFooters.get(level), `Group${level}Footer`, `Group Footer ${level}`, 'Before');
+      if (this.frameFooters.has(level)) {
+        // The bottom edge of a box framing the group: a thin row whose cells have a top border.
+        const closing: SectionInfo = { name: `Group${level}Frame`, height: 30, objects: [{ kind: 'line', name: 'FrameBottom', position: { x: 0, y: 0 }, size: { width: 0, height: 0 } }] };
+        footerMembers[level - 1].push(...addRows([closing], `Group${level}Frame`, `Group Footer ${level}`, 'Before', false, 0.03));
+      }
+    }
 
     // Sorting: record sorts go on the details; group sorts / Top N go on their group.
     const sorts = this.definition.sorts ?? this.definition.sortFields.map((field) => ({ field, descending: false, bySummary: false }));
@@ -1710,7 +1723,11 @@ class RdlBuilder {
       ...section,
       objects: section.objects.map((o) => {
         if (!runsOn(o)) return o;
-        const clipped = { ...o, size: { ...o.size!, height: Math.max(0, limit - (o.position?.y ?? 0)) } };
+        // Cut at the section's bottom: a box keeps its top and sides there, not a bottom edge across the next row.
+        const border = o.kind === 'box' && o.border
+          ? { ...o.border, sides: [o.border.sides[0], o.border.sides[1], o.border.sides[2], 0] as [number, number, number, number] }
+          : o.border;
+        const clipped = { ...o, border, size: { ...o.size!, height: Math.max(0, limit - (o.position?.y ?? 0)) } };
         this.runOn.set(clipped, o);
         return clipped;
       }),
@@ -1725,6 +1742,7 @@ class RdlBuilder {
    * included) to where its height runs out: within the report header, the table's sections, or the footer.
    */
   private findSpanEnds(areas: Omit<ClassifiedAreas, 'unrecognised'>): void {
+    this.findGroupSpans(areas);
     const table = [...[...areas.groupHeaders.values()].flat(), ...areas.detail, ...[...areas.groupFooters.values()].flat()];
     const order = [
       ...areas.reportHeader.map((section) => ({ section, where: 'header' as const })),
@@ -1800,6 +1818,43 @@ class RdlBuilder {
       first: sections.filter((s) => !laterOnly(s)).map((s) => (firstOnly(s) ? unconditional(s) : s)),
       later: sections.filter((s) => !firstOnly(s)).map((s) => (laterOnly(s) ? unconditional(s) : s)),
     };
+  }
+
+  /** Group-header boxes and lines that run on into the table: their group level, and whether they reach its footer. */
+  private readonly groupSpans = new Map<ReportObject, { level: number; closes: boolean }>();
+  /** Group levels whose footer closes a box framing the group: the table gets a closing row there. */
+  private frameFooters = new Set<number>();
+
+  /**
+   * A box or line drawn in a group header can run down through the rows of its group (Crystal draws a table's
+   * frame and column lines this way): it ends in the design's following sections, hidden ones included.
+   */
+  private findGroupSpans(areas: Omit<ClassifiedAreas, 'unrecognised'>): void {
+    const levels = [...areas.groupHeaders.keys()].sort((a, b) => a - b);
+    const design = [
+      ...levels.flatMap((level) => (areas.groupHeaders.get(level) ?? []).map((section) => ({ section, kind: 'header', level }))),
+      ...areas.detail.map((section) => ({ section, kind: 'detail', level: 0 })),
+      ...[...levels].reverse().flatMap((level) => (areas.groupFooters.get(level) ?? []).map((section) => ({ section, kind: 'footer', level }))),
+    ];
+    design.forEach((entry, i) => {
+      if (entry.kind !== 'header') return;
+      for (const o of entry.section.objects) {
+        if (o.kind !== 'box' && o.kind !== 'line') continue;
+        let remaining = (o.position?.y ?? 0) + (o.size?.height ?? 0) - (entry.section.height ?? Infinity);
+        if (remaining <= 0) continue;
+        // Past the last section it closes the group too.
+        let closes = true;
+        for (const next of design.slice(i + 1)) {
+          const height = next.section.height ?? 0;
+          if (remaining <= height) {
+            closes = next.kind === 'footer' && next.level <= entry.level;
+            break;
+          }
+          remaining -= height;
+        }
+        this.groupSpans.set(o, { level: entry.level, closes });
+      }
+    });
   }
 
   /** Boxes and lines cut at their section's bottom (see clipSpanning), with the Crystal object they came from. */
@@ -2175,8 +2230,27 @@ class RdlBuilder {
       if (item) items.push(item);
     }
 
+    // Group-header lines and box edges that run down the table become column borders; a box reaching its
+    // group's footer also closes the group with a bottom edge.
+    this.frameFooters = new Set();
+    for (const sections of areas.groupHeaders.values()) {
+      for (const section of sections) {
+        for (const o of section.objects) {
+          const original = this.runOn.get(o);
+          const span = original && this.groupSpans.get(original);
+          if (!original || !span) continue;
+          const x = original.position?.x ?? 0;
+          this.tableRules.push(x);
+          if (original.kind === 'box') {
+            this.tableRules.push(x + (original.size?.width ?? 0));
+            if (span.closes) this.frameFooters.add(span.level);
+          }
+        }
+      }
+    }
     const table = this.buildTablix(areas, top);
     this.tableRules = [];
+    this.frameFooters = new Set();
     if (table.tablix) {
       items.push(table.tablix);
       top += table.height + 0.1;
