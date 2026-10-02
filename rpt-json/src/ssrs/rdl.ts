@@ -1259,7 +1259,8 @@ class RdlBuilder {
           dataLabel(value.expression),
           // Crystal draws lines thick (SSRS takes a line's width from its data points).
           el('Style', barPerPoint ? el('Color', `=Code.CrPointColor(${vbString(chartName)}, ${categoryExpression})`) : null,
-            isLine ? el('Border', el('Width', '1.5pt')) : null),
+            // Crystal outlines each bar and pie slice in black.
+            isLine ? el('Border', el('Width', '1.5pt')) : el('Border', el('Color', 'Black'), el('Style', 'Solid'), el('Width', '0.5pt'))),
           // A distinct marker shape per line, clearly visible.
           el('ChartMarker', style.markers ? el('Type', 'Auto') : null, style.markers ? el('Size', '4pt') : null, el('Style')),
           // Crystal's 3D pies draw their slices pulled out from the centre.
@@ -1306,7 +1307,7 @@ class RdlBuilder {
         // Crystal's chart fills its object: the chart area takes the whole chart, less the legend's strip.
         // With a legend, SSRS lays the area and the legend out itself (fixed sizes would let them overlap).
         chart.legend?.visible && !isPie ? null : el('ChartElementPosition', el('Top', '1'), el('Left', '1'), el('Height', '98'), el('Width', '98')),
-        isPie ? el('ChartInnerPlotPosition', el('Top', '10'), el('Left', '20'), el('Height', '80'), el('Width', '60')) : null,
+        isPie ? el('ChartInnerPlotPosition', el('Top', '7'), el('Left', '17'), el('Height', '86'), el('Width', '66')) : null,
         // Crystal's plot area is light grey behind bars and lines.
         el('Style', isPie ? null : el('BackgroundColor', '#D9D9D9')))),
       // The legend as Crystal has it (shown or not, and where); a bar per colour has none by default.
@@ -3106,6 +3107,31 @@ function flattenRectangle(item: XmlElement): XmlElement[] {
  * would be lost.
  */
 function clearLineOverlaps(items: XmlElement[]): XmlElement[] {
+  // A line across a box that sticks out past its side by a hair (Crystal draws it a few twips too wide) is cut
+  // to the box: SSRS moves an item that sticks out of a rectangle it overlaps, and the line would land elsewhere.
+  const boxes = items.filter((i) => i.name === 'Rectangle');
+  items = items.map((item) => {
+    if (item.name !== 'Line' || itemNumber(item, 'Height') !== 0) return item;
+    const top = itemNumber(item, 'Top');
+    let left = itemNumber(item, 'Left');
+    let right = left + itemNumber(item, 'Width');
+    for (const b of boxes) {
+      const bTop = itemNumber(b, 'Top');
+      const bLeft = itemNumber(b, 'Left');
+      const bRight = bLeft + itemNumber(b, 'Width');
+      if (top < bTop || top > bTop + itemNumber(b, 'Height') || right <= bLeft || left >= bRight) continue;
+      if (left < bLeft && bLeft - left <= 0.05) left = bLeft;
+      if (right > bRight && right - bRight <= 0.05) right = bRight;
+    }
+    if (left === itemNumber(item, 'Left') && right === left + itemNumber(item, 'Width')) return item;
+    return { ...item, children: item.children.map((c) => {
+      if (typeof c !== 'object' || c === null) return c;
+      const e = c as XmlElement;
+      if (e.name === 'Left') return el('Left', inches(left));
+      if (e.name === 'Width') return el('Width', inches(Math.max(right - left, 0.01)));
+      return e;
+    }) };
+  });
   const rules = items.filter((i) => i.name === 'Line' && itemNumber(i, 'Height') === 0);
   return items.map((item) => {
     if (item.name === 'Rectangle') {
