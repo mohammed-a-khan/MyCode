@@ -1628,6 +1628,17 @@ describe('formulas without data, page breaks by formula and the default font', (
     const { rdl } = convertToRdl(definition, source, { reportName: 'R' });
     assert.ok(/<PageBreak>\s*<BreakLocation>Start<\/BreakLocation>\s*<Disabled>=Not \(/.test(rdl), 'a break the formula switches');
   });
+  it('keeps a rule under a title inside the box it crosses, and the title above it', () => {
+    const { rdl } = convertToRdl(report([
+      { kind: 'box', name: 'Frame', position: { x: 45, y: 25 }, size: { width: 4000, height: 900 }, border: { sides: [1, 1, 1, 1] } },
+      { kind: 'text', name: 'Heading', text: 'Heading', position: { x: 120, y: 70 }, size: { width: 3800, height: 280 } },
+      { kind: 'line', name: 'Rule', position: { x: 45, y: 345 }, size: { width: 4010, height: 0 }, border: { sides: [0, 0, 1, 0] } },
+    ], {}, { height: 1000 }), source, { reportName: 'R' });
+    const items = descendants(parseXml(rdl));
+    const num = (name: string, prop: string) => parseFloat(child(items.find((e) => e.attributes.Name === name)!, prop)!.children.join(''));
+    assert.ok(num('Rule', 'Left') + num('Rule', 'Width') <= num('Frame', 'Left') + num('Frame', 'Width') + 0.0001, 'within the box');
+    assert.ok(num('Heading', 'Top') + num('Heading', 'Height') <= num('Rule', 'Top') + 0.0001, 'the title ends at the rule');
+  });
   it('takes the font most of the text uses as the report default', () => {
     const { rdl } = convertToRdl(report([]), source, { reportName: 'R' });
     assert.ok(rdl.includes('<df:DefaultFontFamily>Times New Roman</df:DefaultFontFamily>'));
