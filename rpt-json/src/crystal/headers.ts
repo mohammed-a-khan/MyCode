@@ -161,6 +161,8 @@ function reportHeaders(definition: ReportDefinition, report: string, subreport: 
   const out: HeaderText[] = [];
   for (const [area, sections] of orderedAreas(areas, options.all ?? false)) {
     for (const section of sections) {
+      // Suppressed sections do not print either (unless a formula decides).
+      if (section.suppressed && !section.conditions?.suppress && !options.all) continue;
       const headings = area === 'Details' ? new Map<ReportObject, number>() : columnHeadings(section, detailObjects);
       const columnOrder = [...headings.keys()].sort((a, b) => (a.position?.x ?? 0) - (b.position?.x ?? 0));
       const objects = [...section.objects].sort((a, b) => (a.position?.y ?? 0) - (b.position?.y ?? 0) || (a.position?.x ?? 0) - (b.position?.x ?? 0));

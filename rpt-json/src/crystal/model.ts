@@ -7,7 +7,7 @@
  */
 
 import type { RecordNode, RecordPart } from './records.ts';
-import { stringAt, stringsIn } from './strings.ts';
+import { stringAt, stringsIn, tokenize } from './strings.ts';
 
 // Report definition (Contents) record types
 const REPORT_ROOT = 0x0064;
@@ -38,12 +38,14 @@ const OLE_ITEM = 0x00bd;
 
 // Formatting-condition wrappers: their own bytes are slots of (formula name, flag, formula index).
 const SECTION_CONDITIONS = 0x00ff;
+const SECTION_FORMAT = 0x00fe;
 const FONT_CONDITIONS = 0x0101;
 
 // Chart records that follow a chart object.
 const CHART_LAYOUT = 0x011c;
 const CHART_VALUES = 0x011f;
 const CHART_TITLES = 0x0121;
+const CHART_FIELD = 0x0126;
 const CHART_ON_CHANGE_OF = 0x0119;
 
 // Cross-tab block: start/end markers, column and row dimensions, cells.
@@ -129,6 +131,8 @@ export interface FormulaInfo {
   kind?: 'formula' | 'conditionalFormat' | 'internal';
   text: string;
   referencedFields: string[];
+  /** The formula's result type, as Crystal stores it (number, currency, string, date, ...). */
+  valueType?: string;
 }
 
 export interface SelectionFormulas {
@@ -187,6 +191,10 @@ export interface ChartInfo {
   graphType?: number;
   /** A second "on change of" field: one series per value of it (several lines or bar colours). */
   series?: string;
+  /** Whether the legend shows, and where (0 right, 1 left, 2 bottom, 3 top). */
+  legend?: { visible: boolean; position: number };
+  /** What each data point is labelled with (0 nothing, 1 its category, 2 its value, 3 both) and the label's number format (Chart Expert list index). */
+  dataLabels?: { kind: number; format: number };
 }
 
 /** A number format of a field (Crystal's Format Editor, Number tab). */
@@ -282,6 +290,8 @@ export interface SectionInfo {
   height?: number;
   /** Formatting conditions: suppress (Section_Visibility), newPageBefore. */
   conditions?: Record<string, FormulaRef>;
+  /** The section's Suppress box is ticked (a suppress formula, when present, decides instead). */
+  suppressed?: boolean;
   objects: ReportObject[];
 }
 
@@ -482,19 +492,19 @@ function readString(bytes: Uint8Array, pos: number): { text: string; length: num
 
 /** Formula content: field-reference count (u16), each reference followed by 3 bytes, then the text. */
 function parseFormula(node: RecordNode): FormulaInfo {
-  const { name } = namedValue(node);
+  const { name, valueType } = namedValue(node);
   const bytes = ownBytes(node);
   const count = (bytes[0] << 8) | bytes[1];
   const referencedFields: string[] = [];
   let pos = 2;
   for (let i = 0; i < count; i++) {
     const ref = readString(bytes, pos);
-    if (!ref) return { name, text: longest(ownStrings(node)), referencedFields: [] };
+    if (!ref) return { name, text: longest(ownStrings(node)), referencedFields: [], ...(valueType ? { valueType } : {}) };
     referencedFields.push(ref.text);
     pos += ref.length + 3;
   }
   const text = readString(bytes, pos);
-  return { name, text: text ? text.text : longest(ownStrings(node)), referencedFields };
+  return { name, text: text ? text.text : longest(ownStrings(node)), referencedFields, ...(valueType ? { valueType } : {}) };
 }
 
 /** Formulas Crystal generates for group, cross-tab and summary ordering. */
@@ -688,6 +698,24 @@ function readValueFormat(record: RecordNode, format: ValueFormat): void {
   }
 }
 
+/**
+ * Chart options from the chart's text record (after its style code): the first binary run after the titles
+ * holds the legend (byte 1 shown, byte 2 position); a later run starts with the data-label kind and number format.
+ */
+export function chartOptions(bytes: Uint8Array): Pick<ChartInfo, 'legend' | 'dataLabels'> {
+  const runs = tokenize(bytes).filter((t): t is { bytes: Uint8Array } => 'bytes' in t);
+  const out: Pick<ChartInfo, 'legend' | 'dataLabels'> = {};
+  const options = runs[0]?.bytes;
+  if (!options || options.length < 3) return out;
+  out.legend = { visible: options[1] === 1, position: options[2] };
+  // The data labels: the next run of six or more bytes. Some charts put a 00 00 01 marker and an empty string
+  // before it (the marker is then a run of its own); others put the marker and one 00 byte in the same run.
+  const run = runs.slice(1).find((r) => r.bytes.length >= 6)?.bytes;
+  const at = run && run[0] === 0 && run[1] === 0 && run[2] === 1 ? 4 : 0;
+  if (run && run.length >= at + 2 && run[at] <= 3) out.dataLabels = { kind: run[at], format: run[at + 1] };
+  return out;
+}
+
 const ALIGNMENTS: Record<number, ReportObject['align']> = { 1: 'left', 2: 'center', 3: 'right', 4: 'justify' };
 
 function buildLayout(records: RecordNode[]): AreaInfo[] {
@@ -696,6 +724,7 @@ function buildLayout(records: RecordNode[]): AreaInfo[] {
   let object: ReportObject | undefined;
   let crossTab: CrossTabInfo | undefined;
   let areaConditions: Record<string, FormulaRef> | undefined;
+  let chartField: string | undefined;
 
   const currentSection = (): SectionInfo => {
     if (!section) {
@@ -767,6 +796,10 @@ function buildLayout(records: RecordNode[]): AreaInfo[] {
       continue;
     }
     if (record.type === SECTION_CONDITIONS && !object) {
+      // The section format (0x00fe): byte 6 is 1 for a visible section and 0 for a suppressed one.
+      const format = findAll([record], SECTION_FORMAT)[0];
+      const flags = format && ownBytes(format);
+      if (section && flags && flags.length > 6 && flags[6] === 0) section.suppressed = true;
       const conditions = namedConditions(record);
       // Before the area's first section the conditions belong to the whole area.
       if (conditions && section) section.conditions = { ...section.conditions, ...conditions };
@@ -920,9 +953,18 @@ function buildLayout(records: RecordNode[]): AreaInfo[] {
         if (object.chart && b.length >= 3) object.chart.layoutCode = b[2];
         break;
       }
+      case CHART_FIELD: {
+        // An advanced chart may keep its "on change of" field here instead of in a group record.
+        const field = object.chart ? nonEmpty(ownStrings(record)).find((f) => f.includes('.') || f.startsWith('@')) : undefined;
+        if (object.chart && field) chartField = field;
+        break;
+      }
       case CHART_TITLES: {
         if (!object.chart) break;
         const b = ownBytes(record);
+        if (!object.chart.onChangeOf && chartField) object.chart.onChangeOf = chartField;
+        chartField = undefined;
+        Object.assign(object.chart, chartOptions(b.subarray(2)));
         object.chart.styleCode = u16(b, 0);
         if (b.length >= 2) {
           object.chart.family = b[0];
@@ -982,7 +1024,7 @@ export function buildReportDefinition(records: RecordNode[]): ReportDefinition {
       if (formula.text) report.selectionFormulas[selection] = formula.text;
     } else if (formula.name) {
       const kind = INTERNAL_FORMULA.test(formula.name) ? 'internal' : conditionNames.has(formula.name) || CONDITION_NAME.test(formula.name) ? 'conditionalFormat' : 'formula';
-      report.formulas.push({ name: formula.name, ...(index !== undefined ? { index } : {}), kind, text: formula.text, referencedFields: formula.referencedFields });
+      report.formulas.push({ name: formula.name, ...(index !== undefined ? { index } : {}), kind, text: formula.text, referencedFields: formula.referencedFields, ...(formula.valueType ? { valueType: formula.valueType } : {}) });
     }
   }
   for (const node of findAll(records, SQL_EXPRESSION)) {

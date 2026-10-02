@@ -2,13 +2,14 @@ import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import type { ChartInfo, DataSourceInfo, ReportDefinition } from '../src/crystal/model.ts';
+import { chartOptions, type ChartInfo, type DataSourceInfo, type ReportDefinition } from '../src/crystal/model.ts';
+import { encodeString } from '../src/crystal/strings.ts';
 import { readCfb } from '../src/index.ts';
 import { convertDocumentToSsrs, reviewMarkdown } from '../src/ssrs/convert.ts';
 import { extractHeaders, formatHeadersCsv, formatHeadersText } from '../src/crystal/headers.ts';
 import { CODE_HELPERS, crystalColor, translateFormula, translateToSql, vbString, type FormulaContext } from '../src/ssrs/formula.ts';
 import { isBasicSyntax } from '../src/ssrs/basic.ts';
-import { chartStyle, convertToRdl, dateFormatString, formatFor, numberFormatString, scopeOutsideRegion, substituteCommandParameters } from '../src/ssrs/rdl.ts';
+import { chartStyle, convertToRdl, fixedCondition, dateFormatString, formatFor, numberFormatString, scopeOutsideRegion, substituteCommandParameters } from '../src/ssrs/rdl.ts';
 import { classifyAreas } from '../src/crystal/areas.ts';
 import { buildHouseReport, readHouseTemplate } from '../src/ssrs/house.ts';
 import { parseXml } from '../src/ssrs/xml.ts';
@@ -915,6 +916,30 @@ describe('shared variables from a page-header subreport', () => {
     assert.ok(review.some((r) => r.item === 'Shared variable ownername'));
   });
 
+  it('uses the last value that is not empty when several header subreports set the variable', () => {
+    const twoHeaders: ReportDefinition = {
+      ...main,
+      layout: main.layout.map((a) => (a.name === 'PageHeaderArea1'
+        ? { ...a, sections: [{ name: 'PH', height: 1200, objects: [
+          { kind: 'subreport', name: 'Header1', subreport: { index: 1, onDemand: false }, position: { x: 0, y: 0 }, size: { width: 9000, height: 600 } },
+          { kind: 'subreport', name: 'Header2', subreport: { index: 2, onDemand: false }, position: { x: 0, y: 600 }, size: { width: 9000, height: 600 } },
+        ] }] }
+        : a)),
+    };
+    const { rdl } = convertToRdl(twoHeaders, source('Holdings', ['Name']), {
+      reportName: 'Main',
+      subreports: new Map([
+        [1, { name: 'Main_Subdocument_1', links: [], definition: header, dataSource: source('usp_Header;1', ['title', 'owner_name']) }],
+        [2, { name: 'Main_Subdocument_2', links: [], definition: header, dataSource: source('usp_Header;1', ['title', 'owner_name']) }],
+      ]),
+    });
+    const footer = rdl.slice(rdl.indexOf('<PageFooter>'), rdl.indexOf('</PageFooter>'));
+    const second = 'First(Fields!owner_name.Value, "DataSet_Main_Subdocument_2")';
+    const first = 'First(Fields!owner_name.Value, "DataSet_Main_Subdocument_1")';
+    assert.ok(footer.includes(`IIf(Len(CStr(${second}) &amp; "") &gt; 0, ${second}, ${first})`), footer);
+    assert.ok(!footer.includes('Code.'), 'no custom code left to read an unset variable');
+  });
+
   it('never nests First aggregates when a footer formula mixes a shared variable with a main-report field', () => {
     const mixed: ReportDefinition = {
       ...main,
@@ -1094,10 +1119,50 @@ describe('charts that summarise fields themselves', () => {
     assert.ok(!review.some((r) => r.message.includes('could not be determined')));
     assert.ok(rdl.includes('<Chart Name="Graph1">') && !rdl.includes('_Category"'));
   });
+  it('gives each bar of a one-value bar chart its own Crystal colour, without a legend', () => {
+    const chart = { values: ['Sum of usp_Tests;1.result'], onChangeOf: 'usp_Tests;1.test_name', family: 0, graphType: 0 };
+    const { rdl } = convertToRdl({ ...emptyDefinition(), layout: layout(chart) }, source, { reportName: 'Tests', subreport: true });
+    assert.ok(rdl.includes('<Color>=Code.CrPointColor("Graph1", Fields!test_name.Value)</Color>'));
+    assert.ok(rdl.includes('Public Function CrPointColor(') && rdl.includes('Dim crPointColors As New System.Collections.Hashtable'));
+    assert.ok(/<ChartLegend Name="Default">\s*<Hidden>true<\/Hidden>/.test(rdl));
+    assert.ok(rdl.includes('<Palette>Custom</Palette>') && rdl.includes('<ChartCustomPaletteColor>#3E6A9E</ChartCustomPaletteColor>'));
+  });
+
   it('draws a pie of one value per category', () => {
     const chart = { values: ['Average of usp_Tests;1.result'], onChangeOf: 'usp_Tests;1.test_name', family: 3, graphType: 31 };
     const { rdl } = convertToRdl({ ...emptyDefinition(), layout: layout(chart) }, source, { reportName: 'Tests', subreport: true });
     assert.ok(rdl.includes('<Y>=Avg(Fields!result.Value)</Y>') && rdl.includes('<Type>Shape</Type>'));
+  });
+});
+
+describe('chart options', () => {
+  const bytes = (...parts: (number[] | string)[]) => Uint8Array.from(parts.flatMap((p) => (typeof p === 'string' ? [...encodeString(p)] : p)));
+  it('reads the legend and the data labels from the chart text record', () => {
+    // Titles, then the options run (legend shown at the bottom), then the data labels: value and category, format 7.
+    const record = bytes('Title', '', '', '', '', '', '', '', 'A', 'B', [0, 1, 2, 0, 1, 3, 2, 1, 0, 0, 2, 0], '', [0, 0, 1], '', [3, 7, 0, 0, 1, 0x8a]);
+    assert.deepEqual(chartOptions(record), { legend: { visible: true, position: 2 }, dataLabels: { kind: 3, format: 7 } });
+    // The marker and one 00 byte in the same run as the labels (value only, format 7).
+    const merged = bytes('Title', [0, 0, 0, 0, 1, 2, 2, 1, 0, 0, 2, 0], '', [0, 0, 1, 0, 2, 7, 0, 0, 2, 1]);
+    assert.deepEqual(chartOptions(merged).dataLabels, { kind: 2, format: 7 });
+    const plain = bytes('Title', [0, 0, 3, 0, 1, 3, 2, 1, 0, 0, 2, 3], '', [0, 0, 0, 0, 0, 0x10, 0, 0]);
+    assert.deepEqual(chartOptions(plain), { legend: { visible: false, position: 3 }, dataLabels: { kind: 0, format: 0 } });
+  });
+  const source: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Label', type: 'string' }, { name: 'Share', type: 'number' }] }] };
+  const chartReport = (chart: ChartInfo): ReportDefinition => ({ ...emptyDefinition(), layout: [
+    { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 3000, objects: [{ kind: 'chart', name: 'Graph1', position: { x: 0, y: 0 }, size: { width: 4000, height: 3000 }, chart }] }] },
+    { name: 'ReportFooterArea1', sections: [{ name: 'RF', objects: [] }] },
+    { name: 'DetailArea1', sections: [{ name: 'D', objects: [] }] },
+  ] });
+  it('labels pie slices outside with the category and the value as a percentage, without a legend', () => {
+    const { rdl } = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 3, graphType: 31,
+      legend: { visible: false, position: 0 }, dataLabels: { kind: 3, format: 7 } }), source, { reportName: 'C', subreport: true });
+    assert.ok(rdl.includes('<Label>#VALX #VALY{0.00%}</Label>') && rdl.includes('<Value>Outside</Value>'));
+    assert.ok(/<ChartLegend Name="Default">\s*<Hidden>true<\/Hidden>/.test(rdl));
+  });
+  it('puts the legend where Crystal does and leaves points unlabelled when it does', () => {
+    const { rdl } = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 1, graphType: 13,
+      legend: { visible: true, position: 2 }, dataLabels: { kind: 0, format: 0 } }), source, { reportName: 'C', subreport: true });
+    assert.ok(rdl.includes('<Position>BottomCenter</Position>') && !rdl.includes('#VALY'));
   });
 });
 
@@ -1114,5 +1179,186 @@ describe('review checklist', () => {
       { item: 'Formula {@B}', message: 'was converted to custom code (Code.F_B); review the VB function' },
     ] }]);
     assert.ok(code.includes('- [ ] was converted to custom code; review the VB function (2 items)\n  - Formula {@A} (Code.F_A)\n  - Formula {@B} (Code.F_B)'));
+  });
+});
+
+describe('matching the Crystal page', () => {
+  const source: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [
+    { name: 'Label', type: 'string' }, { name: 'Amount', type: 'number' },
+  ] }] };
+  const field = (name: string, ref: string, extra: object = {}) => ({ kind: 'field', name, field: ref, position: { x: 0, y: 0 }, size: { width: 2000, height: 240 }, ...extra });
+
+  it('leaves out sections whose Suppress box is ticked, unless a suppress formula decides', () => {
+    const definition: ReportDefinition = {
+      ...emptyDefinition(),
+      formulas: [{ name: 'Section_Visibility', index: 0, kind: 'conditionalFormat', text: 'PageNumber = 1', referencedFields: [] }],
+      formulaTexts: ['PageNumber = 1'],
+      layout: [
+        { name: 'ReportHeaderArea1', sections: [
+          { name: 'RH1', height: 240, suppressed: true, objects: [field('Gone', 'T.Label')] },
+          { name: 'RH2', height: 240, suppressed: true, conditions: { suppress: { name: 'Section_Visibility', index: 0 } }, objects: [field('ByFormula', 'T.Label')] },
+        ] },
+        { name: 'ReportFooterArea1', sections: [{ name: 'RF', objects: [] }] },
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 240, suppressed: true, objects: [field('Row', 'T.Amount')] }] },
+      ],
+    };
+    const { rdl } = convertToRdl(definition, source, { reportName: 'S', subreport: true });
+    assert.ok(!rdl.includes('"Gone"') && !rdl.includes('"Row"'), 'suppressed sections do not print');
+    assert.ok(rdl.includes('"ByFormula"'), 'the formula decides');
+  });
+
+  // A table as Crystal designs it: a frame and column lines drawn in the header that run down to the footer.
+  const framed = (): ReportDefinition => ({
+    ...emptyDefinition(),
+    layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 600, objects: [
+        { kind: 'text', name: 'Title', text: 'Summary', position: { x: 200, y: 50 }, size: { width: 3000, height: 240 } },
+        { kind: 'text', name: 'Head1', text: 'Label', position: { x: 200, y: 330 }, size: { width: 1800, height: 240 } },
+        { kind: 'text', name: 'Head2', text: 'Amount', position: { x: 2100, y: 330 }, size: { width: 1800, height: 240 } },
+        { kind: 'box', name: 'Frame', position: { x: 100, y: 0 }, size: { width: 4000, height: 1300 }, border: { sides: [1, 1, 1, 1] } },
+        { kind: 'line', name: 'Divider', position: { x: 2050, y: 300 }, size: { width: 0, height: 1000 }, border: { sides: [1, 1, 1, 1] } },
+      ] }] },
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF', height: 300, objects: [] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [field('Label1', 'T.Label', { position: { x: 200, y: 0 } }), field('Amount1', 'T.Amount', { position: { x: 2100, y: 0 } })] }] },
+    ],
+  });
+
+  it('frames the table with a box that runs on below the header, so it grows with the rows', () => {
+    const { rdl } = convertToRdl(framed(), source, { reportName: 'S', subreport: true });
+    const frame = rdl.slice(rdl.indexOf('<Rectangle Name="Frame">'));
+    assert.ok(rdl.includes('<Rectangle Name="Frame">'), 'the frame is drawn');
+    const items = frame.slice(0, frame.indexOf('</ReportItems>'));
+    assert.ok(items.includes('<Tablix ') && items.includes('Summary'), 'the frame holds the title and the table');
+  });
+
+  it('draws a line that runs down the table as a column border on every row', () => {
+    const { rdl } = convertToRdl(framed(), source, { reportName: 'S', subreport: true });
+    const amount = rdl.slice(rdl.indexOf('<Textbox Name="Amount1">'));
+    const style = amount.slice(amount.indexOf('<Style>', amount.indexOf('</Paragraphs>')), amount.indexOf('</Textbox>'));
+    assert.ok(style.includes('<LeftBorder>'), style);
+  });
+
+  it('orders chart dates held as text by date, and leaves numbers alone', () => {
+    const chartOf = (onChangeOf: string) => ({ ...emptyDefinition(),
+      formulas: [{ name: 'when', index: 0, kind: 'formula' as const, text: 'ToText({T.Label})', referencedFields: ['T.Label'], valueType: 'string' }],
+      layout: [
+        { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 3000, objects: [{ kind: 'chart', name: 'Graph1', position: { x: 0, y: 0 }, size: { width: 6000, height: 3000 },
+          chart: { values: ['Sum of T.Amount'], onChangeOf, family: 1, graphType: 10 } }] }] },
+        { name: 'ReportFooterArea1', sections: [{ name: 'RF', objects: [] }] },
+        { name: 'DetailArea1', sections: [{ name: 'D', objects: [] }] },
+      ] });
+    const text = convertToRdl(chartOf('@when'), source, { reportName: 'S', subreport: true }).rdl;
+    const sort = /<ChartCategoryHierarchy>[\s\S]*?<SortExpression>\s*<Value>([^<]*)<\/Value>/.exec(text)![1];
+    assert.ok(sort.includes('IsDate(') && sort.includes('yyyyMMddHHmmss'), sort);
+    const number = convertToRdl(chartOf('T.Amount'), source, { reportName: 'S', subreport: true }).rdl;
+    assert.ok(/<ChartCategoryHierarchy>[\s\S]*?<SortExpression>\s*<Value>=Fields!Amount.Value<\/Value>/.test(number));
+    assert.ok(/<ChartNoDataMessage Name="NoDataMessage">\s*<Caption\s*\/>/.test(text) || /<ChartNoDataMessage Name="NoDataMessage">\s*<Caption><\/Caption>/.test(text), 'nothing printed for a chart without data');
+  });
+
+  it('formats a formula by the result type Crystal stores with it, without extra padding', () => {
+    const format = { systemDefault: true, number: { decimals: 2, thousands: true, leadingZero: true, negative: 1, symbolType: 0, symbol: '', symbolPosition: 0 } };
+    const definition: ReportDefinition = {
+      ...emptyDefinition(),
+      formulas: [{ name: 'due', index: 0, kind: 'formula', text: '{T.Amount} * 1.5', referencedFields: ['T.Amount'], valueType: 'number' }],
+      layout: [
+        { name: 'ReportHeaderArea1', sections: [{ name: 'RH', objects: [] }] },
+        { name: 'ReportFooterArea1', sections: [{ name: 'RF', objects: [] }] },
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [field('Due', '@due', { format })] }] },
+      ],
+    };
+    const { rdl } = convertToRdl(definition, source, { reportName: 'S', subreport: true });
+    assert.ok(rdl.includes('<Format>#,0.00;-#,0.00</Format>'));
+    assert.ok(rdl.includes('<PaddingLeft>0pt</PaddingLeft>') && !rdl.includes('<PaddingLeft>2pt</PaddingLeft>'));
+  });
+});
+
+describe('page number option', () => {
+  const source: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Label', type: 'string' }] }] };
+  const definition = (): ReportDefinition => ({ ...emptyDefinition(), layout: detailLayout('T.Label') });
+  it('adds "Page N" at the right of the page footer on request', () => {
+    const { rdl } = convertToRdl(definition(), source, { reportName: 'P', pageNumber: true });
+    const footer = rdl.slice(rdl.indexOf('<PageFooter>'), rdl.indexOf('</PageFooter>'));
+    assert.ok(footer.includes('="Page " &amp; Globals!PageNumber') && footer.includes('<TextAlign>Right</TextAlign>'), footer);
+  });
+  it('adds nothing by default', () => {
+    assert.ok(!convertToRdl(definition(), source, { reportName: 'P' }).rdl.includes('PageNumberFooter'));
+  });
+});
+
+describe('converting for given parameter values', () => {
+  it('decides suppress formulas that only compare parameters with constants', () => {
+    assert.equal(fixedCondition('{?kind} = 1', { kind: '1' }), true);
+    assert.equal(fixedCondition('{?Kind} <> 1;', { kind: '1' }), false);
+    assert.equal(fixedCondition('({?kind} = 2) or not ({?region} = "East")', { kind: '1', region: 'West' }), true);
+    assert.equal(fixedCondition('{?Pm-?kind} >= 3 and {?kind} < 9', { kind: '4' }), true);
+    assert.equal(fixedCondition('{?kind} = 1 and {T.Flag} = 1', { kind: '1' }), undefined, 'a field is not known');
+    assert.equal(fixedCondition('{?other} = 1', { kind: '1' }), undefined, 'a parameter without a value');
+    assert.equal(fixedCondition('WhilePrintingRecords; {?kind} = 1', { kind: '1' }), undefined);
+    assert.equal(fixedCondition('{?@kind} = 1', { kind: '1' }), true, 'a parameter named with @');
+  });
+
+  const source: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Label', type: 'string' }] }] };
+  const definition = (): ReportDefinition => ({
+    ...emptyDefinition(),
+    parameters: [{ name: 'kind', valueType: 'number' }],
+    formulas: [
+      { name: 'Section_Visibility', index: 0, kind: 'conditionalFormat', text: '{?kind} = 1', referencedFields: [] },
+      { name: 'Object_Visibility', index: 1, kind: 'conditionalFormat', text: '{?kind} <> 1', referencedFields: [] },
+    ],
+    formulaTexts: ['{?kind} = 1', '{?kind} <> 1'],
+    layout: [
+      { name: 'ReportHeaderArea1', sections: [
+        { name: 'Other', height: 900, conditions: { suppress: { name: 'Section_Visibility', index: 0 } }, objects: [{ kind: 'text', name: 'OtherKind', text: 'Only for others', position: { x: 0, y: 0 }, size: { width: 2000, height: 240 } }] },
+        { name: 'Mine', height: 300, objects: [{ kind: 'text', name: 'MineText', text: 'Mine', position: { x: 0, y: 0 }, size: { width: 2000, height: 240 }, conditions: { suppress: { name: 'Object_Visibility', index: 1 } } }] },
+      ] },
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF', objects: [] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [{ kind: 'field', name: 'L', field: 'T.Label', position: { x: 0, y: 0 }, size: { width: 2000, height: 240 } }] }] },
+    ],
+  });
+
+  it('leaves out what the formulas hide for those values, so it takes no space', () => {
+    const { rdl } = convertToRdl(definition(), source, { reportName: 'K', parameterValues: { kind: '1' } });
+    assert.ok(!rdl.includes('OtherKind'), 'the hidden section is gone');
+    const mine = rdl.slice(rdl.indexOf('<Textbox Name="MineText">'), rdl.indexOf('</Textbox>', rdl.indexOf('<Textbox Name="MineText">')));
+    assert.ok(mine.includes('<Top>0in</Top>') && !mine.includes('<Hidden>'), mine);
+  });
+
+  it('keeps the formulas when no values are given', () => {
+    const { rdl } = convertToRdl(definition(), source, { reportName: 'K' });
+    assert.ok(rdl.includes('OtherKind') && rdl.includes('Parameters!kind.Value'));
+  });
+});
+
+describe('a page header that differs on page 1', () => {
+  const source: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Label', type: 'string' }] }] };
+  // Away from the detail column, so they stay header text (not column headings).
+  const text = (name: string, value: string) => ({ kind: 'text', name, text: value, position: { x: 5000, y: 0 }, size: { width: 3000, height: 240 } });
+  const definition = (): ReportDefinition => ({
+    ...emptyDefinition(),
+    formulas: [
+      { name: 'Section_Visibility', index: 0, kind: 'conditionalFormat', text: 'PageNumber >1', referencedFields: ['Page Number'] },
+      { name: 'Section_Visibility', index: 1, kind: 'conditionalFormat', text: 'PageNumber <=1', referencedFields: ['Page Number'] },
+    ],
+    formulaTexts: ['PageNumber >1', 'PageNumber <=1'],
+    layout: [
+      { name: 'PageHeaderArea1', sections: [
+        { name: 'Always', height: 300, objects: [text('Logo', 'Logo')] },
+        { name: 'FirstPage', height: 900, conditions: { suppress: { name: 'Section_Visibility', index: 0 } }, objects: [text('Address', 'Address')] },
+        { name: 'OtherPages', height: 300, conditions: { suppress: { name: 'Section_Visibility', index: 1 } }, objects: [text('Short', 'Short')] },
+      ] },
+      { name: 'PageFooterArea1', sections: [{ name: 'PF', objects: [] }] },
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', objects: [] }] },
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF', objects: [] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [{ kind: 'field', name: 'L', field: 'T.Label', position: { x: 0, y: 0 }, size: { width: 2000, height: 240 } }] }] },
+    ],
+  });
+  it('puts page 1\'s header at the top of the body and keeps the page header for the other pages', () => {
+    const { rdl } = convertToRdl(definition(), source, { reportName: 'H' });
+    const body = rdl.slice(rdl.indexOf('<Body>'), rdl.indexOf('</Body>'));
+    const header = rdl.slice(rdl.indexOf('<PageHeader>'), rdl.indexOf('</PageHeader>'));
+    assert.ok(body.includes('>Logo<') && body.includes('>Address<') && !body.includes('>Short<'), 'page 1: logo and address');
+    assert.ok(header.includes('>Logo<') && header.includes('>Short<') && !header.includes('>Address<'), 'other pages: logo and the short block');
+    assert.ok(header.includes('<PrintOnFirstPage>false</PrintOnFirstPage>'));
+    assert.ok(!rdl.includes('Globals!PageNumber &gt; 1') && !/<Height>0\.833in<\/Height>\s*<PrintOnFirstPage>/.test(rdl), 'no page-number conditions left; header is the short one');
   });
 });

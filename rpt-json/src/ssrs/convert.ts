@@ -21,6 +21,10 @@ export interface SsrsOptions {
   sharedDataSource?: string;
   /** Keep every subreport as its own .rdl (by default those outside the table are built into the report). */
   separateSubreports?: boolean;
+  /** Add "Page N" at the right of the page footer. */
+  pageNumber?: boolean;
+  /** Parameter values to convert for: suppress formulas that depend only on them are decided at conversion. */
+  parameterValues?: Record<string, string>;
 }
 
 const safeFileName = (name: string) => name.replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'Report';
@@ -64,6 +68,8 @@ export function convertDocumentToSsrs(doc: CfbDocument, baseName: string, option
       connectionString: options.connectionString,
       sharedDataSource: options.sharedDataSource,
       embedSubreports: !options.separateSubreports,
+      pageNumber: options.pageNumber,
+      parameterValues: options.parameterValues,
       subreports: model.storage ? new Map() : subreports,
       subreport: Boolean(model.storage),
       images: embeddedImages(storageAt(doc.root, model.storage)),

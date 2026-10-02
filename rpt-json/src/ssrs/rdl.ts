@@ -28,7 +28,7 @@ import type {
   SectionInfo,
   TableInfo,
 } from '../crystal/model.ts';
-import { classifyAreas } from '../crystal/areas.ts';
+import { classifyAreas, type ClassifiedAreas } from '../crystal/areas.ts';
 import { detailColumnHeadings } from '../crystal/headers.ts';
 import { CODE_HELPERS, SPECIAL_FIELDS, translateFormula, translateToSql, vbString, type FormulaContext, type Translation } from './formula.ts';
 import { el, escapeXml, toXml, type XmlElement } from './xml.ts';
@@ -45,6 +45,13 @@ export interface RdlOptions {
    * instead of separate .rdl files shown through subreport items (default true).
    */
   embedSubreports?: boolean;
+  /** Adds "Page N" at the right of the page footer (for reports whose page numbers the application printed). */
+  pageNumber?: boolean;
+  /**
+   * Parameter values to convert for (by name, any case): a suppress formula that depends on nothing else is
+   * decided here, so what it hides is left out (and takes no space, as in Crystal).
+   */
+  parameterValues?: Record<string, string>;
   /** Subreports by their "Subdocument N" number: RDL name and link parameters (Crystal "Pm-" parameters). */
   subreports?: Map<number, SubreportInfo>;
   /** Image bytes by their "Embedding N" number. */
@@ -193,6 +200,7 @@ const PAPER_SIZES: Record<number, [number, number]> = { 1: [8.5, 11], 5: [8.5, 1
 
 const inches = (value: number) => `${Math.round(value * 1000) / 1000}in`;
 const twipsToInches = (twips: number) => twips / TWIPS_PER_INCH;
+const inchesToTwips = (value: number) => value * TWIPS_PER_INCH;
 
 const TYPE_NAMES: Record<string, string> = {
   string: 'System.String', memo: 'System.String', integer: 'System.Int32', number: 'System.Double',
@@ -294,8 +302,8 @@ class RdlBuilder {
   /** Subreports (by "Subdocument N" number) placed inline, and those kept as subreport items. */
   private readonly inlinedSubreports = new Set<number>();
   private readonly referencedSubreports = new Set<number>();
-  /** Values of shared variables set by subreports placed inline (null: set to different values). */
-  private readonly sharedValues = new Map<string, string | null>();
+  /** Values of shared variables set by subreports placed inline, in the order the subreports run. */
+  private readonly sharedValues = new Map<string, string[]>();
   /** Expressions to use for shared variables whose value is not known from a subreport. */
   private readonly sharedFallbacks = new Map<string, string>();
   private cachedConnectionString?: string;
@@ -555,8 +563,21 @@ class RdlBuilder {
       const inner = this.valueTypeOf(summary[2]);
       return operation === 'average' && inner === 'integer' ? 'number' : inner;
     }
-    if (ref.startsWith('@') || ref.startsWith('#') || ref.startsWith('%')) return undefined;
+    // A formula's result type is stored with it.
+    if (ref.startsWith('@')) return this.definition.formulas.find((f) => f.name.toLowerCase() === ref.slice(1).toLowerCase())?.valueType;
+    if (ref.startsWith('#') || ref.startsWith('%')) return undefined;
     return this.formulaContext.fieldType?.(ref);
+  }
+
+  /**
+   * The sort value of a chart category. Crystal orders dates by date; a date held as text (e.g. "02/09/2026")
+   * would sort as text in SSRS, so values that read as dates sort by their date.
+   */
+  private categorySortValue(category: string, expression: string): string {
+    const type = this.valueTypeOf(category);
+    if (type === 'number' || type === 'integer' || type === 'currency' || type === 'boolean') return expression;
+    // IIf evaluates both branches: the inner IIf keeps CDate from failing on text that is not a date.
+    return `IIf(IsDate(${expression}), Format(CDate(IIf(IsDate(${expression}), ${expression}, "1900-01-01")), "yyyyMMddHHmmss"), CStr(${expression}))`;
   }
 
   /** Expression (without "=") and format for a field object's reference. */
@@ -685,7 +706,7 @@ class RdlBuilder {
   }
 
   /** Border and background elements for an item's Style. */
-  private borderStyle(border: BorderInfo | undefined, extra: { top?: boolean; bottom?: boolean } = {}): XmlElement[] {
+  private borderStyle(border: BorderInfo | undefined, extra: { top?: boolean; bottom?: boolean; left?: boolean; right?: boolean } = {}): XmlElement[] {
     const side = (name: string, style: number) => {
       const lineStyle = BORDER_STYLES[style];
       if (!lineStyle) return null;
@@ -694,10 +715,12 @@ class RdlBuilder {
         el('Style', lineStyle),
         border?.width ? el('Width', `${Math.max(0.25, (border.width / 20)).toFixed(2)}pt`) : null);
     };
-    const [left, right, sideTop, sideBottom] = border?.sides ?? [0, 0, 0, 0];
-    // Lines drawn along a table row become that row's top/bottom border.
+    const [sideLeft, sideRight, sideTop, sideBottom] = border?.sides ?? [0, 0, 0, 0];
+    // Lines drawn along a table row become that row's top/bottom border; lines down the table, left/right borders.
     const top = extra.top && !sideTop ? 1 : sideTop;
     const bottom = extra.bottom && !sideBottom ? 1 : sideBottom;
+    const left = extra.left && !sideLeft ? 1 : sideLeft;
+    const right = extra.right && !sideRight ? 1 : sideRight;
     const same = left === right && right === top && top === bottom;
     const out: XmlElement[] = [];
     if (same && left > 0) out.push(side('Border', left)!);
@@ -714,7 +737,7 @@ class RdlBuilder {
     return out;
   }
 
-  private textbox(name: string, value: string, obj: ReportObject | undefined, format: string | undefined, scope: Scope, box?: Box, hidden?: string, lines: { top?: boolean; bottom?: boolean } = {}): XmlElement {
+  private textbox(name: string, value: string, obj: ReportObject | undefined, format: string | undefined, scope: Scope, box?: Box, hidden?: string, lines: { top?: boolean; bottom?: boolean; left?: boolean; right?: boolean } = {}): XmlElement {
     const item = obj ? `${obj.kind} object "${obj.name}"` : name;
     const conditions = obj?.conditions ?? {};
     const hyperlink = conditions.hyperlink ? this.conditionExpression(conditions.hyperlink, false, item, scope) : undefined;
@@ -740,7 +763,8 @@ class RdlBuilder {
       box ? el('Height', inches(box.height)) : null,
       box ? el('Width', inches(box.width)) : null,
       hidden || suppress ? el('Visibility', el('Hidden', hidden && suppress ? `=(${hidden.slice(1)}) OrElse (${suppress.slice(1)})` : (hidden ?? suppress)!)) : null,
-      el('Style', ...this.borderStyle(border, lines), el('PaddingLeft', '2pt'), el('PaddingRight', '2pt'), el('PaddingTop', '2pt'), el('PaddingBottom', '2pt')));
+      // Crystal draws text right up to the object's edges: SSRS's default 2pt padding would make it wrap sooner.
+      el('Style', ...this.borderStyle(border, lines), el('PaddingLeft', '0pt'), el('PaddingRight', '0pt'), el('PaddingTop', '0pt'), el('PaddingBottom', '0pt')));
   }
 
   // ---- free-standing items (page header/footer, report header/footer) -------------------------
@@ -764,6 +788,11 @@ class RdlBuilder {
     const ordered = [...section.objects.filter((o) => o.kind === 'box'), ...section.objects.filter((o) => o.kind !== 'box')];
     for (const obj of ordered) {
       const box = this.boxOf(obj, top);
+      if (scope === 'body' && this.runOn.has(obj)) {
+        this.spanning.push({ obj, section, box, area, hidden });
+        bottom = Math.max(bottom, box.top - top + box.height);
+        continue;
+      }
       const embed = scope === 'body' && this.options.embedSubreports !== false && !this.options.inline;
       if (obj.kind === 'subreport' && (scope === 'page' || embed)) {
         // SSRS allows no subreport in a page header/footer: its content is placed there directly; outside the
@@ -804,6 +833,7 @@ class RdlBuilder {
       connectionString: this.options.connectionString,
       subreport: true,
       images: info.images,
+      parameterValues: this.options.parameterValues,
       inline: { dataset, itemNames: this.itemNames, imageNames: this.imageNames, codeNames: this.codeNames },
     });
     const result = mode === 'page' ? child.buildInline() : child.buildEmbedded();
@@ -819,8 +849,8 @@ class RdlBuilder {
     this.extraDataSets.push(result.dataset(dataSource));
     for (const [variable, fallback] of result.sharedFallbacks) if (!this.sharedFallbacks.has(variable)) this.sharedFallbacks.set(variable, fallback);
     for (const [variable, value] of result.shared) {
-      const known = this.sharedValues.get(variable);
-      this.sharedValues.set(variable, known === undefined || known === value ? value : null);
+      const known = this.sharedValues.get(variable) ?? [];
+      if (!known.includes(value)) this.sharedValues.set(variable, [...known, value]);
     }
     for (const p of result.parameters) {
       // A linked subreport's "Pm-Table.Field" parameter takes the main report's field, unprompted.
@@ -1052,25 +1082,44 @@ class RdlBuilder {
         values.length > 1 ? el('ChartMembers', ...valueMembers) : null,
         el('Label', `=${seriesExpression}`))]
       : valueMembers;
-    const axis = (title: string | undefined, name: string) => el('ChartAxis', { Name: name },
-      el('Style', el('FontSize', '8pt')),
+    const axis = (title: string | undefined, name: string, format?: string) => el('ChartAxis', { Name: name },
+      el('Style', el('FontSize', '8pt'), format ? el('Format', format) : null),
       el('ChartAxisTitle', el('Caption', title ?? ''), el('Style', el('FontSize', '8pt'))),
       el('ChartMajorGridLines', el('Enabled', name === 'Primary' && title === chart.categoryTitle ? 'False' : 'True'), el('Style', el('Border', el('Color', 'Gainsboro')))),
       el('ChartMinorGridLines', el('Style')),
       el('ChartMinorTickMarks', el('Length', '0.5')),
       el('CrossAt', 'NaN'), el('Minimum', 'NaN'), el('Maximum', 'NaN'),
       el('ChartAxisScaleBreak', el('Style')));
+    // One value over categories, as bars: Crystal gives each bar its own colour, in its palette's order (SSRS
+    // would colour the whole series alike), and shows no legend for it.
+    const barPerPoint = style.type === 'Column' && values.length === 1 && !seriesExpression && !!categoryExpression && categoryExpression !== 'Nothing';
+    if (barPerPoint) {
+      this.codeMembers.crPointColors = 'New System.Collections.Hashtable';
+      if (!this.codeFunctions.includes(POINT_COLOR_CODE)) this.codeFunctions.push(POINT_COLOR_CODE);
+    }
+    // Data labels as Crystal shows them: the category, the value (in the chart's number format), or both.
+    const labelFormat = chart.dataLabels ? CHART_NUMBER_FORMATS[chart.dataLabels.format] : undefined;
+    const valueKeyword = labelFormat ? `#VALY{${labelFormat}}` : '#VALY';
+    const labelText = { 1: '#VALX', 2: valueKeyword, 3: `#VALX ${valueKeyword}` }[chart.dataLabels?.kind ?? 0];
+    const dataLabel = labelText
+      ? el('ChartDataLabel', el('Style', el('FontSize', '7pt')), el('Label', labelText), el('Visible', 'true'))
+      : el('ChartDataLabel', el('Style'));
+    const isPie = style.type === 'Shape';
     const series = values.map((v, i) => {
       const value = this.fieldObjectValue(v, 'row', item);
       return el('ChartSeries', { Name: this.itemNames.make(`${chartName}_Series${i + 1}`) },
         el('ChartDataPoints', el('ChartDataPoint',
           el('ChartDataPointValues', el('Y', `=${value.expression}`)),
-          el('ChartDataLabel', el('Style')),
-          el('Style'),
+          dataLabel,
+          el('Style', barPerPoint ? el('Color', `=Code.CrPointColor(${vbString(chartName)}, ${categoryExpression})`) : null),
           el('ChartMarker', style.markers ? el('Type', 'Auto') : null, el('Style')),
           el('DataElementOutput', 'Output'))),
         el('Type', style.type),
         style.subtype ? el('Subtype', style.subtype) : null,
+        // Crystal places pie labels outside the slices, with a line to each.
+        isPie && labelText ? el('CustomProperties',
+          el('CustomProperty', el('Name', 'PieLabelStyle'), el('Value', 'Outside')),
+          el('CustomProperty', el('Name', 'PieLineColor'), el('Value', 'Black'))) : null,
         el('Style'),
         el('ChartEmptyPoints', el('Style'), el('ChartMarker', el('Style')), el('ChartDataLabel', el('Style'))),
         el('ValueAxisName', 'Primary'),
@@ -1081,21 +1130,28 @@ class RdlBuilder {
       el('ChartCategoryHierarchy', el('ChartMembers', categoryExpression
         ? el('ChartMember',
           el('Group', { Name: this.itemNames.make(`${chartName}_Category`) }, el('GroupExpressions', el('GroupExpression', `=${categoryExpression}`))),
-          el('SortExpressions', el('SortExpression', el('Value', `=${categoryExpression}`))),
+          el('SortExpressions', el('SortExpression', el('Value', `=${this.categorySortValue(category!, categoryExpression)}`))),
           el('Label', `=${categoryExpression}`))
         : el('ChartMember', el('Label', chart.title ?? '')))),
       el('ChartSeriesHierarchy', el('ChartMembers', ...seriesHierarchy)),
       el('ChartData', el('ChartSeriesCollection', ...series)),
       el('ChartAreas', el('ChartArea', { Name: 'Default' },
         el('ChartCategoryAxes', axis(chart.categoryTitle, 'Primary')),
-        el('ChartValueAxes', axis(chart.valueTitle, 'Primary')),
+        el('ChartValueAxes', axis(chart.valueTitle, 'Primary', labelFormat)),
         style.threeD ? el('ChartThreeDProperties', el('Enabled', 'true'), el('Rotation', '20'), el('Inclination', '20')) : null,
         el('Style'))),
-      el('ChartLegends', el('ChartLegend', { Name: 'Default' }, el('Style'), el('Position', 'RightCenter'))),
+      // The legend as Crystal has it (shown or not, and where); a bar per colour has none by default.
+      el('ChartLegends', el('ChartLegend', { Name: 'Default' },
+        (chart.legend ? !chart.legend.visible : barPerPoint) ? el('Hidden', 'true') : null,
+        el('Style', el('FontSize', '7pt')),
+        el('Position', LEGEND_POSITIONS[chart.legend?.position ?? 0] ?? 'RightCenter'))),
       chart.title ? el('ChartTitles', el('ChartTitle', { Name: 'Default' }, el('Caption', chart.title), el('Style', el('FontWeight', 'Bold')))) : null,
-      el('Palette', 'BrightPastel'),
+      // Crystal's chart colours, in its order.
+      el('Palette', 'Custom'),
+      el('ChartCustomPaletteColors', ...CRYSTAL_PALETTE.map((c) => el('ChartCustomPaletteColor', c))),
       el('ChartBorderSkin', el('Style')),
-      el('ChartNoDataMessage', { Name: 'NoDataMessage' }, el('Caption', 'No Data Available'), el('Style')),
+      // Crystal prints nothing for a chart without data.
+      el('ChartNoDataMessage', { Name: 'NoDataMessage' }, el('Caption', ''), el('Style')),
       el('DataSetName', this.dataset),
       el('Top', inches(box.top)), el('Left', inches(box.left)), el('Height', inches(box.height)), el('Width', inches(box.width)),
       el('Style', el('Border', el('Style', 'None'))));
@@ -1119,6 +1175,28 @@ class RdlBuilder {
     let best = 0;
     for (let i = 0; i < columns.length; i++) if (x >= columns[i].x - 144) best = i;
     return best;
+  }
+
+  /**
+   * The table columns that take a border from a line running down the table (tableRules): the left border of
+   * the column whose left edge is nearest the line, or the right border of the last column.
+   */
+  private columnRules(columns: Column[]): { left: Set<number>; right: Set<number> } {
+    const left = new Set<number>();
+    const right = new Set<number>();
+    const tableRight = columns[columns.length - 1].x + inchesToTwips(columns[columns.length - 1].width);
+    for (const x of this.tableRules) {
+      let best = -1;
+      let distance = Infinity;
+      columns.forEach((c, i) => {
+        const d = Math.abs(c.x - x);
+        if (d < distance) { distance = d; best = i; }
+      });
+      if (Math.abs(tableRight - x) < distance) {
+        if (Math.abs(tableRight - x) <= 360) right.add(columns.length - 1);
+      } else if (distance <= 360) left.add(best);
+    }
+    return { left, right };
   }
 
   /** Whether a section fits a plain table row: one line of fields/text, at most one per column. */
@@ -1176,6 +1254,7 @@ class RdlBuilder {
       return { row, height, hidden };
     }
 
+    const rules = this.columnRules(columns);
     const cells: (ReportObject | undefined)[] = columns.map(() => undefined);
     let rowHeight = 0;
     const lines = { top: false, bottom: false };
@@ -1196,7 +1275,8 @@ class RdlBuilder {
         const { value, format } = obj ? this.objectValue(obj, 'row') : { value: '', format: undefined };
         const name = this.itemNames.make(obj?.name || `${rowName}_${i + 1}`);
         const cellObj = background ? { ...(obj ?? { kind: 'text', name }), border: { ...(obj?.border ?? { sides: [0, 0, 0, 0] as [number, number, number, number] }), background } } : obj;
-        return el('TablixCell', el('CellContents', this.textbox(name, value, cellObj, format, 'row', undefined, undefined, lines)));
+        const ruled = { ...lines, left: rules.left.has(i), right: rules.right.has(i) };
+        return el('TablixCell', el('CellContents', this.textbox(name, value, cellObj, format, 'row', undefined, undefined, ruled)));
       })));
     return { row, height, hidden };
   }
@@ -1613,10 +1693,137 @@ class RdlBuilder {
 
   // ---- layout classification -------------------------------------------------------------
 
+  /**
+   * A Crystal box or line may run on into the sections below its own, where Crystal stretches it over every row
+   * printed in between. The section keeps its Crystal height: the object is cut at the section's bottom, and the
+   * body layout (bodyItems) draws the rest as a frame around the table or as column borders down it.
+   */
+  private clipSpanning(section: SectionInfo): SectionInfo {
+    const limit = section.height;
+    if (limit === undefined) return section;
+    const runsOn = (o: ReportObject) => (o.kind === 'box' || o.kind === 'line') && o.size && (o.position?.y ?? 0) + o.size.height > limit;
+    if (!section.objects.some(runsOn)) return section;
+    return {
+      ...section,
+      objects: section.objects.map((o) => {
+        if (!runsOn(o)) return o;
+        const clipped = { ...o, size: { ...o.size!, height: Math.max(0, limit - (o.position?.y ?? 0)) } };
+        this.runOn.set(clipped, o);
+        return clipped;
+      }),
+    };
+  }
+
+  /** Where each report-header box or line that runs on below its section ends, in the design (see findSpanEnds). */
+  private readonly spanEnds = new Map<ReportObject, { where: 'header' | 'table' | 'footer'; offset: number }>();
+
+  /**
+   * Crystal draws a box or line from its own section down through the design's following sections (hidden ones
+   * included) to where its height runs out: within the report header, the table's sections, or the footer.
+   */
+  private findSpanEnds(areas: Omit<ClassifiedAreas, 'unrecognised'>): void {
+    const table = [...[...areas.groupHeaders.values()].flat(), ...areas.detail, ...[...areas.groupFooters.values()].flat()];
+    const order = [
+      ...areas.reportHeader.map((section) => ({ section, where: 'header' as const })),
+      ...table.map((section) => ({ section, where: 'table' as const })),
+      ...areas.reportFooter.map((section) => ({ section, where: 'footer' as const })),
+    ];
+    areas.reportHeader.forEach((section) => {
+      for (const o of section.objects) {
+        if (o.kind !== 'box' && o.kind !== 'line') continue;
+        let remaining = (o.position?.y ?? 0) + (o.size?.height ?? 0) - (section.height ?? Infinity);
+        if (remaining <= 0) continue;
+        // Past the last section it ends with the footer; within the footer, the offset counts from its top.
+        let end: { where: 'header' | 'table' | 'footer'; offset: number } = { where: 'footer', offset: Infinity };
+        let footerAbove = 0;
+        for (const next of order.slice(order.findIndex((e) => e.section === section) + 1)) {
+          const height = next.section.height ?? 0;
+          if (remaining <= height) { end = { where: next.where, offset: next.where === 'footer' ? footerAbove + remaining : remaining }; break; }
+          remaining -= height;
+          if (next.where === 'footer') footerAbove += height;
+        }
+        this.spanEnds.set(o, end);
+      }
+    });
+  }
+
+  /**
+   * With parameter values given (parameterValues), suppress formulas that depend only on them are decided now:
+   * a section or object they hide is left out (null for a section), and one they show loses the formula.
+   */
+  private decideFixed(section: SectionInfo): SectionInfo | null {
+    if (!this.options.parameterValues) return section;
+    const decide = (ref: FormulaRef | undefined) => {
+      const text = ref && (this.definition.formulaTexts?.[ref.index] ?? this.definition.formulas.find((f) => f.index === ref.index)?.text);
+      return text === undefined ? undefined : fixedCondition(text, this.options.parameterValues!);
+    };
+    const withoutSuppress = <T extends { conditions?: Record<string, FormulaRef> }>(item: T): T => {
+      const { suppress: _, ...rest } = item.conditions ?? {};
+      return { ...item, conditions: rest };
+    };
+    const sectionHidden = decide(section.conditions?.suppress);
+    if (sectionHidden === true) {
+      this.note(`Section ${section.name}`, 'is hidden for the given parameter values, so it was left out');
+      return null;
+    }
+    let result: SectionInfo = sectionHidden === false ? { ...withoutSuppress(section), suppressed: false } : section;
+    const objects = result.objects.flatMap((o) => {
+      const hidden = decide(o.conditions?.suppress);
+      if (hidden === true) return [];
+      return hidden === false ? [{ ...withoutSuppress(o), suppressed: false }] : [o];
+    });
+    if (objects.length !== result.objects.length || objects.some((o, i) => o !== result.objects[i])) result = { ...result, objects };
+    return result;
+  }
+
+  /**
+   * Page header sections shown on page 1 only ("PageNumber > 1" hides them) and on the other pages only
+   * ("PageNumber <= 1" hides them): page 1's sections (with the unconditional ones) and the other pages'.
+   */
+  private splitFirstPage(sections: SectionInfo[]): { first: SectionInfo[]; later: SectionInfo[] } | null {
+    const textOf = (s: SectionInfo) => {
+      const ref = s.conditions?.suppress;
+      const text = ref && (this.definition.formulaTexts?.[ref.index] ?? this.definition.formulas.find((f) => f.index === ref.index)?.text);
+      return (text ?? '').replace(/\/\/[^\n]*/g, '').replace(/\s+/g, '').replace(/;$/, '').toLowerCase();
+    };
+    const firstOnly = (s: SectionInfo) => /^pagenumber(>1|>=2|<>1)$/.test(textOf(s));
+    const laterOnly = (s: SectionInfo) => /^pagenumber(<=1|=1|<2)$/.test(textOf(s));
+    if (!sections.some(firstOnly)) return null;
+    const unconditional = (s: SectionInfo): SectionInfo => {
+      const { suppress: _, ...rest } = s.conditions ?? {};
+      return { ...s, conditions: rest };
+    };
+    return {
+      first: sections.filter((s) => !laterOnly(s)).map((s) => (firstOnly(s) ? unconditional(s) : s)),
+      later: sections.filter((s) => !firstOnly(s)).map((s) => (laterOnly(s) ? unconditional(s) : s)),
+    };
+  }
+
+  /** Boxes and lines cut at their section's bottom (see clipSpanning), with the Crystal object they came from. */
+  private readonly runOn = new Map<ReportObject, ReportObject>();
+  /** Such objects met while placing body sections: drawn by bodyItems once the table's place is known. */
+  private spanning: { obj: ReportObject; section: SectionInfo; box: Box; area: string; hidden?: string }[] = [];
+  /** Column borders down the table (x in twips): lines and box edges that run on into it. */
+  private tableRules: number[] = [];
+
   private classify(layout: AreaInfo[]): Classified {
     const { unrecognised, ...areas } = classifyAreas(layout, this.options.subreport);
     for (const area of unrecognised) this.note(`Area "${area.name}"`, 'unrecognised area; its objects were not converted');
-    return { ...areas, columnHeadings: [] };
+    this.findSpanEnds(areas);
+    // A section with its Suppress box ticked never prints, unless a suppress formula decides instead.
+    const shown = (sections: SectionInfo[]) => sections
+      .map((s) => this.decideFixed(s))
+      .filter((s): s is SectionInfo => s !== null)
+      .filter((s) => !s.suppressed || s.conditions?.suppress)
+      .map((s) => this.clipSpanning(s));
+    const levels = (map: Map<number, SectionInfo[]>) => new Map([...map].map(([level, sections]) => [level, shown(sections)]));
+    return {
+      pageHeader: shown(areas.pageHeader), pageFooter: shown(areas.pageFooter),
+      reportHeader: shown(areas.reportHeader), reportFooter: shown(areas.reportFooter),
+      detail: shown(areas.detail),
+      groupHeaders: levels(areas.groupHeaders), groupFooters: levels(areas.groupFooters),
+      columnHeadings: [],
+    };
   }
 
   // ---- report ---------------------------------------------------------------------------
@@ -1726,12 +1933,18 @@ class RdlBuilder {
   /** Fills in the shared variables read by formulas: the subreport's value, or the formula's own translation. */
   private resolveShared(xml: string, escape = escapeXml): string {
     return xml.replace(new RegExp(`${SHARED_TOKEN}([a-z0-9_]+)__`, 'g'), (_, variable: string) => {
-      const value = this.sharedValues.get(variable);
-      if (value) {
-        this.note(`Shared variable ${variable}`, `is set by a subreport placed in the page header; its value there (${value}) is used directly`);
-        return escape(`(${value})`);
+      const values = this.sharedValues.get(variable) ?? [];
+      if (values.length === 1) {
+        this.note(`Shared variable ${variable}`, `is set by a subreport placed in the page header; its value there (${values[0]}) is used directly`);
+        return escape(`(${values[0]})`);
       }
-      if (value === null) this.note(`Shared variable ${variable}`, 'is set to different values by several subreports; the formula reading it was kept as custom code, check it');
+      if (values.length > 1) {
+        // Several subreports set it: in Crystal the last one to run wins. A subreport hidden for this report
+        // sets nothing, so the last value that is not empty is used.
+        this.note(`Shared variable ${variable}`, `is set by ${values.length} subreports; the last of their values that is not empty is used`);
+        const picked = values.reduce((earlier, value) => `IIf(Len(CStr(${value}) & "") > 0, ${value}, ${earlier})`);
+        return escape(`(${picked})`);
+      }
       return escape(this.sharedFallbacks.get(variable) ?? 'Nothing');
     });
   }
@@ -1920,25 +2133,84 @@ class RdlBuilder {
   }
 
   /** The body: report header sections, the table, report footer sections. */
-  private bodyItems(areas: Classified): { items: XmlElement[]; height: number } {
+  private bodyItems(areas: Classified, start = 0): { items: XmlElement[]; height: number } {
     const items: XmlElement[] = [];
-    let top = 0;
+    let top = start;
+    this.spanning = [];
     for (const section of areas.reportHeader) {
       const placed = this.placeSection(section, top, 'body', 'Report Header');
       items.push(...placed.items);
       top += placed.height;
     }
+
+    // Boxes and lines from the report header that run on past their section: Crystal stretches them down to
+    // where they end, over every row printed in between.
+    const headerBottom = top;
+    const fromHeader = this.spanning.splice(0).map((span) => {
+      const original = this.runOn.get(span.obj)!;
+      return { ...span, original, end: this.spanEnds.get(original) ?? { where: 'header' as const, offset: 0 } };
+    });
+    // The widest box ending below the table frames it (and the header and footer items inside it).
+    const frame = fromHeader
+      .filter((s) => s.original.kind === 'box' && s.end.where === 'footer')
+      .sort((a, b) => b.box.width - a.box.width)[0];
+    this.tableRules = [];
+    for (const span of fromHeader) {
+      if (span === frame) continue;
+      if (span.end.where === 'header') {
+        // It ends within the report header, whose sections are stacked as here: drawn down to its end, at most
+        // to the header's bottom (hidden sections it crossed are not there).
+        const height = Math.min(twipsToInches(span.original.size?.height ?? 0), headerBottom - span.box.top);
+        const item = this.reportItem(span.original, 'body', span.area, { ...span.box, height }, span.hidden);
+        if (item) items.push(item);
+        continue;
+      }
+      const x = span.original.position?.x ?? 0;
+      this.tableRules.push(x);
+      if (span.original.kind === 'box') this.tableRules.push(x + (span.original.size?.width ?? 0));
+      const item = this.reportItem(span.obj, 'body', span.area, span.box, span.hidden);
+      if (item) items.push(item);
+    }
+
     const table = this.buildTablix(areas, top);
+    this.tableRules = [];
     if (table.tablix) {
       items.push(table.tablix);
       top += table.height + 0.1;
     }
+    const footerTop = top;
     for (const section of areas.reportFooter) {
       const placed = this.placeSection(section, top, 'body', 'Report Footer');
       items.push(...placed.items);
       top += placed.height;
     }
-    return { items, height: top };
+    // Run-on objects of the report footer have nothing below them: drawn as cut.
+    for (const span of this.spanning.splice(0)) {
+      const item = this.reportItem(span.obj, 'body', span.area, span.box, span.hidden);
+      if (item) items.push(item);
+    }
+    if (!frame) return { items, height: top };
+
+    // The frame: a rectangle with the box's border holding what it encloses, so it grows with the table.
+    const frameTop = frame.box.top;
+    const frameBottom = Math.max(footerTop + Math.min(twipsToInches(frame.end.offset), top - footerTop), frameTop);
+    const left = frame.box.left;
+    const right = left + frame.box.width;
+    const inside = (item: XmlElement) => {
+      const t = itemNumber(item, 'Top');
+      const l = itemNumber(item, 'Left');
+      return t >= frameTop - 0.01 && t < frameBottom && l >= left - 0.05 && itemRight(item) <= right + 0.05;
+    };
+    const enclosed = items.filter(inside);
+    const rest = items.filter((item) => !inside(item));
+    const container = el('Rectangle', { Name: this.itemNames.make(frame.original.name || 'Frame') },
+      enclosed.length ? el('ReportItems', ...enclosed.map((item) => moveItem(item, -frameTop, -left))) : null,
+      el('KeepTogether', 'false'),
+      el('Top', inches(frameTop)), el('Left', inches(left)),
+      el('Height', inches(frameBottom - frameTop)), el('Width', inches(frame.box.width)),
+      frame.hidden ? el('Visibility', el('Hidden', frame.hidden)) : null,
+      el('Style', ...this.borderStyle(frame.original.border)));
+    return { items: [container, ...rest], height: Math.max(top, frameBottom) };
   }
 
   /** Builds a subreport as items for the body of another report: its whole body, with its table reading all rows. */
@@ -1981,11 +2253,21 @@ class RdlBuilder {
       section.objects = keep;
     }
 
-    const { items: bodyItems, height: top } = this.bodyItems(areas);
-    const placeAll = (sections: SectionInfo[], label: string) => sections.reduce((acc, s) => {
-      const placed = this.placeSection(s, acc.height, 'page', label);
+    const placeAll = (sections: SectionInfo[], label: string, scope: Scope = 'page') => sections.reduce((acc, s) => {
+      const placed = this.placeSection(s, acc.height, scope, label);
       return { items: [...acc.items, ...placed.items], height: acc.height + placed.height };
     }, { items: [] as XmlElement[], height: 0 });
+    // A page header with sections for page 1 only and for the other pages: SSRS's page header has one height,
+    // so page 1's version goes at the top of the body and the page header skips page 1.
+    const pageOne = this.splitFirstPage(areas.pageHeader);
+    const firstPage = pageOne ? placeAll(pageOne.first, 'Page Header (page 1)', 'body') : { items: [], height: 0 };
+    if (pageOne) {
+      areas.pageHeader = pageOne.later;
+      this.note('Page header', 'Crystal prints a different page header on page 1: that one is placed at the top of the body, and the SSRS page header (the other pages\' version) is not printed on page 1');
+    }
+    const body = this.bodyItems(areas, firstPage.height);
+    const bodyItems = [...firstPage.items, ...body.items];
+    const top = body.height;
     const header = placeAll(areas.pageHeader, 'Page Header');
     const footer = placeAll(areas.pageFooter, 'Page Footer');
 
@@ -2002,6 +2284,20 @@ class RdlBuilder {
     if (width > pageWidth - margins.left - margins.right + 0.01 && !this.options.subreport) this.note('Page', `the layout (${inches(width)}) is wider than the printable page; SSRS will add horizontal pages`);
     // A subreport's margins never apply: it prints inside the main report.
     if (!def.margins && !this.options.subreport) this.note('Page', 'the report uses the printer default margins; 0.25in margins were used');
+
+    if (this.options.pageNumber && !this.options.subreport) {
+      const usable = pageWidth - margins.left - margins.right;
+      const height = 0.2;
+      const top = Math.max(footer.height - height, 0);
+      footer.items.push(el('Textbox', { Name: this.itemNames.make('PageNumberFooter') },
+        el('CanGrow', 'true'), el('KeepTogether', 'true'),
+        el('Paragraphs', el('Paragraph',
+          el('TextRuns', el('TextRun', el('Value', '="Page " & Globals!PageNumber'), el('Style', el('FontFamily', 'Times New Roman'), el('FontSize', '8pt')))),
+          el('Style', el('TextAlign', 'Right')))),
+        el('Top', inches(top)), el('Left', inches(Math.max(usable - 1.5, 0))), el('Height', inches(height)), el('Width', inches(1.5)),
+        el('Style', el('Border', el('Style', 'None')), el('PaddingLeft', '0pt'), el('PaddingRight', '0pt'), el('PaddingTop', '0pt'), el('PaddingBottom', '0pt'))));
+      footer.height = Math.max(footer.height, height);
+    }
 
     if (this.options.sharedDataSource) {
       this.note('Data source', `uses the shared data source "${this.options.sharedDataSource}" on the report server; it must point to the database the Crystal report read`);
@@ -2038,7 +2334,7 @@ class RdlBuilder {
         el('Body', el('ReportItems', ...bodyItems), el('Height', inches(Math.max(top, DEFAULT_HEIGHT))), el('Style')),
         el('Width', inches(Math.max(width, 1))),
         el('Page',
-          header.items.length ? el('PageHeader', el('Height', inches(header.height)), el('PrintOnFirstPage', 'true'), el('PrintOnLastPage', 'true'), el('ReportItems', ...header.items), el('Style')) : null,
+          header.items.length ? el('PageHeader', el('Height', inches(header.height)), el('PrintOnFirstPage', pageOne ? 'false' : 'true'), el('PrintOnLastPage', 'true'), el('ReportItems', ...header.items), el('Style')) : null,
           footer.items.length ? el('PageFooter', el('Height', inches(footer.height)), el('PrintOnFirstPage', 'true'), el('PrintOnLastPage', 'true'), el('ReportItems', ...footer.items), el('Style')) : null,
           el('PageHeight', inches(landscape ? paperWidth : paperHeight)),
           el('PageWidth', inches(pageWidth)),
@@ -2164,6 +2460,100 @@ export function imageMimeType(data: Uint8Array): string | undefined {
 }
 
 /** Right edge (inches) of a positioned report item. */
+/**
+ * The value of a Crystal True/False formula that compares parameters with constants, with the parameters'
+ * values filled in (e.g. "{?kind} = 1 or {?kind} = 3"); undefined when it depends on anything else.
+ */
+export function fixedCondition(text: string, values: Record<string, string>): boolean | undefined {
+  // Crystal names some parameters with a leading @ or ?; either way they match the name given.
+  const key = (name: string) => name.trim().replace(/^[@?]+/, '').toLowerCase();
+  const known = new Map(Object.entries(values).map(([k, v]) => [key(k), v]));
+  let unknown = false;
+  const source = text
+    .replace(/\/\/[^\n]*/g, ' ')
+    .replace(/\{\?(?:pm-\??)?([^}]+)\}/gi, (_, name: string) => {
+      const value = known.get(key(name));
+      if (value === undefined) { unknown = true; return ' 0 '; }
+      return /^-?\d+(\.\d+)?$/.test(value.trim()) ? ` ${value.trim()} ` : ` "${value.replace(/"/g, '""')}" `;
+    })
+    .trim().replace(/;\s*$/, '');
+  if (unknown) return undefined;
+  const tokens = source.match(/"(?:[^"]|"")*"|'[^']*'|-?\d+(?:\.\d+)?|<>|<=|>=|[=<>()]|[A-Za-z]+|\S/g) ?? [];
+  let pos = 0;
+  type Value = number | string | boolean;
+  const literal = (t: string): Value | undefined => {
+    if (/^-?\d/.test(t)) return Number(t);
+    if (t.startsWith('"')) return t.slice(1, -1).replace(/""/g, '"');
+    if (t.startsWith("'")) return t.slice(1, -1);
+    if (/^true$/i.test(t)) return true;
+    if (/^false$/i.test(t)) return false;
+    return undefined;
+  };
+  const compare = (a: Value, op: string, b: Value): boolean | undefined => {
+    if (typeof a !== typeof b) return undefined;
+    switch (op) {
+      case '=': return a === b;
+      case '<>': return a !== b;
+      case '<': return a < b;
+      case '>': return a > b;
+      case '<=': return a <= b;
+      case '>=': return a >= b;
+      default: return undefined;
+    }
+  };
+  const expr = (): boolean | undefined => {
+    let left = term();
+    while (pos < tokens.length && /^(or|and)$/i.test(tokens[pos])) {
+      const op = tokens[pos++].toLowerCase();
+      const right = term();
+      if (left === undefined || right === undefined) return undefined;
+      left = op === 'or' ? left || right : left && right;
+    }
+    return left;
+  };
+  const term = (): boolean | undefined => {
+    if (/^not$/i.test(tokens[pos] ?? '')) {
+      pos++;
+      const v = term();
+      return v === undefined ? undefined : !v;
+    }
+    if (tokens[pos] === '(') {
+      pos++;
+      const v = expr();
+      if (tokens[pos++] !== ')') return undefined;
+      return v;
+    }
+    const a = literal(tokens[pos++] ?? '');
+    if (a === undefined) return undefined;
+    if (!/^(=|<>|<|>|<=|>=)$/.test(tokens[pos] ?? '')) return typeof a === 'boolean' ? a : undefined;
+    const op = tokens[pos++];
+    const b = literal(tokens[pos++] ?? '');
+    return b === undefined ? undefined : compare(a, op, b);
+  };
+  const result = expr();
+  return pos === tokens.length ? result : undefined;
+}
+
+/** A report item's Top, Left, Width or Height in inches. */
+function itemNumber(item: XmlElement, name: string): number {
+  const child = item.children.find((c): c is XmlElement => typeof c === 'object' && c !== null && (c as XmlElement).name === name);
+  return child ? parseFloat(String(child.children[0])) : 0;
+}
+
+/** A copy of a report item moved by the given offsets (inches). */
+function moveItem(item: XmlElement, top: number, left: number): XmlElement {
+  return {
+    ...item,
+    children: item.children.map((c) => {
+      if (typeof c !== 'object' || c === null) return c;
+      const e = c as XmlElement;
+      if (e.name === 'Top') return el('Top', inches(Math.max(0, itemNumber(item, 'Top') + top)));
+      if (e.name === 'Left') return el('Left', inches(Math.max(0, itemNumber(item, 'Left') + left)));
+      return e;
+    }),
+  };
+}
+
 function itemRight(item: XmlElement): number {
   const read = (name: string) => {
     const child = item.children.find((c): c is XmlElement => typeof c === 'object' && c !== null && (c as XmlElement).name === name);
@@ -2204,6 +2594,31 @@ const FAMILY_NAMES = ['bar', 'line', 'area', 'pie', 'doughnut', '3D riser', '3D 
  * SSRS series type for a Crystal chart. Crystal numbers graph types by family: family * 10 + variant, where
  * bar/line/area variants are 0 plain, 1 stacked, 2 percent, and 3-5 the same in 3D (lines: 3-5 with markers).
  */
+/** Number formats of Crystal's chart data labels, by their place in the Chart Expert's list (those confirmed). */
+const CHART_NUMBER_FORMATS: Record<number, string> = { 5: '0%', 6: '0.0%', 7: '0.00%' };
+
+/** Crystal legend placements. */
+const LEGEND_POSITIONS: Record<number, string> = { 0: 'RightCenter', 1: 'LeftCenter', 2: 'BottomCenter', 3: 'TopCenter' };
+
+/** Crystal's default chart colours, in the order it gives them to series, slices and bars. */
+const CRYSTAL_PALETTE = ['#3E6A9E', '#F0A04B', '#2E9B6E', '#E0532B', '#A3335F', '#F2CB4C', '#2A7F94', '#E8735F', '#4A7A35', '#C42E4D'];
+
+/** Custom code giving each category of a chart the next Crystal palette colour, in the order categories are drawn. */
+const POINT_COLOR_CODE = [
+  'Public Function CrPointColor(ByVal chart As String, ByVal category As Object) As String',
+  `  Dim palette() As String = {${CRYSTAL_PALETTE.map((c) => `"${c}"`).join(', ')}}`,
+  '  Dim key As String = chart & "|" & CStr(category)',
+  '  If Not crPointColors.ContainsKey(key) Then',
+  '    Dim used As Integer = 0',
+  '    For Each entry As System.Collections.DictionaryEntry In crPointColors',
+  '      If CStr(entry.Key).StartsWith(chart & "|") Then used = used + 1',
+  '    Next',
+  '    crPointColors(key) = palette(used Mod palette.Length)',
+  '  End If',
+  '  Return CStr(crPointColors(key))',
+  'End Function',
+].join('\r\n');
+
 export function chartStyle(family: number | undefined, graphType: number | undefined): ChartStyle {
   if (family === undefined) return { type: 'Column', note: 'the Crystal chart type was not found; converted to a column chart' };
   const variant = graphType !== undefined && Math.floor(graphType / 10) === family ? graphType % 10 : 0;

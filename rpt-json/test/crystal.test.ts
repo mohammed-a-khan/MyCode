@@ -85,7 +85,7 @@ describe('record framing', () => {
 
   it('extracts formulas and layout into the report model', () => {
     const definition = buildReportDefinition(parseRecords(serializeRecords({ records: tree, trailing: new Uint8Array(0) }), 'report').records);
-    assert.deepEqual(definition.formulas, [{ name: 'Discount', index: 0, kind: 'formula', text: '{Orders.Amount} * 0.9', referencedFields: ['Orders.Amount'] }]);
+    assert.deepEqual(definition.formulas, [{ name: 'Discount', index: 0, kind: 'formula', text: '{Orders.Amount} * 0.9', referencedFields: ['Orders.Amount'], valueType: 'currency' }]);
     assert.equal(definition.layout[0].name, 'DetailArea1');
   });
 
