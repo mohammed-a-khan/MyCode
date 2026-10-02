@@ -1203,7 +1203,7 @@ describe('chart options', () => {
     definition.layout[0].sections[0].objects.push({ kind: 'text', name: 'ChartTitle', text: 'Title', position: { x: 100, y: 15 }, size: { width: 3000, height: 240 } });
     const { rdl } = convertToRdl(definition, source, { reportName: 'C', subreport: true });
     const chart = rdl.slice(rdl.indexOf('<Chart Name="Graph1">'));
-    assert.ok(/<\/DataSetName>\s*<Top>0\.177in<\/Top>/.test(chart), chart.slice(chart.indexOf('<DataSetName>'), chart.indexOf('<DataSetName>') + 120));
+    assert.ok(/<\/DataSetName>\s*<Top>0\.257in<\/Top>/.test(chart), chart.slice(chart.indexOf('<DataSetName>'), chart.indexOf('<DataSetName>') + 120));
   });
 
   it('keeps categories in the order the data comes when Crystal does, or sorts them as Crystal does', () => {
@@ -1712,6 +1712,24 @@ describe('formulas without data, page breaks by formula and the default font', (
     const paragraphs = descendants(box).filter((e) => e.name === 'Paragraph');
     assert.deepEqual(paragraphs.map((p) => descendants(p).find((e) => e.name === 'Value')!.children.join('')), ['First line', 'Second line', 'Third']);
     assert.deepEqual(paragraphs.map((p) => descendants(p).find((e) => e.name === 'TextAlign')?.children.join('')), ['Left', 'Center', 'Center']);
+  });
+  it('drops the spaces ending a line of a centred text holding a field, so no line is pushed aside or added', () => {
+    const { rdl } = convertToRdl(report([{ kind: 'text', name: 'Contact', align: 'center', border: { sides: [1, 1, 1, 1] },
+      text: 'Call us\nOur desk          \nWeb ', embeddedFields: ['T.Name'],
+      runs: [{ text: 'Call us' }, { text: '\n' }, { text: 'Our desk          ' }, { text: '\n' }, { text: 'Web ' }, { field: 'T.Name' }],
+      position: { x: 0, y: 0 }, size: { width: 3000, height: 1080 } }], {}, { height: 1100 }), source, { reportName: 'R' });
+    const at = rdl.indexOf('<Textbox Name="Contact">');
+    const value = /<Value>([^<]*)<\/Value>/.exec(rdl.slice(at))![1];
+    assert.equal(value, '="Call us" &amp; vbCrLf &amp; "Our desk" &amp; vbCrLf &amp; "Web " &amp; First(Fields!Name.Value, "DataSet1")');
+  });
+  it('joins the boxes under a row that starts a new page to that row', () => {
+    const box = (name: string, x: number) => ({ kind: 'box', name, position: { x, y: 40 }, size: { width: 2000, height: 1000 }, border: { sides: [1, 1, 1, 1] as [number, number, number, number] } });
+    const definition = report([box('Top1', 100), box('Top2', 2166)], {}, { height: 1080, newPageBefore: true });
+    definition.layout[0].sections.push({ name: 'Next', height: 1080, objects: [box('Low1', 100), box('Low2', 2180)] });
+    const { rdl } = convertToRdl(definition, source, { reportName: 'R' });
+    const items = descendants(parseXml(rdl));
+    const sides = (name: string) => descendants(child(items.find((e) => e.attributes.Name === name)!, 'Style')!).map((e) => e.name);
+    assert.ok(sides('Low1').includes('TopBorder') && sides('Low2').includes('TopBorder') && sides('Low2').includes('LeftBorder'), `${sides('Low1')} / ${sides('Low2')}`);
   });
   it('takes the font most of the text uses as the report default', () => {
     const { rdl } = convertToRdl(report([]), source, { reportName: 'R' });

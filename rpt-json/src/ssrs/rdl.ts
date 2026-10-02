@@ -703,10 +703,22 @@ class RdlBuilder {
       const text = obj.embeddedFields?.length ? obj.text ?? '' : wrapSpaces(obj.text ?? '', obj);
       if (obj.embeddedFields?.length) {
         // Text and embedded fields in their original order; tabs become spaces (text boxes do not tab).
-        const runs = obj.runs ?? [{ text }, ...obj.embeddedFields.map((field) => ({ field }))];
+        // Consecutive text runs are one piece of text (a paragraph break is a run of its own).
+        const runs = (obj.runs ?? [{ text }, ...obj.embeddedFields.map((field) => ({ field }))])
+          .reduce<({ text: string } | { field: string })[]>((out, r) => {
+            const last = out[out.length - 1];
+            if (!('field' in r) && last && !('field' in last)) out[out.length - 1] = { text: last.text + r.text };
+            else out.push(r);
+            return out;
+          }, []);
         let fieldIndex = 0;
-        const parts = runs.map((r) => {
-          if (!('field' in r)) return vbString(wrapSpaces(r.text.replace(/\t+/g, '    '), obj, true));
+        const parts = runs.map((r, i) => {
+          if (!('field' in r)) {
+            // A piece's ends that meet no field on the same line are line ends: Crystal drops the spaces there.
+            const atStart = i === 0;
+            const atEnd = i === runs.length - 1;
+            return vbString(wrapSpaces(r.text.replace(/\t+/g, '    '), obj, true, obj.align, { start: atStart, end: atEnd }));
+          }
           const { expression } = this.fieldObjectValue(r.field, scope, item);
           // An embedded field shows with its own format (in text, a value is shown as Crystal formats it).
           const own = obj.fieldFormats?.[fieldIndex++];
@@ -900,7 +912,11 @@ class RdlBuilder {
       // Only text in the chart's top fifth is a title; text further down (a "no data" message) is left alone.
       if (overlapsX && o.position.y >= y - 60 && o.position.y < y + h / 5) titleBottom = Math.max(titleBottom, o.position.y + o.size.height);
     }
-    const shift = twipsToInches(titleBottom - y);
+    // Below the title Crystal leaves a little space before a bar or line chart's plot (its top value label sits
+    // there); a pie keeps its own margins.
+    const isPie = chart.chart?.family === 3 || chart.chart?.family === 4;
+    const gap = titleBottom > y && !isPie ? 0.08 : 0;
+    const shift = twipsToInches(titleBottom - y) + gap;
     if (shift > 0 && shift < box.height / 3) {
       box.top += shift;
       box.height -= shift;
@@ -3154,7 +3170,7 @@ function paddedCentred(obj: ReportObject): boolean {
   return obj.size.height >= lineHeight * 1.8 && runs > 0 && (/^ {2,}\S/.test(text) || runs >= 2);
 }
 
-function wrapSpaces(text: string, obj: ReportObject, part = false, align = obj.align): string {
+function wrapSpaces(text: string, obj: ReportObject, part = false, align = obj.align, ends: { start: boolean; end: boolean } = { start: !part, end: !part }): string {
   const lineHeight = (obj.style?.size ?? 10) * 20 * 1.2;
   if (!obj.size || obj.size.height < lineHeight * 1.8) return text.replace(/\u00a0/g, ' ');
   const centred = align === 'center' || align === 'right';
@@ -3168,12 +3184,12 @@ function wrapSpaces(text: string, obj: ReportObject, part = false, align = obj.a
     // where it meets a field.
     .map((line, i, all) => {
       let out = line;
-      if (!part || i < all.length - 1) out = out.replace(/\s+$/, '');
-      if (centred && (!part || i > 0)) out = out.replace(/^\s+/, '');
+      if (i < all.length - 1 || ends.end) out = out.replace(/\s+$/, '');
+      if (centred && (i > 0 || ends.start)) out = out.replace(/^\s+/, '');
       return out.replace(/(\S) {3,}(?=\S)/g, '$1\n');
     });
   const joined = lines.join('\n');
-  return part ? joined : joined.replace(/\n+$/, '');
+  return part && !ends.end ? joined : joined.replace(/\n+$/, '');
 }
 
 /**
@@ -3292,14 +3308,25 @@ function joinBoxes(items: XmlElement[]): XmlElement[] {
   const boxes = items.filter(framed);
   const pos = (i: XmlElement) => ({ top: itemNumber(i, 'Top'), left: itemNumber(i, 'Left'), bottom: itemNumber(i, 'Top') + itemNumber(i, 'Height'), right: itemRight(i) });
   const changes = new Map<XmlElement, { top?: number; left?: number; sides: string[] }>();
+  // Boxes held in a rectangle of their own (a section starting a new page), where they are on the page: the boxes
+  // below them join them too.
+  const held = items.filter((i) => i.name === 'Rectangle' && !framed(i)).flatMap((r) => {
+    const reportItems = child(r, 'ReportItems');
+    const inner = reportItems ? reportItems.children.filter((x): x is XmlElement => typeof x === 'object' && x !== null).filter(framed) : [];
+    return inner.map((i) => {
+      const p = pos(i);
+      const dy = itemNumber(r, 'Top');
+      const dx = itemNumber(r, 'Left');
+      return { item: i, p: { top: p.top + dy, bottom: p.bottom + dy, left: p.left + dx, right: p.right + dx }, held: true };
+    });
+  });
   for (const b of boxes) {
     const pb = pos(b);
-    for (const a of boxes) {
+    for (const { item: a, p: pa, held: inside } of [...boxes.map((item) => ({ item, p: pos(item), held: false })), ...held]) {
       if (a === b) continue;
-      const pa = pos(a);
       const gapX = pb.left - pa.right;
       // Side by side: a row of boxes alike in height (a grid of panels).
-      if (gapX > 0 && gapX <= 0.1 && Math.abs(pa.top - pb.top) <= 0.05 && Math.abs((pa.bottom - pa.top) - (pb.bottom - pb.top)) <= 0.05) {
+      if (!inside && gapX > 0 && gapX <= 0.1 && Math.abs(pa.top - pb.top) <= 0.05 && Math.abs((pa.bottom - pa.top) - (pb.bottom - pb.top)) <= 0.05) {
         const c = changes.get(b) ?? { sides: [] };
         changes.set(b, { ...c, left: pa.right, sides: [...c.sides, 'LeftBorder'] });
       }
