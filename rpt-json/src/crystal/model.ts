@@ -267,6 +267,8 @@ export interface ReportObject {
   field?: string;
   text?: string;
   embeddedFields?: string[];
+  /** A text object's alignment per paragraph (its lines of text, split by "\n"), when stored. */
+  paragraphAligns?: ('left' | 'center' | 'right' | 'justify' | undefined)[];
   /** Text object content in order: literal text and embedded fields interleaved. */
   runs?: ({ text: string } | { field: string })[];
   /** Font family. */
@@ -844,6 +846,8 @@ function buildLayout(records: RecordNode[]): AreaInfo[] {
         const b = ownBytes(record);
         // An alignment set on the object itself is kept when the paragraph just says left.
         if (object.kind === 'text' && !object.runs?.length && b.length > 12 && ALIGNMENTS[b[12]] && (!object.align || b[12] !== 1)) object.align = ALIGNMENTS[b[12]];
+        // Each paragraph keeps its own alignment too.
+        if (object.kind === 'text') (object.paragraphAligns ??= []).push(b.length > 12 ? ALIGNMENTS[b[12]] : undefined);
         // A new paragraph after existing text is a line break.
         if (object.runs?.length) {
           // The plain text only gets a break after some text; runs keep it for fields too.
