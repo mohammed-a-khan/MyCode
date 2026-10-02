@@ -1427,6 +1427,19 @@ describe('a page header that differs on page 1', () => {
     assert.ok(header.includes('<PrintOnFirstPage>true</PrintOnFirstPage>'));
     assert.ok(body.includes('>Below<') && !header.includes('>Below<'), 'what lies below the page header\'s height starts page 1\'s body');
   });
+  it('keeps header text at its size, and puts the other pages\' rule at the foot of the taller header', () => {
+    const definition = definition0();
+    // Page 1's box reaches past the other pages' header; their rule then sits at the header's foot.
+    definition.layout[0].sections[1].objects.push({ kind: 'box', name: 'Contact', position: { x: 9000, y: 0 }, size: { width: 2000, height: 750 }, border: { sides: [1, 1, 1, 1] } });
+    definition.layout[0].sections[2].objects.push({ kind: 'line', name: 'Rule', position: { x: 0, y: 280 }, size: { width: 9000, height: 0 }, border: { sides: [0, 0, 1, 0] } });
+    const { rdl } = convertToRdl(definition, source, { reportName: 'H' });
+    const header = rdl.slice(rdl.indexOf('<PageHeader>'), rdl.indexOf('</PageHeader>'));
+    const height = parseFloat(/<PageHeader>\s*<Height>([0-9.]+)in/.exec(rdl)![1]);
+    const rule = header.slice(header.indexOf('<Line Name="Rule">'));
+    const top = parseFloat(/<Top>([0-9.]+)in/.exec(rule)![1]);
+    assert.ok(height - top < 0.05, `rule at ${top}in in a ${height}in header`);
+    assert.ok(header.includes('<CanGrow>false</CanGrow>') && !header.includes('<CanGrow>true</CanGrow>'));
+  });
 });
 
 describe('layout summary', { skip: !process.env.RPT_SAMPLES_DIR && 'set RPT_SAMPLES_DIR to enable' }, () => {
