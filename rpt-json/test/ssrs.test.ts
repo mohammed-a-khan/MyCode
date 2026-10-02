@@ -1166,6 +1166,11 @@ describe('chart options', () => {
     assert.ok(values.includes('<Format>0.00%</Format>'), values);
   });
 
+  it('hides a chart without data, as Crystal prints nothing for it', () => {
+    const { rdl } = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 0, graphType: 0 }), source, { reportName: 'C', subreport: true });
+    assert.ok(rdl.includes('<Hidden>=CountRows("DataSet1") = 0</Hidden>') || /<Hidden>=CountRows\("[^"]+"\) = 0<\/Hidden>/.test(rdl));
+  });
+
   it('puts the legend where Crystal does and leaves points unlabelled when it does', () => {
     const { rdl } = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 1, graphType: 13,
       legend: { visible: true, position: 2 }, dataLabels: { kind: 0, format: 0 } }), source, { reportName: 'C', subreport: true });
