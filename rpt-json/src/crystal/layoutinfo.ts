@@ -31,7 +31,7 @@ export function layoutSummary(doc: CfbDocument, find: string[]): string {
     }
     return id;
   };
-  const terms = find.map((f) => f.toLowerCase()).filter(Boolean);
+  const terms = find.filter((f) => !/^#\d+$/.test(f.trim())).map((f) => f.toLowerCase()).filter(Boolean);
   const matched = (text: string) => terms.find((t) => text.toLowerCase().includes(t));
   const shownText = (text: string) => {
     const term = matched(text);
@@ -96,8 +96,21 @@ export function layoutSummary(doc: CfbDocument, find: string[]): string {
   const texts = (definition: ReportDefinition) => definition.layout.flatMap((a) => a.sections.flatMap((s) => s.objects.map((o) => o.text ?? '')));
 
   const main = reports.find((r) => !r.storage);
+  // "#339" asks for Subdocument 339 by number.
+  const numbers = new Set(find.map((f) => /^#(\d+)$/.exec(f.trim())?.[1]).filter((n): n is string => !!n).map(Number));
+  // Main-report sections showing a searched text, with what is placed around them.
+  if (main?.definition) {
+    for (const area of main.definition.layout) {
+      for (const section of area.sections) {
+        if (!section.objects.some((o) => o.text && matched(o.text))) continue;
+        lines.push('', `== main report: ${shownName(area.name)}/${shownName(section.name)} h=${section.height ?? '?'}${section.suppressed ? ' SUPPRESSED' : ''}${conditions(main.definition, section.conditions)}`);
+        for (const o of section.objects) lines.push(objectLine(main.definition, o));
+      }
+    }
+  }
   for (const report of reports) {
-    if (!report.storage || !texts(report.definition!).some((t) => matched(t))) continue;
+    const number = Number(/(\d+)$/.exec(report.storage)?.[1]);
+    if (!report.storage || !(numbers.has(number) || texts(report.definition!).some((t) => matched(t)))) continue;
     const index = Number(/(\d+)$/.exec(report.storage)?.[1]);
     lines.push('', `== ${report.storage}`);
     // Where the main report places it, and what hides it there.
@@ -112,6 +125,6 @@ export function layoutSummary(doc: CfbDocument, find: string[]): string {
     }
     describe(report.definition!, true);
   }
-  if (!lines.length) return `No subreport contains ${find.map((f) => `"${f}"`).join(' or ')}.\n`;
+  if (!lines.length) return `No report or subreport contains ${find.map((f) => `"${f}"`).join(' or ')}.\n`;
   return `${lines.join('\n').trim()}\n\n(Positions and sizes in twips; names and text are replaced by S1, N1, F1, ...; [text] is a text you searched for.)\n`;
 }

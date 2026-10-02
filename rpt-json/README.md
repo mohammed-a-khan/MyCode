@@ -54,6 +54,7 @@ node src/cli.ts verify   report.rpt                      # round-trip checks (se
 | `--separate-subreports` | `to-rdl` | Write every subreport as its own `.rdl` (by default those outside the table are built into the report) |
 | `--page-number` | `to-rdl` | Add "Page N" at the right of the page footer (for reports whose page numbers the printing application added) |
 | `--parameter name=value` | `to-rdl` | Convert for that parameter value: sections and objects its suppress formulas hide are left out (they take no space, as in Crystal); repeat for more parameters |
+| `--chart-axis-format <format>` | `to-rdl` | Value-axis number format (e.g. `"0.00%"`) for charts whose format the `.rpt` does not show (it is in Crystal's encrypted chart data); charts with value labels use their labels' format |
 | `--template <file.rdl>` | `to-rdl` | Lay each report out in the style of an existing SSRS report (see below)     |
 | `--combine <out.rdl>` | `to-rdl`  | With `--template`: put every input report into one `.rdl`, one block each     |
 

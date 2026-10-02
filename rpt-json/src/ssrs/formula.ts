@@ -805,6 +805,16 @@ export function customCodeNote(issues: string[], name: string, origin = ''): str
 
 /** VB helpers shared by translated formulas; each is added to the report Code block once. */
 export const CODE_HELPERS: Record<string, string> = {
+  // Crystal's ToText/CStr of a value whose type is only known when the report runs: a number gets two decimals
+  // and thousands separators, as in Crystal; anything else is shown as it is.
+  CrToText: [
+    'Public Function CrToText(ByVal value As Object) As String',
+    '    If value Is Nothing Then Return ""',
+    '    If TypeOf value Is String Then Return CStr(value)',
+    '    If IsNumeric(value) Then Return FormatNumber(value, 2)',
+    '    Return CStr(value)',
+    'End Function',
+  ].join('\r\n'),
   // Sum, Average, Maximum, Minimum and Count over an array; "first" is 1 for Crystal arrays, 0 for parameters.
   CrArrayAgg: [
     'Public Function CrArrayAgg(ByVal items As Object, ByVal op As String, ByVal first As Integer) As Object',
@@ -1177,6 +1187,13 @@ export class Emitter {
     return false;
   }
 
+  private isTextNode(node: Node): boolean {
+    if (node.t === 'literal') return node.vb.startsWith('"');
+    if (node.t === 'field' && !node.ref.startsWith('@') && !node.ref.startsWith('?')) return ['string', 'memo'].includes(this.ctx.fieldType?.(node.ref) ?? '');
+    if (node.t === 'name') return this.variables.get(node.name.toLowerCase())?.vtype === 'stringvar';
+    return false;
+  }
+
   /** Crystal's value for an "if" without "else": the default of the "then" branch's type. */
   defaultFor(node: Node): string {
     if (node.t === 'literal') {
@@ -1332,7 +1349,11 @@ export class Emitter {
         const [value, second, third] = a();
         if (second === undefined) {
           // Crystal shows numbers with two decimals and thousands separators.
-          return this.isNumberNode(args[0]) ? `FormatNumber(${value}, 2)` : `CStr(${value})`;
+          if (this.isNumberNode(args[0])) return `FormatNumber(${value}, 2)`;
+          if (this.isTextNode(args[0])) return `CStr(${value})`;
+          // The type is not known here: decided when the report runs.
+          this.helpers.add('CrToText');
+          return `${this.inCode ? "" : "Code."}CrToText(${value})`;
         }
         if (/^-?\d+$/.test(second)) {
           if (third === undefined) return `FormatNumber(${value}, ${second})`;
