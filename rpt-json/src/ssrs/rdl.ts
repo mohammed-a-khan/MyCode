@@ -608,7 +608,8 @@ class RdlBuilder {
    */
   private categorySortValue(category: string, expression: string): string {
     const type = this.valueTypeOf(category);
-    if (type === 'number' || type === 'integer' || type === 'currency' || type === 'boolean') return expression;
+    // Numbers, dates and times sort by their own value; only text that reads as a date is turned into one.
+    if (type && type !== 'string') return expression;
     // IIf evaluates both branches: the inner IIf keeps CDate from failing on text that is not a date.
     return `IIf(IsDate(${expression}), Format(CDate(IIf(IsDate(${expression}), ${expression}, "1900-01-01")), "yyyyMMddHHmmss"), CStr(${expression}))`;
   }
@@ -803,7 +804,7 @@ class RdlBuilder {
       el('Style', ...this.borderStyle(border, lines),
         // Crystal keeps a text object's text a little inside its own border.
         el('PaddingLeft', `${((padding?.left ?? 0) / 20 + (framed ? 6 : 0)).toFixed(1)}pt`), el('PaddingRight', `${((padding?.right ?? 0) / 20 + (framed ? 6 : 0)).toFixed(1)}pt`),
-        el('PaddingTop', framed ? '2pt' : '0pt'), el('PaddingBottom', framed ? '2pt' : '0pt')));
+        el('PaddingTop', framed ? '1pt' : '0pt'), el('PaddingBottom', '0pt')));
   }
 
   // ---- free-standing items (page header/footer, report header/footer) -------------------------
@@ -1267,7 +1268,8 @@ class RdlBuilder {
       const value = this.fieldObjectValue(v, 'row', item);
       return el('ChartSeries', { Name: this.itemNames.make(`${chartName}_Series${i + 1}`) },
         el('ChartDataPoints', el('ChartDataPoint',
-          el('ChartDataPointValues', el('Y', `=${value.expression}`)),
+          // An empty pie slice is not drawn (as a 3D wedge of nothing it would still show its sides).
+          el('ChartDataPointValues', el('Y', pieSlices ? `=IIf(CDbl(IIf(IsNothing(${value.expression}), 0, ${value.expression})) = 0, Nothing, ${value.expression})` : `=${value.expression}`)),
           dataLabel(value.expression),
           // Crystal draws lines thick (SSRS takes a line's width from its data points).
           el('Style', barPerPoint ? el('Color', `=Code.CrPointColor(${vbString(chartName)}, ${categoryExpression})`)
@@ -1314,8 +1316,8 @@ class RdlBuilder {
         el('ChartValueAxes', axis(chart.valueTitle, 'value', labelFormat ?? (isPie ? undefined : this.options.chartAxisFormat))),
         // Crystal's 3D pies are tilted well back, with a thick edge.
         style.threeD ? el('ChartThreeDProperties', el('Enabled', 'true'),
-          el('Rotation', isPie ? '0' : '20'), el('Inclination', isPie ? '40' : '20'),
-          isPie ? el('DepthRatio', '200') : null, el('Shading', 'Real')) : null,
+          el('Rotation', isPie ? '0' : '20'), el('Inclination', isPie ? '50' : '20'),
+          isPie ? el('DepthRatio', '170') : null, el('Shading', 'Real')) : null,
         // Crystal draws pies large, with their labels around them.
         // Crystal's chart fills its object: the chart area takes the whole chart, less the legend's strip.
         // With a legend, SSRS lays the area and the legend out itself (fixed sizes would let them overlap).
@@ -2872,7 +2874,7 @@ class RdlBuilder {
           el('rd:DataSourceID', reportId(`${this.options.reportName}/${d.name}`))))),
       el('DataSets', this.datasetElement(this.dataSourceName), ...this.extraDataSets),
       el('ReportSections', el('ReportSection',
-        el('Body', el('ReportItems', ...clearLineOverlaps(bodyItems)), el('Height', inches(Math.max(top, DEFAULT_HEIGHT))), el('Style')),
+        el('Body', el('ReportItems', ...joinBoxes(clearLineOverlaps(bodyItems))), el('Height', inches(Math.max(top, DEFAULT_HEIGHT))), el('Style')),
         el('Width', inches(Math.max(width, 1))),
         el('Page',
           header.items.length ? el('PageHeader', el('Height', inches(header.height)), el('PrintOnFirstPage', 'true'), el('PrintOnLastPage', 'true'), el('ReportItems', ...clearLineOverlaps(header.items)), el('Style')) : null,
@@ -3146,7 +3148,9 @@ function wrapSpaces(text: string, obj: ReportObject, part = false): string {
   if (!obj.size || obj.size.height < lineHeight * 1.8) return text.replace(/\u00a0/g, ' ');
   const centred = obj.align === 'center';
   // Runs of spaces, non-breaking ones included (SSRS keeps those together on one line).
-  const lines = text.replace(/\u00a0/g, ' ').split(/\r?\n/).map((line) => line.replace(/ {3,}/g, '\n')).join('\n').split('\n')
+  // Line ends of any kind (a lone carriage return too), tabs and wide or non-breaking spaces.
+  const lines = text.replace(/\r\n?/g, '\n').replace(/[\t\u00a0\u2000-\u200a\u202f\u3000]/g, ' ').replace(/[\u200b\ufeff]/g, '')
+    .split('\n').map((line) => line.replace(/ {3,}/g, '\n')).join('\n').split('\n')
     // Centred text loses the spaces at its lines' ends (they would push it aside); a piece between embedded
     // fields keeps those at its own ends, where it meets a field.
     .map((line, i, all) => {
@@ -3244,6 +3248,60 @@ function clearLineOverlaps(items: XmlElement[]): XmlElement[] {
     }
     return { ...item, children };
   }).filter((item) => !absorbed.has(item));
+}
+
+/**
+ * Framed rectangles a hair apart (subreports Crystal places side by side or one under another, each with its own
+ * border): Crystal's print shows one line between them; SSRS would draw two lines a few hundredths of an inch
+ * apart, reading as one thick line. The second box moves up to the first and leaves that side to it.
+ */
+function joinBoxes(items: XmlElement[]): XmlElement[] {
+  const framed = (i: XmlElement) => {
+    if (i.name !== 'Rectangle') return false;
+    const style = child(i, 'Style');
+    const border = style && child(style, 'Border');
+    return !!border && child(border, 'Style')?.children.join('') === 'Solid' && !childNames(style).some((n) => /^(Top|Bottom|Left|Right)Border$/.test(n));
+  };
+  const boxes = items.filter(framed);
+  const pos = (i: XmlElement) => ({ top: itemNumber(i, 'Top'), left: itemNumber(i, 'Left'), bottom: itemNumber(i, 'Top') + itemNumber(i, 'Height'), right: itemRight(i) });
+  const changes = new Map<XmlElement, { top?: number; left?: number; sides: string[] }>();
+  for (const b of boxes) {
+    const pb = pos(b);
+    for (const a of boxes) {
+      if (a === b) continue;
+      const pa = pos(a);
+      const gapX = pb.left - pa.right;
+      if (gapX > 0 && gapX <= 0.1 && Math.abs(pa.top - pb.top) <= 0.05) {
+        const c = changes.get(b) ?? { sides: [] };
+        changes.set(b, { ...c, left: pa.right, sides: [...c.sides, 'LeftBorder'] });
+      }
+      const gapY = pb.top - pa.bottom;
+      const overlap = Math.min(pa.right, pb.right) - Math.max(pa.left, pb.left);
+      if (gapY > 0 && gapY <= 0.1 && overlap > 0.5 * Math.min(pa.right - pa.left, pb.right - pb.left)) {
+        const c = changes.get(b) ?? { sides: [] };
+        changes.set(b, { ...c, top: pa.bottom, sides: [...c.sides, 'TopBorder'] });
+      }
+    }
+  }
+  return items.map((item) => {
+    const c = changes.get(item);
+    if (!c) return item;
+    const p = pos(item);
+    return { ...item, children: item.children.map((e) => {
+      if (typeof e !== 'object' || e === null) return e;
+      const x = e as XmlElement;
+      if (x.name === 'Top' && c.top !== undefined) return el('Top', inches(c.top));
+      if (x.name === 'Height' && c.top !== undefined) return el('Height', inches(p.bottom - c.top));
+      if (x.name === 'Left' && c.left !== undefined) return el('Left', inches(c.left));
+      if (x.name === 'Width' && c.left !== undefined) return el('Width', inches(p.right - c.left));
+      if (x.name === 'Style') return { ...x, children: [...x.children, ...[...new Set(c.sides)].map((side) => el(side, el('Style', 'None')))] };
+      return x;
+    }) };
+  });
+}
+
+function childNames(e: XmlElement): string[] {
+  return e.children.filter((c): c is XmlElement => typeof c === 'object' && c !== null).map((c) => c.name);
 }
 
 function moveItem(item: XmlElement, top: number, left: number): XmlElement {

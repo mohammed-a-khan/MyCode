@@ -1146,7 +1146,7 @@ describe('charts that summarise fields themselves', () => {
   it('draws a pie of one value per category', () => {
     const chart = { values: ['Average of usp_Tests;1.result'], onChangeOf: 'usp_Tests;1.test_name', family: 3, graphType: 31 };
     const { rdl } = convertToRdl({ ...emptyDefinition(), layout: layout(chart) }, source, { reportName: 'Tests', subreport: true });
-    assert.ok(rdl.includes('<Y>=Avg(Fields!result.Value)</Y>') && rdl.includes('<Type>Shape</Type>'));
+    assert.ok(rdl.includes('Nothing, Avg(Fields!result.Value))</Y>') && rdl.includes('<Type>Shape</Type>'));
   });
 });
 
@@ -1188,7 +1188,7 @@ describe('chart options', () => {
 
   it('tilts 3D pies back like Crystal, scales line charts to their values and keeps lines visible', () => {
     const pie = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 3, graphType: 31 }), source, { reportName: 'C', subreport: true }).rdl;
-    assert.ok(/<Inclination>40<\/Inclination>/.test(pie) && pie.includes('<AllowOutSidePlotArea>True</AllowOutSidePlotArea>'));
+    assert.ok(/<Inclination>50<\/Inclination>/.test(pie) && pie.includes('<AllowOutSidePlotArea>True</AllowOutSidePlotArea>'));
     const line = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 1, graphType: 13 }), source, { reportName: 'C', subreport: true }).rdl;
     assert.ok(line.includes('<IncludeZero>false</IncludeZero>') && line.includes('<Width>1.5pt</Width>') && line.includes('<Interval>1</Interval>'));
   });
@@ -1636,7 +1636,7 @@ describe('text and group order as Crystal prints them', () => {
     const nbsp = convertToRdl({ ...definition, layout: [{ name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 1100, objects: [
       { kind: 'text', name: 'Boxed', text: 'Contact us\u00a0\u00a0\u00a0\u00a0\u00a0Service desk', align: 'center', border: { sides: [1, 1, 1, 1] }, position: { x: 0, y: 0 }, size: { width: 3000, height: 1080 } }] }] }, ...definition.layout.slice(1)] }, source, { reportName: 'T', subreport: true }).rdl;
     assert.ok(nbsp.includes('<Value>="Contact us" &amp; vbCrLf &amp; "Service desk"</Value>'), 'non-breaking spaces too');
-    assert.ok(/<PaddingLeft>6\.0pt<\/PaddingLeft>\s*<PaddingRight>6\.0pt<\/PaddingRight>\s*<PaddingTop>2pt<\/PaddingTop>\s*<PaddingBottom>2pt/.test(nbsp), 'text kept inside its border');
+    assert.ok(/<PaddingLeft>6\.0pt<\/PaddingLeft>\s*<PaddingRight>6\.0pt<\/PaddingRight>\s*<PaddingTop>1pt<\/PaddingTop>\s*<PaddingBottom>0pt/.test(nbsp), 'text kept inside its border');
   });
   it('orders groups with equal summaries by their own value', () => {
     const definition: ReportDefinition = { ...emptyDefinition(), groups: ['T.Name'],
@@ -1686,6 +1686,16 @@ describe('formulas without data, page breaks by formula and the default font', (
     const num = (e: typeof heading, prop: string) => parseFloat(child(e, prop)!.children.join(''));
     const frame = items.find((e) => e.attributes.Name === 'Frame')!;
     assert.ok(num(heading, 'Left') + num(heading, 'Width') <= num(frame, 'Left') + num(frame, 'Width') + 0.0001, 'within the box');
+  });
+  it('joins framed boxes a hair apart, so one line is drawn between them', () => {
+    const box = (name: string, x: number, y: number) => ({ kind: 'box', name, position: { x, y }, size: { width: 2000, height: 1000 }, border: { sides: [1, 1, 1, 1] as [number, number, number, number] } });
+    const { rdl } = convertToRdl(report([box('A', 100, 0), box('B', 2166, 0), box('C', 100, 1040)], {}, { height: 2100 }), source, { reportName: 'R' });
+    const items = descendants(parseXml(rdl));
+    const get = (name: string) => items.find((e) => e.attributes.Name === name)!;
+    const sides = (name: string) => descendants(child(get(name), 'Style')!).map((e) => e.name);
+    const num = (name: string, prop: string) => parseFloat(child(get(name), prop)!.children.join(''));
+    assert.ok(sides('B').includes('LeftBorder') && Math.abs(num('B', 'Left') - (num('A', 'Left') + num('A', 'Width'))) < 0.002, 'B moves to A');
+    assert.ok(sides('C').includes('TopBorder'), 'C leaves its top to A');
   });
   it('takes the font most of the text uses as the report default', () => {
     const { rdl } = convertToRdl(report([]), source, { reportName: 'R' });
