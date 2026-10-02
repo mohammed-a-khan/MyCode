@@ -722,8 +722,12 @@ class RdlBuilder {
           const { expression } = this.fieldObjectValue(r.field, scope, item);
           // An embedded field shows with its own format (in text, a value is shown as Crystal formats it).
           const own = obj.fieldFormats?.[fieldIndex++];
-          const format = own && formatFor(own, this.valueTypeOf(r.field));
-          return format ? `Format(${expression}, ${vbString(format)})` : expression;
+          const type = this.valueTypeOf(r.field);
+          const format = own && formatFor(own, type);
+          if (format) return `Format(${expression}, ${vbString(format)})`;
+          // Text from a fixed-width database column carries trailing spaces Crystal does not show: in SSRS they
+          // would widen the line (pushing centred text aside) and wrap into a blank line.
+          return type === 'string' ? `RTrim(${expression})` : expression;
         });
         return { value: `=${parts.join(' & ')}` };
       }
@@ -3298,54 +3302,56 @@ function clearLineOverlaps(items: XmlElement[]): XmlElement[] {
  * border): Crystal's print shows one line between them; SSRS would draw two lines a few hundredths of an inch
  * apart, reading as one thick line. The second box moves up to the first and leaves that side to it.
  */
-function joinBoxes(items: XmlElement[]): XmlElement[] {
+function joinBoxes(input: XmlElement[]): XmlElement[] {
   const framed = (i: XmlElement) => {
     if (i.name !== 'Rectangle') return false;
     const style = child(i, 'Style');
     const border = style && child(style, 'Border');
     return !!border && child(border, 'Style')?.children.join('') === 'Solid' && !childNames(style).some((n) => /^(Top|Bottom|Left|Right)Border$/.test(n));
   };
+  // Boxes held in a rectangle of their own (a section starting a new page) are joined there first.
+  const items = input.map((item) => (item.name === 'Rectangle' && !framed(item)
+    ? { ...item, children: item.children.map((e) => (typeof e === 'object' && e !== null && (e as XmlElement).name === 'ReportItems'
+      ? { ...(e as XmlElement), children: joinBoxes((e as XmlElement).children.filter((x): x is XmlElement => typeof x === 'object' && x !== null)) }
+      : e)) }
+    : item));
   const boxes = items.filter(framed);
   const pos = (i: XmlElement) => ({ top: itemNumber(i, 'Top'), left: itemNumber(i, 'Left'), bottom: itemNumber(i, 'Top') + itemNumber(i, 'Height'), right: itemRight(i) });
-  const changes = new Map<XmlElement, { top?: number; left?: number; sides: string[] }>();
+  const changes = new Map<XmlElement, { top?: number; left?: number; right?: number; sides: string[] }>();
   // Boxes held in a rectangle of their own (a section starting a new page), where they are on the page: the boxes
   // below them join them too.
-  const held = items.filter((i) => i.name === 'Rectangle' && !framed(i)).flatMap((r) => {
-    const reportItems = child(r, 'ReportItems');
-    const inner = reportItems ? reportItems.children.filter((x): x is XmlElement => typeof x === 'object' && x !== null).filter(framed) : [];
-    return inner.map((i) => {
-      const p = pos(i);
-      const dy = itemNumber(r, 'Top');
-      const dx = itemNumber(r, 'Left');
-      return { item: i, p: { top: p.top + dy, bottom: p.bottom + dy, left: p.left + dx, right: p.right + dx }, held: true };
-    });
+  // Matched by where they were drawn, lined up with where they are now (joined to each other).
+  const held = input.flatMap((r, index) => {
+    if (r.name !== 'Rectangle' || framed(r)) return [];
+    const children = (e: XmlElement) => (child(e, 'ReportItems')?.children ?? []).filter((x): x is XmlElement => typeof x === 'object' && x !== null);
+    const before = children(r);
+    const after = children(items[index]);
+    const dy = itemNumber(r, 'Top');
+    const dx = itemNumber(r, 'Left');
+    const shifted = (p: { top: number; bottom: number; left: number; right: number }) => ({ top: p.top + dy, bottom: p.bottom + dy, left: p.left + dx, right: p.right + dx });
+    return before.flatMap((i, k) => (framed(i) && after[k] ? [{ item: after[k], p: shifted(pos(i)), final: shifted(pos(after[k])), held: true }] : []));
   });
   for (const b of boxes) {
     const pb = pos(b);
-    for (const { item: a, p: pa, held: inside } of [...boxes.map((item) => ({ item, p: pos(item), held: false })), ...held]) {
+    for (const { item: a, p: pa, final, held: inside } of [...boxes.map((item) => ({ item, p: pos(item), final: pos(item), held: false })), ...held]) {
       if (a === b) continue;
       const gapX = pb.left - pa.right;
       // Side by side: a row of boxes alike in height (a grid of panels).
       if (!inside && gapX > 0 && gapX <= 0.1 && Math.abs(pa.top - pb.top) <= 0.05 && Math.abs((pa.bottom - pa.top) - (pb.bottom - pb.top)) <= 0.05) {
         const c = changes.get(b) ?? { sides: [] };
-        changes.set(b, { ...c, left: pa.right, sides: [...c.sides, 'LeftBorder'] });
+        changes.set(b, { ...c, left: c.right !== undefined ? c.left : pa.right, sides: [...c.sides, 'LeftBorder'] });
       }
       const gapY = pb.top - pa.bottom;
       const overlap = Math.min(pa.right, pb.right) - Math.max(pa.left, pb.left);
       // One under another: alike in place and width.
       if (gapY > 0 && gapY <= 0.1 && Math.abs(pa.left - pb.left) <= 0.05 && Math.abs((pa.right - pa.left) - (pb.right - pb.left)) <= 0.1 && overlap > 0) {
+        // It also takes the upper box's sides, so the lines between columns run straight on.
         const c = changes.get(b) ?? { sides: [] };
-        changes.set(b, { ...c, top: pa.bottom, sides: [...c.sides, 'TopBorder'] });
+        changes.set(b, { ...c, top: final.bottom, left: final.left, right: final.right, sides: [...c.sides, 'TopBorder'] });
       }
     }
   }
   return items.map((item) => {
-    // Boxes held in a rectangle of their own (a section starting a new page) are joined there.
-    if (item.name === 'Rectangle' && !framed(item) && !changes.has(item)) {
-      return { ...item, children: item.children.map((e) => (typeof e === 'object' && e !== null && (e as XmlElement).name === 'ReportItems'
-        ? { ...(e as XmlElement), children: joinBoxes((e as XmlElement).children.filter((x): x is XmlElement => typeof x === 'object' && x !== null)) }
-        : e)) };
-    }
     const c = changes.get(item);
     if (!c) return item;
     const p = pos(item);
@@ -3355,7 +3361,7 @@ function joinBoxes(items: XmlElement[]): XmlElement[] {
       if (x.name === 'Top' && c.top !== undefined) return el('Top', inches(c.top));
       if (x.name === 'Height' && c.top !== undefined) return el('Height', inches(p.bottom - c.top));
       if (x.name === 'Left' && c.left !== undefined) return el('Left', inches(c.left));
-      if (x.name === 'Width' && c.left !== undefined) return el('Width', inches(p.right - c.left));
+      if (x.name === 'Width' && (c.left !== undefined || c.right !== undefined)) return el('Width', inches((c.right ?? p.right) - (c.left ?? p.left)));
       if (x.name === 'Style') return { ...x, children: [...x.children, ...[...new Set(c.sides)].map((side) => el(side, el('Style', 'None')))] };
       return x;
     }) };
