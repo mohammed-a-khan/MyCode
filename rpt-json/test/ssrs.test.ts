@@ -1635,9 +1635,12 @@ describe('formulas without data, page breaks by formula and the default font', (
       { kind: 'line', name: 'Rule', position: { x: 45, y: 345 }, size: { width: 4010, height: 0 }, border: { sides: [0, 0, 1, 0] } },
     ], {}, { height: 1000 }), source, { reportName: 'R' });
     const items = descendants(parseXml(rdl));
-    const num = (name: string, prop: string) => parseFloat(child(items.find((e) => e.attributes.Name === name)!, prop)!.children.join(''));
-    assert.ok(num('Rule', 'Left') + num('Rule', 'Width') <= num('Frame', 'Left') + num('Frame', 'Width') + 0.0001, 'within the box');
-    assert.ok(num('Heading', 'Top') + num('Heading', 'Height') <= num('Rule', 'Top') + 0.0001, 'the title ends at the rule');
+    const heading = items.find((e) => e.attributes.Name === 'Heading')!;
+    assert.ok(descendants(child(heading, 'Style')!).some((e) => e.name === 'BottomBorder'), 'the rule is the title\'s bottom border');
+    assert.ok(!items.some((e) => e.attributes.Name === 'Rule'), 'drawn once');
+    const num = (e: typeof heading, prop: string) => parseFloat(child(e, prop)!.children.join(''));
+    const frame = items.find((e) => e.attributes.Name === 'Frame')!;
+    assert.ok(num(heading, 'Left') + num(heading, 'Width') <= num(frame, 'Left') + num(frame, 'Width') + 0.0001, 'within the box');
   });
   it('takes the font most of the text uses as the report default', () => {
     const { rdl } = convertToRdl(report([]), source, { reportName: 'R' });
