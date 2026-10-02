@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { chartOptions, type ChartInfo, type DataSourceInfo, type ReportDefinition } from '../src/crystal/model.ts';
+import { chartOptions, type ChartInfo, type DataSourceInfo, type ReportDefinition, type ReportObject } from '../src/crystal/model.ts';
 import { encodeString } from '../src/crystal/strings.ts';
 import { readCfb } from '../src/index.ts';
 import { convertDocumentToSsrs, reviewMarkdown } from '../src/ssrs/convert.ts';
@@ -12,7 +12,7 @@ import { isBasicSyntax } from '../src/ssrs/basic.ts';
 import { chartStyle, convertToRdl, fixedCondition, dateFormatString, formatFor, numberFormatString, scopeOutsideRegion, substituteCommandParameters } from '../src/ssrs/rdl.ts';
 import { classifyAreas } from '../src/crystal/areas.ts';
 import { buildHouseReport, readHouseTemplate } from '../src/ssrs/house.ts';
-import { parseXml } from '../src/ssrs/xml.ts';
+import { child, childElements, descendants, parseXml } from '../src/ssrs/xml.ts';
 
 const ctx: FormulaContext = {
   field: (table, column) => (table === 'Orders' ? column.replace(/\W/g, '_') : undefined),
@@ -1413,5 +1413,51 @@ describe('tables framed in a group header', () => {
     assert.ok(rdl.includes('Group1Frame'), 'a closing row for the frame\'s bottom edge');
     const frame = rdl.slice(rdl.indexOf('<Rectangle Name="Frame">'), rdl.indexOf('</Rectangle>', rdl.indexOf('<Rectangle Name="Frame">')));
     assert.ok(frame.includes('<TopBorder>') && !frame.includes('<BottomBorder>'), 'the cut box has no bottom edge across the next row');
+  });
+});
+
+describe('subreports in the report footer', () => {
+  const source: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Label', type: 'string' }, { name: 'Flag', type: 'number' }] }] };
+  const panel: ReportDefinition = {
+    ...emptyDefinition(),
+    layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 0, objects: [] }] },
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF', height: 0, objects: [] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 220, objects: [{ kind: 'field', name: 'PanelValue', field: 'T.Label', position: { x: 0, y: 0 }, size: { width: 2000, height: 220 } }] }] },
+    ],
+  };
+  const subreports = new Map([1, 2, 3].map((n) => [n, { name: `M_Subdocument_${n}`, links: [], definition: panel, dataSource: source }]));
+  const main = (objects: ReportObject[], formulas: ReportDefinition['formulas'] = []): ReportDefinition => ({
+    ...emptyDefinition(),
+    formulas,
+    formulaTexts: formulas.map((f) => f.text),
+    layout: [
+      { name: 'PageHeaderArea1', sections: [{ name: 'PH', objects: [] }] },
+      { name: 'PageFooterArea1', sections: [{ name: 'PF', objects: [] }] },
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', objects: [] }] },
+      { name: 'ReportFooterArea1', sections: [{ name: 'Panels', height: 630, objects }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 220, objects: [] }] },
+    ],
+  });
+  const sub = (name: string, index: number, x: number, extra: object = {}): ReportObject => ({ kind: 'subreport', name, subreport: { index, onDemand: false }, position: { x, y: 400 }, size: { width: 4000, height: 230 }, ...extra });
+
+  it('grows a box drawn around subreports with them, and draws a divider along a subreport as its border', () => {
+    const { rdl } = convertToRdl(main([
+      { kind: 'box', name: 'Panel', position: { x: 100, y: 60 }, size: { width: 8200, height: 680 }, border: { sides: [1, 1, 1, 1] } },
+      sub('Left', 1, 150), sub('Right', 2, 4170),
+      { kind: 'line', name: 'Divider', position: { x: 4150, y: 380 }, size: { width: 0, height: 350 }, border: { sides: [1, 0, 0, 0] } },
+    ]), source, { reportName: 'M', subreports });
+    const panelBox = descendants(parseXml(rdl)).find((r) => r.name === 'Rectangle' && r.attributes.Name === 'Panel')!;
+    const held = childElements(child(panelBox, 'ReportItems')!).map((e) => e.attributes.Name);
+    assert.ok(held.includes('Left') && held.includes('Right'), `the box holds both subreports: ${held.join(', ')}`);
+    const leftPanel = rdl.slice(rdl.indexOf('<Rectangle Name="Left">'));
+    assert.ok(leftPanel.slice(0, leftPanel.indexOf('<Rectangle Name="Right">')).includes('<RightBorder>'), 'the divider is the left panel\'s right border');
+  });
+
+  it('hides a subreport by its own suppress formula', () => {
+    const formulas = [{ name: 'Object_Visibility', index: 0, kind: 'conditionalFormat' as const, text: 'if {T.Flag} <> 1 then true', referencedFields: ['T.Flag'] }];
+    const { rdl } = convertToRdl(main([sub('Chart1', 3, 150, { conditions: { suppress: { name: 'Object_Visibility', index: 0 } } })], formulas), source, { reportName: 'M', subreports });
+    const chart = rdl.slice(rdl.indexOf('<Rectangle Name="Chart1">'));
+    assert.ok(/<Hidden>=[^<]*Flag[^<]*<\/Hidden>/.test(chart.slice(0, chart.indexOf('</Rectangle>') + 4000)), 'the formula decides');
   });
 });

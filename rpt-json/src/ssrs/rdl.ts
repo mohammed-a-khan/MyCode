@@ -791,7 +791,7 @@ class RdlBuilder {
     let bottom = 0;
     // Boxes first, then charts and pictures: SSRS draws items in document order, so they stay behind the text
     // (a chart title placed over a chart's top stays readable), as in Crystal.
-    const layer = (o: ReportObject) => (o.kind === 'box' ? 0 : o.kind === 'chart' || o.kind === 'picture' ? 1 : 2);
+    const layer = (o: ReportObject) => (o.kind === 'box' ? 0 : ['chart', 'picture', 'subreport'].includes(o.kind) ? 1 : 2);
     const ordered = [...section.objects].sort((a, b) => layer(a) - layer(b));
     for (const obj of ordered) {
       const box = this.boxOf(obj, top);
@@ -804,7 +804,12 @@ class RdlBuilder {
       if (obj.kind === 'subreport' && (scope === 'page' || embed)) {
         // SSRS allows no subreport in a page header/footer: its content is placed there directly; outside the
         // table, a subreport is built into the report too (one .rdl, nothing to deploy alongside it).
-        const inline = this.inlineSubreport(obj, box, area, hidden, scope === 'page' ? 'page' : 'body');
+        // The subreport object's own suppress formula (or Suppress box) hides it too, with its section's.
+        const own = obj.conditions?.suppress
+          ? this.conditionExpression(obj.conditions.suppress, false, `subreport object "${obj.name}" in ${area}`, scope)
+          : obj.suppressed ? '=True' : undefined;
+        const both = hidden && own ? `=(${hidden.slice(1)}) OrElse (${own.slice(1)})` : (hidden ?? own);
+        const inline = this.inlineSubreport(obj, box, area, both, scope === 'page' ? 'page' : 'body');
         if (inline) items.push(inline.item);
         bottom = Math.max(bottom, box.top - top + (inline?.height ?? box.height));
         continue;
@@ -1163,7 +1168,8 @@ class RdlBuilder {
       el('ChartNoDataMessage', { Name: 'NoDataMessage' }, el('Caption', ''), el('Style')),
       el('DataSetName', this.dataset),
       el('Top', inches(box.top)), el('Left', inches(box.left)), el('Height', inches(box.height)), el('Width', inches(box.width)),
-      el('Style', el('Border', el('Style', 'None'))));
+      // Transparent, as in Crystal: a title placed over the chart's top stays readable.
+      el('Style', el('Border', el('Style', 'None')), el('BackgroundColor', 'Transparent')));
   }
 
   // ---- table (tablix) -------------------------------------------------------------------
@@ -1251,6 +1257,15 @@ class RdlBuilder {
         bottom = Math.max(bottom, box.top + box.height);
       }
       const height = Math.max(sectionHeight, bottom, MIN_ROW_HEIGHT);
+      // Lines running down the table (tableRules) cross this row too: drawn as lines the row's full height.
+      const tableRight = tableLeft + inchesToTwips(tableWidth);
+      for (const x of this.tableRules) {
+        if (x < tableLeft - 360 || x > tableRight + 360) continue;
+        const left = Math.min(Math.max(twipsToInches(x - tableLeft), 0), tableWidth);
+        items.push(el('Line', { Name: this.itemNames.make(`${rowName}_Rule`) },
+          el('Top', '0in'), el('Left', inches(left)), el('Height', inches(height)), el('Width', '0in'),
+          el('Style', el('Border', el('Color', 'Black'), el('Style', 'Solid'), el('Width', '1pt')))));
+      }
       const rectangle = el('Rectangle', { Name: this.itemNames.make(`${rowName}_Area`) },
         items.length ? el('ReportItems', ...items) : null,
         el('KeepTogether', 'true'),
@@ -2213,8 +2228,11 @@ class RdlBuilder {
       .filter((s) => s.original.kind === 'box' && s.end.where === 'footer')
       .sort((a, b) => b.box.width - a.box.width)[0];
     this.tableRules = [];
+    // Boxes ending within the report header that enclose subreports grow with them (as in Crystal).
+    const headerLeft = this.growAround(items, fromHeader.filter((s) => s !== frame && s.end.where === 'header'));
     for (const span of fromHeader) {
       if (span === frame) continue;
+      if (span.end.where === 'header' && !headerLeft.includes(span)) continue;
       if (span.end.where === 'header') {
         // It ends within the report header, whose sections are stacked as here: drawn down to its end, at most
         // to the header's bottom (hidden sections it crossed are not there).
@@ -2261,8 +2279,9 @@ class RdlBuilder {
       items.push(...placed.items);
       top += placed.height;
     }
-    // Run-on objects of the report footer have nothing below them: drawn as cut.
-    for (const span of this.spanning.splice(0)) {
+    // Run-on objects of the report footer have nothing below them: a box around subreports grows with them,
+    // anything else is drawn as cut.
+    for (const span of this.growAround(items, this.spanning.splice(0))) {
       const item = this.reportItem(span.obj, 'body', span.area, span.box, span.hidden);
       if (item) items.push(item);
     }
@@ -2288,6 +2307,61 @@ class RdlBuilder {
       frame.hidden ? el('Visibility', el('Hidden', frame.hidden)) : null,
       el('Style', ...this.borderStyle(frame.original.border)));
     return { items: [container, ...rest], height: Math.max(top, frameBottom) };
+  }
+
+  /**
+   * A box that runs on below its section around subreports: Crystal stretches it (and the lines along it) as the
+   * subreports grow. Here it becomes a rectangle with the box's border holding what it encloses, so it grows with
+   * them; a line in it along a subreport's side becomes that side's border. Returns the spans left to draw.
+   */
+  private growAround<T extends { obj: ReportObject; box: Box; area: string; hidden?: string }>(items: XmlElement[], spans: T[]): T[] {
+    const left: T[] = [];
+    const lines = spans.filter((s) => this.runOn.get(s.obj)?.kind === 'line');
+    const used = new Set<T>();
+    for (const span of spans) {
+      const original = this.runOn.get(span.obj);
+      if (original?.kind !== 'box') continue;
+      const top = span.box.top;
+      const bottom = top + twipsToInches(original.size?.height ?? 0);
+      const l = span.box.left;
+      const r = l + span.box.width;
+      const inside = (item: XmlElement) => {
+        const t = itemNumber(item, 'Top');
+        return t >= top - 0.01 && t < bottom && itemNumber(item, 'Left') >= l - 0.05 && itemRight(item) <= r + 0.05;
+      };
+      const enclosed = items.filter(inside);
+      // Only subreports grow; around anything else the cut box is right as it is.
+      if (!enclosed.some((item) => item.name === 'Rectangle')) continue;
+      used.add(span);
+      const kept: XmlElement[] = [];
+      let contents = enclosed;
+      for (const line of lines) {
+        const lineObj = this.runOn.get(line.obj)!;
+        if ((lineObj.size?.width ?? 0) > 30 || line.box.left < l - 0.05 || line.box.left > r + 0.05) continue;
+        used.add(line);
+        const x = line.box.left;
+        const side = contents.find((item) => item.name === 'Rectangle' && Math.abs(itemRight(item) - x) <= 0.06) ? 'RightBorder'
+          : contents.find((item) => item.name === 'Rectangle' && Math.abs(itemNumber(item, 'Left') - x) <= 0.06) ? 'LeftBorder' : undefined;
+        if (side) {
+          contents = contents.map((item) => item.name === 'Rectangle' && Math.abs((side === 'RightBorder' ? itemRight(item) : itemNumber(item, 'Left')) - x) <= 0.06
+            ? withBorder(item, side, lineObj.border) : item);
+        } else {
+          const drawn = this.reportItem(line.obj, 'body', line.area, line.box, line.hidden);
+          if (drawn) kept.push(drawn);
+        }
+      }
+      const container = el('Rectangle', { Name: this.itemNames.make(original.name || 'Frame') },
+        el('ReportItems', ...[...contents, ...kept].map((item) => moveItem(item, -top, -l))),
+        el('KeepTogether', 'true'),
+        el('Top', inches(top)), el('Left', inches(l)),
+        el('Height', inches(bottom - top)), el('Width', inches(span.box.width)),
+        span.hidden ? el('Visibility', el('Hidden', span.hidden)) : null,
+        el('Style', ...this.borderStyle(original.border)));
+      for (const item of enclosed) items.splice(items.indexOf(item), 1);
+      items.push(container);
+    }
+    for (const span of spans) if (!used.has(span)) left.push(span);
+    return left;
   }
 
   /** Builds a subreport as items for the body of another report: its whole body, with its table reading all rows. */
@@ -2615,6 +2689,21 @@ export function fixedCondition(text: string, values: Record<string, string>): bo
 function itemNumber(item: XmlElement, name: string): number {
   const child = item.children.find((c): c is XmlElement => typeof c === 'object' && c !== null && (c as XmlElement).name === name);
   return child ? parseFloat(String(child.children[0])) : 0;
+}
+
+/** A copy of a report item with a solid border on one side (a Crystal line drawn along it). */
+function withBorder(item: XmlElement, side: 'LeftBorder' | 'RightBorder', border: BorderInfo | undefined): XmlElement {
+  const edge = el(side,
+    el('Color', border?.color ?? 'Black'),
+    el('Style', 'Solid'),
+    el('Width', `${Math.max(0.25, (border?.width ?? 20) / 20).toFixed(2)}pt`));
+  const hasStyle = item.children.some((c) => typeof c === 'object' && c !== null && (c as XmlElement).name === 'Style');
+  return {
+    ...item,
+    children: hasStyle
+      ? item.children.map((c) => (typeof c === 'object' && c !== null && (c as XmlElement).name === 'Style' ? { ...(c as XmlElement), children: [...(c as XmlElement).children, edge] } : c))
+      : [...item.children, el('Style', edge)],
+  };
 }
 
 /** A copy of a report item moved by the given offsets (inches). */
