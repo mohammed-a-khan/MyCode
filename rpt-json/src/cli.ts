@@ -243,8 +243,10 @@ async function main(argv: string[]): Promise<number> {
   }
 
   if (command === 'layout') {
+    const sections = args.includes('--sections');
     const [input, ...texts] = args.filter((a) => !a.startsWith('--'));
-    if (!input || texts.length === 0) throw new Error('layout needs an input .rpt file and at least one text to look for');
+    if (!input || (texts.length === 0 && !sections)) throw new Error('layout needs an input .rpt file and at least one text to look for (or --sections)');
+    if (sections) texts.push('--sections');
     const raw = await readFile(input);
     const doc = input.toLowerCase().endsWith('.json') ? jsonToDocument(JSON.parse(raw.toString('utf8'))) : readCfb(raw);
     process.stdout.write(layoutSummary(doc, texts));
