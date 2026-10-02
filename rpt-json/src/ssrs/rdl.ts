@@ -31,7 +31,7 @@ import type {
 import { classifyAreas, type ClassifiedAreas } from '../crystal/areas.ts';
 import { detailColumnHeadings } from '../crystal/headers.ts';
 import { CODE_HELPERS, SPECIAL_FIELDS, translateFormula, translateToSql, vbString, type FormulaContext, type Translation } from './formula.ts';
-import { el, escapeXml, toXml, type XmlElement } from './xml.ts';
+import { child, el, escapeXml, toXml, type XmlChild, type XmlElement } from './xml.ts';
 
 export interface RdlOptions {
   /** Name of the report (used for ids and review notes). */
@@ -704,7 +704,7 @@ class RdlBuilder {
         const runs = obj.runs ?? [{ text }, ...obj.embeddedFields.map((field) => ({ field }))];
         let fieldIndex = 0;
         const parts = runs.map((r) => {
-          if (!('field' in r)) return vbString(r.text.replace(/\t+/g, '    '));
+          if (!('field' in r)) return vbString(wrapSpaces(r.text.replace(/\t+/g, '    '), obj, true));
           const { expression } = this.fieldObjectValue(r.field, scope, item);
           // An embedded field shows with its own format (in text, a value is shown as Crystal formats it).
           const own = obj.fieldFormats?.[fieldIndex++];
@@ -3078,12 +3078,21 @@ function hideWhen(item: XmlElement, expression: string): XmlElement {
  * drops spaces where it wraps a line, SSRS keeps them (centred text then shifts aside, and a run can fill a line
  * of its own). Such a run becomes a line break, and lines lose their trailing spaces.
  */
-function wrapSpaces(text: string, obj: ReportObject): string {
+function wrapSpaces(text: string, obj: ReportObject, part = false): string {
   const lineHeight = (obj.style?.size ?? 10) * 20 * 1.2;
-  if (!obj.size || obj.size.height < lineHeight * 1.8 || !/ {3,}/.test(text)) return text;
-  return text.split(/\r?\n/).map((line) => line.replace(/ {3,}/g, '\n')).join('\n')
-    .split('\n').map((line) => line.replace(/\s+$/, '')).join('\n')
-    .replace(/\n+$/, '');
+  if (!obj.size || obj.size.height < lineHeight * 1.8) return text;
+  const centred = obj.align === 'center';
+  const lines = text.split(/\r?\n/).map((line) => line.replace(/ {3,}/g, '\n')).join('\n').split('\n')
+    // Centred text loses the spaces at its lines' ends (they would push it aside); a piece between embedded
+    // fields keeps those at its own ends, where it meets a field.
+    .map((line, i, all) => {
+      let out = line;
+      if (!part || i < all.length - 1) out = out.replace(/\s+$/, '');
+      if (centred && (!part || i > 0)) out = out.replace(/^\s+/, '');
+      return out;
+    });
+  const joined = lines.join('\n');
+  return part ? joined : joined.replace(/\n+$/, '');
 }
 
 function flattenRectangle(item: XmlElement): XmlElement[] {
@@ -3133,6 +3142,7 @@ function clearLineOverlaps(items: XmlElement[]): XmlElement[] {
     }) };
   });
   const rules = items.filter((i) => i.name === 'Line' && itemNumber(i, 'Height') === 0);
+  const absorbed = new Set<XmlElement>();
   return items.map((item) => {
     if (item.name === 'Rectangle') {
       return { ...item, children: item.children.map((c) => (typeof c === 'object' && c !== null && (c as XmlElement).name === 'ReportItems'
@@ -3144,13 +3154,32 @@ function clearLineOverlaps(items: XmlElement[]): XmlElement[] {
     const height = itemNumber(item, 'Height');
     const left = itemNumber(item, 'Left');
     const right = left + itemNumber(item, 'Width');
-    const cut = rules
-      .map((r) => ({ y: itemNumber(r, 'Top'), left: itemNumber(r, 'Left'), right: itemNumber(r, 'Left') + itemNumber(r, 'Width') }))
-      .filter((r) => r.y > top + height * 0.6 && r.y < top + height && r.left < right && r.right > left)
-      .reduce((min, r) => Math.min(min, r.y), Infinity);
-    if (cut === Infinity) return item;
-    return { ...item, children: item.children.map((c) => (typeof c === 'object' && c !== null && (c as XmlElement).name === 'Height' ? el('Height', inches(cut - top)) : c)) };
-  });
+    const rule = rules
+      .map((r) => ({ r, y: itemNumber(r, 'Top'), left: itemNumber(r, 'Left'), right: itemNumber(r, 'Left') + itemNumber(r, 'Width') }))
+      .filter((r) => r.y > top + height * 0.6 && r.y < top + height + 0.02 && r.left < right && r.right > left)
+      .sort((a, b) => a.y - b.y)[0];
+    if (!rule) return item;
+    const set = (children: XmlChild[], name: string, value: XmlElement) => children.map((c) => (typeof c === 'object' && c !== null && (c as XmlElement).name === name ? value : c));
+    let children = set(item.children, 'Height', el('Height', inches(Math.max(rule.y - top, 0.01))));
+    // A rule along the whole foot of a text box (a title's underline) becomes the text box's bottom border: drawn
+    // with the text box wherever it ends up, it cannot be lost.
+    const hidden = item.children.some((c) => typeof c === 'object' && c !== null && (c as XmlElement).name === 'Visibility');
+    if (!hidden && Math.abs(rule.left - left) <= 0.15 && Math.abs(rule.right - right) <= 0.15) {
+      absorbed.add(rule.r);
+      const ruleBorder = child(child(rule.r, 'Style') ?? el('Style'), 'Border');
+      const newLeft = Math.min(left, rule.left);
+      children = set(set(children, 'Left', el('Left', inches(newLeft))), 'Width', el('Width', inches(Math.max(right, rule.right) - newLeft)));
+      // The text stays where it was: the box grows by padding on the side it was widened.
+      const padLeft = (left - newLeft) * 72;
+      const padRight = (Math.max(right, rule.right) - right) * 72;
+      const pad = (e: XmlChild, name: string, extra: number) => (typeof e === 'object' && e !== null && (e as XmlElement).name === name
+        ? el(name, `${(parseFloat(String((e as XmlElement).children[0])) + extra).toFixed(1)}pt`) : e);
+      children = children.map((c) => (typeof c === 'object' && c !== null && (c as XmlElement).name === 'Style'
+        ? { ...(c as XmlElement), children: [...(c as XmlElement).children.map((e) => pad(pad(e, 'PaddingLeft', padLeft), 'PaddingRight', padRight)), el('BottomBorder', ...(ruleBorder?.children ?? [el('Style', 'Solid')]))] }
+        : c));
+    }
+    return { ...item, children };
+  }).filter((item) => !absorbed.has(item));
 }
 
 function moveItem(item: XmlElement, top: number, left: number): XmlElement {
