@@ -1188,9 +1188,18 @@ describe('chart options', () => {
 
   it('tilts 3D pies back like Crystal, scales line charts to their values and keeps lines visible', () => {
     const pie = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 3, graphType: 31 }), source, { reportName: 'C', subreport: true }).rdl;
-    assert.ok(/<Inclination>50<\/Inclination>/.test(pie) && pie.includes('<AllowOutSidePlotArea>True</AllowOutSidePlotArea>'));
+    assert.ok(/<Inclination>40<\/Inclination>/.test(pie) && pie.includes('<AllowOutSidePlotArea>True</AllowOutSidePlotArea>'));
     const line = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 1, graphType: 13 }), source, { reportName: 'C', subreport: true }).rdl;
     assert.ok(line.includes('<IncludeZero>false</IncludeZero>') && line.includes('<Width>1.5pt</Width>') && line.includes('<Interval>1</Interval>'));
+  });
+
+  it('lays pie slices out counter-clockwise as Crystal does, each with the colour of its place', () => {
+    const pie = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 3, graphType: 31, categoryOrder: 0 }), source, { reportName: 'C', subreport: true }).rdl;
+    const categories = pie.slice(pie.indexOf('<ChartCategoryHierarchy>'), pie.indexOf('</ChartCategoryHierarchy>'));
+    assert.ok(categories.includes('<Direction>Descending</Direction>'), 'drawn in reverse');
+    assert.ok(pie.includes('=Code.CrPieColor("Graph1", Fields!Label.Value, CountDistinct(Fields!Label.Value, "DataSet1"))') && pie.includes('Public Function CrPieColor'));
+    const line = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 1, graphType: 13 }), source, { reportName: 'C', subreport: true }).rdl;
+    assert.ok(!line.includes('<Margin>'), 'a gap at both ends of the category axis, as in Crystal');
   });
 
   it('starts a chart below a title placed over its top', () => {
@@ -1627,7 +1636,7 @@ describe('text and group order as Crystal prints them', () => {
     const nbsp = convertToRdl({ ...definition, layout: [{ name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 1100, objects: [
       { kind: 'text', name: 'Boxed', text: 'Contact us\u00a0\u00a0\u00a0\u00a0\u00a0Service desk', align: 'center', border: { sides: [1, 1, 1, 1] }, position: { x: 0, y: 0 }, size: { width: 3000, height: 1080 } }] }] }, ...definition.layout.slice(1)] }, source, { reportName: 'T', subreport: true }).rdl;
     assert.ok(nbsp.includes('<Value>="Contact us" &amp; vbCrLf &amp; "Service desk"</Value>'), 'non-breaking spaces too');
-    assert.ok(/<PaddingLeft>2\.0pt<\/PaddingLeft>\s*<PaddingRight>2\.0pt<\/PaddingRight>\s*<PaddingTop>1pt/.test(nbsp), 'text kept inside its border');
+    assert.ok(/<PaddingLeft>6\.0pt<\/PaddingLeft>\s*<PaddingRight>6\.0pt<\/PaddingRight>\s*<PaddingTop>2pt<\/PaddingTop>\s*<PaddingBottom>2pt/.test(nbsp), 'text kept inside its border');
   });
   it('orders groups with equal summaries by their own value', () => {
     const definition: ReportDefinition = { ...emptyDefinition(), groups: ['T.Name'],
