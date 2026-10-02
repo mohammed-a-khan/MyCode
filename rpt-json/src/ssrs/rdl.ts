@@ -783,7 +783,9 @@ class RdlBuilder {
     }
     const border = backColor ? { ...(obj?.border ?? { sides: [0, 0, 0, 0] as [number, number, number, number] }), background: backColor } : obj?.border;
     return el('Textbox', { Name: name },
-      el('CanGrow', 'true'),
+      // A page header or footer keeps its size, as Crystal's does: a text box growing there pushes what is
+      // below it down (on to a rule drawn under it).
+      el('CanGrow', scope === 'page' ? 'false' : 'true'),
       el('KeepTogether', 'true'),
       el('Paragraphs', el('Paragraph',
         el('TextRuns', el('TextRun', el('Value', value), this.textRunStyle(obj, format, scope))),
@@ -2729,10 +2731,13 @@ class RdlBuilder {
       const laterItems = header.items.flatMap((item) => flattenRectangle(item));
       const sameAs = (a: XmlElement, b: XmlElement) => withoutName(a) === withoutName(b);
       const shared = laterItems.filter((a) => inHeader.some((b) => sameAs(a, b)));
+      // Page 1's header is the taller: the other pages' own items sit at the header's foot, so what they draw
+      // last (a rule) stays just above the body, as in Crystal.
+      const lower = height - later > 0.01 ? height - later : 0;
       header = {
         items: [
           ...shared,
-          ...laterItems.filter((a) => !shared.includes(a)).map((item) => hideWhen(item, 'Globals!PageNumber = 1')),
+          ...laterItems.filter((a) => !shared.includes(a)).map((item) => hideWhen(lower ? moveItem(item, lower, 0) : item, 'Globals!PageNumber = 1')),
           ...inHeader.filter((b) => !shared.some((a) => sameAs(a, b))).map((item) => hideWhen(item, 'Globals!PageNumber > 1')),
         ],
         height,
