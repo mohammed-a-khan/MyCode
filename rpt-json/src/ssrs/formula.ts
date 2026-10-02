@@ -1055,7 +1055,8 @@ export class Emitter {
       }
       case 'in': {
         if (node.list.length === 0) return node.negate ? 'True' : 'False';
-        const value = this.emit(node.value);
+        const emitted = this.emit(node.value);
+        const value = this.isTextField(node.value) ? `RTrim(${emitted})` : emitted;
         const test = node.list.map((item) => `${value} = ${this.emit(item)}`).join(' OrElse ');
         return node.negate ? `Not (${test})` : `(${test})`;
       }
@@ -1187,6 +1188,11 @@ export class Emitter {
     return false;
   }
 
+  /** A database field of a text type. */
+  private isTextField(node: Node): boolean {
+    return node.t === 'field' && !node.ref.startsWith('@') && !node.ref.startsWith('?') && ['string', 'memo'].includes(this.ctx.fieldType?.(node.ref) ?? '');
+  }
+
   private isTextNode(node: Node): boolean {
     if (node.t === 'literal') return node.vb.startsWith('"');
     if (node.t === 'field' && !node.ref.startsWith('@') && !node.ref.startsWith('?')) return ['string', 'memo'].includes(this.ctx.fieldType?.(node.ref) ?? '');
@@ -1278,8 +1284,14 @@ export class Emitter {
       if (right.t === 'array') return `(${right.items.map((i) => `CStr(${l}).StartsWith(${this.emit(i)})`).join(' OrElse ')})`;
       return `CStr(${l}).StartsWith(${this.emit(right)})`;
     }
-    const l = this.emit(left);
-    const r = this.emit(right);
+    let l = this.emit(left);
+    let r = this.emit(right);
+    // Crystal ignores trailing spaces when comparing text (fixed-width database columns come padded); SSRS does
+    // not, so a text field is compared without them.
+    if (['=', '<>', '<', '>', '<=', '>='].includes(op) && (this.isTextNode(left) || this.isTextNode(right))) {
+      if (this.isTextField(left)) l = `RTrim(${l})`;
+      if (this.isTextField(right)) r = `RTrim(${r})`;
+    }
     if (op === '%') return `((${l}) / (${r}) * 100)`;
     if (op === 'eqv') return `((${l}) = (${r}))`;
     if (op === 'imp') return `(Not (${l}) OrElse (${r}))`;

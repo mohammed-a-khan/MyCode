@@ -70,6 +70,8 @@ export function layoutSummary(doc: CfbDocument, find: string[]): string {
     if (o.field) {
       const formula = o.field.startsWith('@') ? definition.formulas.find((f) => f.name.toLowerCase() === o.field!.slice(1).toLowerCase()) : undefined;
       parts.push(`field=${shownField(o.field)}${formula?.valueType ? `:${formula.valueType}` : ''}`);
+      // The formula's logic, with its names and texts hidden like everything else.
+      if (formula?.text) parts.push(`= {${shownFormula(formula.text)}}`);
     }
     if (o.border) parts.push(`border=${o.border.sides.join('')}${o.border.width ? `/${o.border.width}` : ''}`);
     if (o.subreport) parts.push(`-> Subdocument ${o.subreport.index}`);
