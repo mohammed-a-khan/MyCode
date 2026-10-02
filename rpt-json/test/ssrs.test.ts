@@ -1486,6 +1486,23 @@ describe('tables framed in a group header', () => {
     const frame = rdl.slice(rdl.indexOf('<Rectangle Name="Frame">'), rdl.indexOf('</Rectangle>', rdl.indexOf('<Rectangle Name="Frame">')));
     assert.ok(frame.includes('<TopBorder>') && !frame.includes('<BottomBorder>'), 'the cut box has no bottom edge across the next row');
   });
+  it('splits a heading at the rule under its title: the rule is the title row\'s bottom border, the column lines the cells\' borders below it', () => {
+    const def = definition();
+    const gh = def.layout.find((a) => a.name === 'GroupHeaderArea1')!.sections[0];
+    gh.objects.push({ kind: 'line', name: 'TitleRule', position: { x: 45, y: 345 }, size: { width: 4100, height: 0 }, border: { sides: [0, 0, 1, 0] } },
+      text('ColumnHead', 1500, 500));
+    const { rdl } = convertToRdl(def, source, { reportName: 'G', subreport: true });
+    const rows = descendants(parseXml(rdl)).filter((e) => e.name === 'TablixRow');
+    const holding = (name: string) => rows.findIndex((r) => descendants(r).some((e) => e.attributes.Name === name));
+    const title = holding('Heading');
+    assert.ok(title >= 0 && holding('ColumnHead') === title + 1, 'title and column headings in rows of their own');
+    const styles = (i: number) => childElements(child(rows[i], 'TablixCells')!).map((c) => child(c, 'CellContents')).filter((c) => !!c)
+      .map((c) => childElements(c!)[0]).map((r) => descendants(child(r, 'Style')!).map((e) => e.name));
+    assert.ok(styles(title).some((st) => st.includes('BottomBorder')), 'the rule under the title');
+    assert.ok(!descendants(rows[title]).some((e) => e.name === 'Line' && e.attributes.Name === 'TitleRule'));
+    assert.ok(styles(title + 1).filter((st) => st.includes('LeftBorder')).length >= 2, 'the column line is a cell border');
+  });
+
   it('reaches out to its frame and closes it at the foot of every page', () => {
     const { rdl } = convertToRdl(definition(), source, { reportName: 'G', subreport: true });
     const tablix = descendants(parseXml(rdl)).find((e) => e.name === 'Tablix')!;
