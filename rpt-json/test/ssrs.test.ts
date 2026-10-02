@@ -1490,7 +1490,9 @@ describe('tables framed in a group header', () => {
     const def = definition();
     const gh = def.layout.find((a) => a.name === 'GroupHeaderArea1')!.sections[0];
     gh.objects.push({ kind: 'line', name: 'TitleRule', position: { x: 45, y: 345 }, size: { width: 4100, height: 0 }, border: { sides: [0, 0, 1, 0] } },
-      text('ColumnHead', 1500, 500));
+      text('ColumnHead', 1500, 500), text('ColumnHead2', 1500, 620));
+    // The rule closing the headings sits a little above the section's foot: it does not split them again.
+    gh.objects.find((o) => o.name === 'Under')!.position = { x: 45, y: 800 };
     const { rdl } = convertToRdl(def, source, { reportName: 'G', subreport: true });
     const rows = descendants(parseXml(rdl)).filter((e) => e.name === 'TablixRow');
     const holding = (name: string) => rows.findIndex((r) => descendants(r).some((e) => e.attributes.Name === name));
@@ -1622,6 +1624,10 @@ describe('text and group order as Crystal prints them', () => {
     const { rdl } = convertToRdl(definition, source, { reportName: 'T', subreport: true });
     assert.ok(rdl.includes('<Value>="First line here" &amp; vbCrLf &amp; "Second line"</Value>'), 'a line break');
     assert.ok(rdl.includes('<Value>A     B</Value>'), 'spaces kept on one line');
+    const nbsp = convertToRdl({ ...definition, layout: [{ name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 1100, objects: [
+      { kind: 'text', name: 'Boxed', text: 'Contact us\u00a0\u00a0\u00a0\u00a0\u00a0Service desk', align: 'center', border: { sides: [1, 1, 1, 1] }, position: { x: 0, y: 0 }, size: { width: 3000, height: 1080 } }] }] }, ...definition.layout.slice(1)] }, source, { reportName: 'T', subreport: true }).rdl;
+    assert.ok(nbsp.includes('<Value>="Contact us" &amp; vbCrLf &amp; "Service desk"</Value>'), 'non-breaking spaces too');
+    assert.ok(/<PaddingLeft>2\.0pt<\/PaddingLeft>\s*<PaddingRight>2\.0pt<\/PaddingRight>\s*<PaddingTop>1pt/.test(nbsp), 'text kept inside its border');
   });
   it('orders groups with equal summaries by their own value', () => {
     const definition: ReportDefinition = { ...emptyDefinition(), groups: ['T.Name'],
