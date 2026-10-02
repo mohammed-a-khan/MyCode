@@ -51,6 +51,8 @@ node src/cli.ts verify   report.rpt                      # round-trip checks (se
 | `--connection "..."` | `to-rdl`  | SQL Server connection string to use in every generated report                  |
 | `--shared-datasource <name>` | `to-rdl` | Use a shared data source on the report server instead of an embedded connection |
 | `--separate-subreports` | `to-rdl` | Write every subreport as its own `.rdl` (by default those outside the table are built into the report) |
+| `--page-number` | `to-rdl` | Add "Page N" at the right of the page footer (for reports whose page numbers the printing application added) |
+| `--parameter name=value` | `to-rdl` | Convert for that parameter value: sections and objects its suppress formulas hide are left out (they take no space, as in Crystal); repeat for more parameters |
 | `--template <file.rdl>` | `to-rdl` | Lay each report out in the style of an existing SSRS report (see below)     |
 | `--combine <out.rdl>` | `to-rdl`  | With `--template`: put every input report into one `.rdl`, one block each     |
 

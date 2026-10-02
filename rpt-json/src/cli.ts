@@ -19,8 +19,12 @@ Usage:
   rpt-json to-rpt  <input.json> <output.rpt> [--no-verify] [--cfb-version 3|4]
   rpt-json to-rdl  <input.rpt|input.json|folder> [output-dir] [--connection "<connection string>"]
                    [--shared-datasource <name>] [--template <house.rdl>] [--separate-subreports]
+                   [--page-number] [--parameter name=value]...
                                             Convert to SSRS .rdl files (+ subreports) and a review checklist;
-                                            --template lays each report out in the style of an existing .rdl
+                                            --template lays each report out in the style of an existing .rdl;
+                                            --page-number adds "Page N" at the right of the page footer;
+                                            --parameter converts for that parameter value: what its suppress
+                                            formulas hide is left out (repeat for more parameters)
   rpt-json to-rdl  --template <house.rdl> --combine <output.rdl> <input.rpt|folder>...
                                             Combine several reports into one .rdl, one block per report
   rpt-json headers <input.rpt|input.json|folder> [output-file] [--json | --csv] [--all]
@@ -137,6 +141,13 @@ async function main(argv: string[]): Promise<number> {
     const connectionString = takeOption(args, '--connection');
     const sharedDataSource = takeOption(args, '--shared-datasource');
     const separateSubreports = takeFlag(args, '--separate-subreports');
+    const pageNumber = takeFlag(args, '--page-number');
+    let parameterValues: Record<string, string> | undefined;
+    for (let p = takeOption(args, '--parameter'); p !== undefined; p = takeOption(args, '--parameter')) {
+      const eq = p.indexOf('=');
+      if (eq < 1) throw new Error('--parameter needs name=value');
+      parameterValues = { ...parameterValues, [p.slice(0, eq).trim()]: p.slice(eq + 1) };
+    }
     const templatePath = takeOption(args, '--template');
     const combine = takeOption(args, '--combine');
     let template: HouseTemplate | undefined;
@@ -191,7 +202,7 @@ async function main(argv: string[]): Promise<number> {
         let base = original;
         const convert = (name: string) => (template
           ? [convertDocumentsWithTemplate(template, [{ doc, name: original }], name)]
-          : convertDocumentToSsrs(doc, name, { connectionString, sharedDataSource, separateSubreports }));
+          : convertDocumentToSsrs(doc, name, { connectionString, sharedDataSource, separateSubreports, pageNumber, parameterValues }));
         let reports = convert(base);
         // Two inputs whose names clean up to the same file name ("A B" and "A_B") get a numbered suffix.
         for (let n = 2; reports.some((r) => written.has(r.fileName.toLowerCase())); n++) {
