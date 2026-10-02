@@ -574,6 +574,17 @@ class RdlBuilder {
     return this.formulaContext.fieldType?.(ref);
   }
 
+  /** Sort expressions for the report's record sort (taken per group by its first record), or nothing. */
+  private recordOrder(): XmlElement | null {
+    const sorts = (this.definition.sorts ?? this.definition.sortFields.map((field) => ({ field, descending: false, bySummary: false })))
+      .filter((s) => !s.bySummary)
+      .map((s) => ({ ...s, value: this.fieldObjectValue(s.field, 'row', 'Record sort').expression }))
+      .filter((s) => s.value !== 'Nothing');
+    if (!sorts.length) return null;
+    return el('SortExpressions', ...sorts.map((s) => el('SortExpression',
+      el('Value', `=First(${s.value})`), s.descending ? el('Direction', 'Descending') : null)));
+  }
+
   /**
    * The sort value of a chart category. Crystal orders dates by date; a date held as text (e.g. "02/09/2026")
    * would sort as text in SSRS, so values that read as dates sort by their date.
@@ -814,7 +825,8 @@ class RdlBuilder {
         const both = hidden && own ? `=(${hidden.slice(1)}) OrElse (${own.slice(1)})` : (hidden ?? own);
         // Page 1's page header, moved into the body, keeps its subreports as in a page header (first row, items
         // at their places).
-        const inline = this.inlineSubreport(obj, box, area, both, scope === 'page' || pageLike ? 'page' : 'body');
+        const room = section.height !== undefined ? twipsToInches(section.height) - (box.top - top) : undefined;
+        const inline = this.inlineSubreport(obj, box, area, both, scope === 'page' || pageLike ? 'page' : 'body', room);
         if (inline) items.push(inline.item);
         bottom = Math.max(bottom, box.top - top + (inline?.height ?? box.height));
         continue;
@@ -868,7 +880,12 @@ class RdlBuilder {
    * Places a subreport's content inside a rectangle, reading its own dataset: in a page header/footer as items
    * showing the first row, in the body as its whole body (table and all).
    */
-  private inlineSubreport(obj: ReportObject, box: Box, area: string, hidden: string | undefined, mode: 'page' | 'body'): { item: XmlElement; height: number } | null {
+  /**
+   * `room`: in the body, the space down to the bottom of the subreport's section. The rectangle takes it, so it
+   * pushes what follows down only by what it grows beyond the section, as Crystal does (SSRS would otherwise keep
+   * the whole gap below the subreport's own height).
+   */
+  private inlineSubreport(obj: ReportObject, box: Box, area: string, hidden: string | undefined, mode: 'page' | 'body', room?: number): { item: XmlElement; height: number } | null {
     const item = `subreport object "${obj.name}" in ${area}`;
     const info = obj.subreport ? this.options.subreports?.get(obj.subreport.index) : undefined;
     if (!info?.definition) {
@@ -939,7 +956,7 @@ class RdlBuilder {
     // In the body a subreport keeps its Crystal size and grows with what it shows, as in Crystal (SSRS rectangles
     // grow but never shrink: sized to all their content, parts hidden by data would leave blank space). A page
     // header cannot grow, so there it gets its content's height.
-    const height = mode === 'body' ? box.height : Math.max(box.height, result.height);
+    const height = mode === 'body' ? Math.max(box.height, room ?? 0) : Math.max(box.height, result.height);
     const rectangle = el('Rectangle', { Name: this.itemNames.make(obj.name || 'Subreport') },
       result.items.length ? el('ReportItems', ...result.items) : null,
       el('KeepTogether', 'true'),
@@ -1184,7 +1201,7 @@ class RdlBuilder {
     // #AXISLABEL is the category's text (#VALX would give its position for text categories).
     const labelText = { 1: '#AXISLABEL', 2: valueKeyword, 3: `#AXISLABEL ${valueKeyword}` }[chart.dataLabels?.kind ?? 0];
     const dataLabel = labelText
-      ? el('ChartDataLabel', el('Style', el('FontSize', '6pt')), el('Label', labelText), el('Visible', 'true'))
+      ? el('ChartDataLabel', el('Style', el('FontFamily', 'Arial'), el('FontSize', '5.5pt'), el('FontWeight', 'Normal')), el('Label', labelText), el('Visible', 'true'))
       : el('ChartDataLabel', el('Style'));
     const isPie = style.type === 'Shape';
     const series = values.map((v, i) => {
@@ -1195,15 +1212,19 @@ class RdlBuilder {
           dataLabel,
           el('Style', barPerPoint ? el('Color', `=Code.CrPointColor(${vbString(chartName)}, ${categoryExpression})`) : null),
           el('ChartMarker', style.markers ? el('Type', 'Auto') : null, el('Style')),
+          // Crystal's 3D pies draw their slices pulled out from the centre.
+          isPie && style.threeD ? el('CustomProperties', el('CustomProperty', el('Name', 'Exploded'), el('Value', 'True'))) : null,
           el('DataElementOutput', 'Output'))),
         el('Type', style.type),
         style.subtype ? el('Subtype', style.subtype) : null,
         // Crystal places pie labels outside the slices, with a line to each.
         isPie && labelText ? el('CustomProperties',
           el('CustomProperty', el('Name', 'PieLabelStyle'), el('Value', 'Outside')),
-          el('CustomProperty', el('Name', 'PieLineColor'), el('Value', 'Black'))) : null,
+          el('CustomProperty', el('Name', 'PieLineColor'), el('Value', 'Black')),
+          // Crystal's leader lines are short.
+          el('CustomProperty', el('Name', '3DLabelLineSize'), el('Value', '40'))) : null,
         // Crystal draws lines solid and clearly visible.
-        isLine ? el('Style', el('Border', el('Width', '1.5pt'))) : el('Style'),
+        isLine ? el('Style', el('Border', el('Width', '2.25pt'))) : el('Style'),
         el('ChartEmptyPoints', el('Style'), el('ChartMarker', el('Style')), el('ChartDataLabel', el('Style'))),
         el('ValueAxisName', 'Primary'),
         el('CategoryAxisName', 'Primary'),
@@ -1215,7 +1236,9 @@ class RdlBuilder {
         ? el('ChartMember',
           el('Group', { Name: this.itemNames.make(`${chartName}_Category`) }, el('GroupExpressions', el('GroupExpression', `=${categoryExpression}`))),
           // Crystal's order: as the data comes (no sort), or ascending/descending by value.
-          chart.categoryOrder === 2 ? null : el('SortExpressions', el('SortExpression',
+          // "In original order" is the order of the records after the report's record sort, which a chart group
+          // would otherwise lose: sorted by the record sort fields (by the first record of each category).
+          chart.categoryOrder === 2 ? this.recordOrder() : el('SortExpressions', el('SortExpression',
             el('Value', `=${this.categorySortValue(category!, categoryExpression)}`),
             chart.categoryOrder === 1 ? el('Direction', 'Descending') : null)),
           el('Label', `=${categoryExpression}`))
@@ -1230,19 +1253,24 @@ class RdlBuilder {
           el('Rotation', isPie ? '0' : '20'), el('Inclination', isPie ? '50' : '20'),
           isPie ? el('DepthRatio', '150') : null, el('Shading', 'Real')) : null,
         // Crystal draws pies large, with their labels around them.
-        isPie ? el('ChartInnerPlotPosition', el('Top', '12'), el('Left', '22'), el('Height', '76'), el('Width', '56')) : null,
+        // Crystal's chart fills its object: the chart area takes the whole chart, less the legend's strip.
+        el('ChartElementPosition', el('Top', '1'), el('Left', '1'),
+          el('Height', chart.legend?.visible && [2, 3].includes(chart.legend.position) ? '86' : '98'),
+          el('Width', chart.legend?.visible && [0, 1].includes(chart.legend.position) ? '80' : '98')),
+        isPie ? el('ChartInnerPlotPosition', el('Top', '12'), el('Left', '25'), el('Height', '76'), el('Width', '50')) : null,
         // Crystal's plot area is light grey behind bars and lines.
         el('Style', isPie ? null : el('BackgroundColor', '#D9D9D9')))),
       // The legend as Crystal has it (shown or not, and where); a bar per colour has none by default.
       el('ChartLegends', el('ChartLegend', { Name: 'Default' },
         (chart.legend ? !chart.legend.visible : barPerPoint) ? el('Hidden', 'true') : null,
-        el('Style', el('FontSize', '7pt')),
+        // Crystal frames its legend with a thin line.
+        el('Style', el('Border', el('Color', 'Black'), el('Style', 'Solid'), el('Width', '0.5pt')), el('FontSize', '7pt')),
         el('Position', LEGEND_POSITIONS[chart.legend?.position ?? 0] ?? 'RightCenter'),
         el('AutoFitTextDisabled', 'true'))),
       chart.title ? el('ChartTitles', el('ChartTitle', { Name: 'Default' }, el('Caption', chart.title), el('Style', el('FontWeight', 'Bold')))) : null,
       // Crystal's chart colours, in its order.
       el('Palette', 'Custom'),
-      el('ChartCustomPaletteColors', ...CRYSTAL_PALETTE.map((c) => el('ChartCustomPaletteColor', c))),
+      el('ChartCustomPaletteColors', ...(isPie ? CRYSTAL_PIE_PALETTE : CRYSTAL_PALETTE).map((c) => el('ChartCustomPaletteColor', c))),
       el('ChartBorderSkin', el('Style')),
       // Crystal prints nothing for a chart without data.
       el('ChartNoDataMessage', { Name: 'NoDataMessage' }, el('Caption', ''), el('Style')),
@@ -2417,7 +2445,7 @@ class RdlBuilder {
    * subreports grow. Here it becomes a rectangle with the box's border holding what it encloses, so it grows with
    * them; a line in it along a subreport's side becomes that side's border. Returns the spans left to draw.
    */
-  private growAround<T extends { obj: ReportObject; box: Box; area: string; hidden?: string }>(items: XmlElement[], spans: T[]): T[] {
+  private growAround<T extends { obj: ReportObject; box: Box; area: string; hidden?: string; section?: SectionInfo }>(items: XmlElement[], spans: T[]): T[] {
     const left: T[] = [];
     const lines = spans.filter((s) => this.runOn.get(s.obj)?.kind === 'line');
     const used = new Set<T>();
@@ -2425,9 +2453,14 @@ class RdlBuilder {
       const original = this.runOn.get(span.obj);
       if (original?.kind !== 'box') continue;
       const top = span.box.top;
-      const bottom = top + twipsToInches(original.size?.height ?? 0);
       const l = span.box.left;
       const r = l + span.box.width;
+      // The box holds what its own section places; the sections below follow it (Crystal moves them down as the
+      // subreports grow, and so does SSRS once they are outside the box rather than drawn inside it).
+      const sectionBottom = span.section && span.section.height !== undefined
+        ? top - twipsToInches(original.position?.y ?? 0) + twipsToInches(span.section.height)
+        : top + twipsToInches(original.size?.height ?? 0);
+      const bottom = sectionBottom;
       const inside = (item: XmlElement) => {
         const t = itemNumber(item, 'Top');
         return t >= top - 0.01 && t < bottom && itemNumber(item, 'Left') >= l - 0.05 && itemRight(item) <= r + 0.05;
@@ -2527,21 +2560,34 @@ class RdlBuilder {
       const first = placeAll(pageOne.first, 'Page Header (page 1)').items.flatMap((item) => flattenRectangle(item));
       const inHeader = first.filter((item) => itemNumber(item, 'Top') < later - 0.005);
       const height = Math.max(later, ...inHeader.map((item) => itemNumber(item, 'Top') + itemNumber(item, 'Height')));
-      const inBody = first.filter((item) => !inHeader.includes(item)).map((item) => moveItem(item, -height, 0));
+      // The rest starts the body, keeping its spacing (moved up as one, by no more than the header's height).
+      const rest = first.filter((item) => !inHeader.includes(item));
+      const shift = Math.min(height, ...rest.map((item) => itemNumber(item, 'Top')));
+      const inBody = rest.map((item) => moveItem(item, -shift, 0));
+      // Items both versions have alike (a logo, a title) are placed once, on every page; only the differences
+      // are shown by page number, so no two items are stacked at the same place.
+      const laterItems = header.items.flatMap((item) => flattenRectangle(item));
+      const sameAs = (a: XmlElement, b: XmlElement) => withoutName(a) === withoutName(b);
+      const shared = laterItems.filter((a) => inHeader.some((b) => sameAs(a, b)));
       header = {
         items: [
-          ...header.items.map((item) => hideWhen(item, 'Globals!PageNumber = 1')),
-          ...inHeader.map((item) => hideWhen(item, 'Globals!PageNumber > 1')),
+          ...shared,
+          ...laterItems.filter((a) => !shared.includes(a)).map((item) => hideWhen(item, 'Globals!PageNumber = 1')),
+          ...inHeader.filter((b) => !shared.some((a) => sameAs(a, b))).map((item) => hideWhen(item, 'Globals!PageNumber > 1')),
         ],
         height,
       };
       firstPage = { items: inBody, height: Math.max(0, ...inBody.map((item) => itemNumber(item, 'Top') + itemNumber(item, 'Height'))) };
       this.note('Page header', 'Crystal prints a different page header on page 1: both versions are in the SSRS page header, each shown on its pages; what of page 1\'s does not fit the page header\'s height starts the body of page 1');
     }
+    // Page header and footer items that never show (Crystal's suppressed helper fields that set shared
+    // variables) are left out: they print nothing, and stacked under visible items they can disturb the layout.
+    header = { ...header, items: withoutHidden(header.items) };
     const body = this.bodyItems(areas, firstPage.height);
     const bodyItems = [...firstPage.items, ...body.items];
     const top = body.height;
-    const footer = placeAll(areas.pageFooter, 'Page Footer');
+    const footerPlaced = placeAll(areas.pageFooter, 'Page Footer');
+    const footer = { ...footerPlaced, items: withoutHidden(footerPlaced.items) };
 
     let width = 0;
     for (const item of [...bodyItems, ...header.items, ...footer.items]) width = Math.max(width, itemRight(item));
@@ -2827,6 +2873,25 @@ function withBorder(item: XmlElement, side: 'LeftBorder' | 'RightBorder', border
   };
 }
 
+/** The item as XML without its name (for finding identical items). */
+function withoutName(item: XmlElement): string {
+  return toXml({ ...item, attributes: {} });
+}
+
+/** Items (and items inside rectangles) without those hidden for good ("=True"). */
+function withoutHidden(items: XmlElement[]): XmlElement[] {
+  const hiddenForGood = (item: XmlElement) => item.children.some((c) => typeof c === 'object' && c !== null && (c as XmlElement).name === 'Visibility'
+    && (c as XmlElement).children.some((h) => typeof h === 'object' && h !== null && (h as XmlElement).name === 'Hidden' && /^=?true$/i.test(String((h as XmlElement).children[0] ?? ''))));
+  return items.filter((item) => !hiddenForGood(item)).map((item) => (item.name !== 'Rectangle' ? item : {
+    ...item,
+    children: item.children.flatMap((c) => {
+      if (typeof c !== 'object' || c === null || (c as XmlElement).name !== 'ReportItems') return [c];
+      const kept = withoutHidden((c as XmlElement).children.filter((x): x is XmlElement => typeof x === 'object' && x !== null));
+      return kept.length ? [{ ...(c as XmlElement), children: kept }] : [];
+    }),
+  }));
+}
+
 /** A copy of a report item hidden when the expression (without "=") is true, besides when it already was. */
 function hideWhen(item: XmlElement, expression: string): XmlElement {
   const visibility = item.children.find((c): c is XmlElement => typeof c === 'object' && c !== null && (c as XmlElement).name === 'Visibility');
@@ -2924,6 +2989,9 @@ const LEGEND_POSITIONS: Record<number, string> = { 0: 'RightCenter', 1: 'LeftCen
 
 /** Crystal's default chart colours, in the order it gives them to series, slices and bars. */
 const CRYSTAL_PALETTE = ['#3E6A9E', '#F0A04B', '#2E9B6E', '#E0532B', '#A3335F', '#F2CB4C', '#2A7F94', '#E8735F', '#4A7A35', '#C42E4D'];
+
+/** Crystal's default pie colours: as for bars, with medium grey in green's place. */
+const CRYSTAL_PIE_PALETTE = CRYSTAL_PALETTE.map((c) => (c === '#2E9B6E' ? '#999999' : c));
 
 /** Custom code giving each category of a chart the next Crystal palette colour, in the order categories are drawn. */
 const POINT_COLOR_CODE = [

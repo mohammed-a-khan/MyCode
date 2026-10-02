@@ -918,8 +918,7 @@ describe('shared variables from a page-header subreport', () => {
     assert.ok(footer.includes('First(Fields!owner_name.Value, "DataSet_Main_Subdocument_1")'), 'the footer reads the header subreport\'s data');
     assert.ok(footer.includes('Globals!PageNumber'), 'the page number is in the footer');
     assert.ok(!rdl.includes('<Field Name="F_OwnerName">'), 'not a dataset field (computed before the header runs)');
-    const setter = rdl.slice(rdl.indexOf('<Textbox Name="setter1">'));
-    assert.ok(setter.slice(0, setter.indexOf('</Textbox>')).includes('<Hidden>=True</Hidden>'), 'a suppressed item is hidden');
+    assert.ok(!rdl.includes('<Textbox Name="setter1">'), 'a suppressed helper field in the page header is left out (it prints nothing)');
     assert.ok(review.some((r) => r.item === 'Shared variable ownername'));
   });
 
@@ -1191,7 +1190,7 @@ describe('chart options', () => {
     const pie = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 3, graphType: 31 }), source, { reportName: 'C', subreport: true }).rdl;
     assert.ok(/<Inclination>50<\/Inclination>/.test(pie) && pie.includes('<AllowOutSidePlotArea>True</AllowOutSidePlotArea>'));
     const line = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 1, graphType: 13 }), source, { reportName: 'C', subreport: true }).rdl;
-    assert.ok(line.includes('<IncludeZero>false</IncludeZero>') && line.includes('<Width>1.5pt</Width>') && line.includes('<Interval>1</Interval>'));
+    assert.ok(line.includes('<IncludeZero>false</IncludeZero>') && line.includes('<Width>2.25pt</Width>') && line.includes('<Interval>1</Interval>'));
   });
 
   it('starts a chart below a title placed over its top', () => {
@@ -1206,6 +1205,10 @@ describe('chart options', () => {
     const original = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', categoryOrder: 2, family: 0, graphType: 0 }), source, { reportName: 'C', subreport: true }).rdl;
     const categories = original.slice(original.indexOf('<ChartCategoryHierarchy>'), original.indexOf('</ChartCategoryHierarchy>'));
     assert.ok(!categories.includes('<SortExpressions>'), 'original order: no sort');
+    const sorted = chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', categoryOrder: 2, family: 0, graphType: 0 });
+    sorted.sorts = [{ field: 'T.Share', descending: true, bySummary: false }];
+    const recordOrder = convertToRdl(sorted, source, { reportName: 'C', subreport: true }).rdl;
+    assert.ok(/<ChartCategoryHierarchy>[\s\S]*<Value>=First\(Fields!Share\.Value\)<\/Value>\s*<Direction>Descending/.test(recordOrder), 'original order follows the record sort');
     const descending = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', categoryOrder: 1, family: 0, graphType: 0 }), source, { reportName: 'C', subreport: true }).rdl;
     assert.ok(/<ChartCategoryHierarchy>[\s\S]*<Direction>Descending<\/Direction>/.test(descending));
   });
@@ -1499,6 +1502,18 @@ describe('subreports in the report footer', () => {
     assert.ok(held.includes('Left') && held.includes('Right'), `the box holds both subreports: ${held.join(', ')}`);
     const leftPanel = rdl.slice(rdl.indexOf('<Rectangle Name="Left">'));
     assert.ok(leftPanel.slice(0, leftPanel.indexOf('<Rectangle Name="Right">')).includes('<RightBorder>'), 'the divider is the left panel\'s right border');
+  });
+
+  it('keeps the next section\'s subreport below a box that runs on past its section, not inside it', () => {
+    const definition = main([
+      { kind: 'box', name: 'Panel', position: { x: 100, y: 60 }, size: { width: 8200, height: 1400 }, border: { sides: [1, 1, 1, 1] } },
+      sub('Left', 1, 150),
+    ]);
+    definition.layout[3].sections.push({ name: 'Next', height: 400, objects: [{ ...sub('Below', 2, 150), position: { x: 150, y: 50 } }] });
+    const { rdl } = convertToRdl(definition, source, { reportName: 'M', subreports });
+    const panelBox = descendants(parseXml(rdl)).find((r) => r.name === 'Rectangle' && r.attributes.Name === 'Panel')!;
+    const held = childElements(child(panelBox, 'ReportItems')!).map((e) => e.attributes.Name);
+    assert.ok(held.includes('Left') && !held.includes('Below'), held.join(', '));
   });
 
   it('hides a subreport by its own suppress formula', () => {
