@@ -1720,17 +1720,24 @@ describe('formulas without data, page breaks by formula and the default font', (
       position: { x: 0, y: 0 }, size: { width: 3000, height: 1080 } }], {}, { height: 1100 }), source, { reportName: 'R' });
     const at = rdl.indexOf('<Textbox Name="Contact">');
     const value = /<Value>([^<]*)<\/Value>/.exec(rdl.slice(at))![1];
-    assert.equal(value, '="Call us" &amp; vbCrLf &amp; "Our desk" &amp; vbCrLf &amp; "Web " &amp; First(Fields!Name.Value, "DataSet1")');
+    assert.equal(value, '="Call us" &amp; vbCrLf &amp; "Our desk" &amp; vbCrLf &amp; "Web " &amp; RTrim(First(Fields!Name.Value, "DataSet1"))', 'a padded text field is trimmed');
   });
-  it('joins the boxes under a row that starts a new page to that row', () => {
-    const box = (name: string, x: number) => ({ kind: 'box', name, position: { x, y: 40 }, size: { width: 2000, height: 1000 }, border: { sides: [1, 1, 1, 1] as [number, number, number, number] } });
-    const definition = report([box('Top1', 100), box('Top2', 2166)], {}, { height: 1080, newPageBefore: true });
-    definition.layout[0].sections.push({ name: 'Next', height: 1080, objects: [box('Low1', 100), box('Low2', 2180)] });
+  it('joins the boxes under a row that starts a new page to that row, their column lines running straight on', () => {
+    const box = (name: string, x: number, w: number) => ({ kind: 'box', name, position: { x, y: 40 }, size: { width: w, height: 1000 }, border: { sides: [1, 1, 1, 1] as [number, number, number, number] } });
+    const definition = report([box('Top1', 140, 5291), box('Top2', 5497, 5291), box('Top3', 10854, 4225)], {}, { height: 1080, newPageBefore: true });
+    definition.layout[0].sections.push({ name: 'Next', height: 1080, objects: [box('Low1', 140, 5300), box('Low2', 5520, 5295), box('Low3', 10854, 4235)] });
     const { rdl } = convertToRdl(definition, source, { reportName: 'R' });
     const items = descendants(parseXml(rdl));
-    const sides = (name: string) => descendants(child(items.find((e) => e.attributes.Name === name)!, 'Style')!).map((e) => e.name);
-    assert.ok(sides('Low1').includes('TopBorder') && sides('Low2').includes('TopBorder') && sides('Low2').includes('LeftBorder'), `${sides('Low1')} / ${sides('Low2')}`);
+    const get = (name: string) => items.find((e) => e.attributes.Name === name)!;
+    const num = (name: string, prop: string) => parseFloat(child(get(name), prop)!.children.join(''));
+    const sides = (name: string) => descendants(child(get(name), 'Style')!).map((e) => e.name);
+    for (const n of [1, 2, 3]) {
+      assert.ok(sides(`Low${n}`).includes('TopBorder'), `Low${n} shares the line above it`);
+      assert.equal(num(`Low${n}`, 'Left'), num(`Top${n}`, 'Left'), `column ${n} left edge`);
+      assert.equal(num(`Low${n}`, 'Width'), num(`Top${n}`, 'Width'), `column ${n} width`);
+    }
   });
+
   it('takes the font most of the text uses as the report default', () => {
     const { rdl } = convertToRdl(report([]), source, { reportName: 'R' });
     assert.ok(rdl.includes('<df:DefaultFontFamily>Times New Roman</df:DefaultFontFamily>'));
