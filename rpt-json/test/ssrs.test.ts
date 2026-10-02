@@ -1213,6 +1213,15 @@ describe('chart options', () => {
     assert.ok(/<ChartCategoryHierarchy>[\s\S]*<Direction>Descending<\/Direction>/.test(descending));
   });
 
+  it('labels no empty pie slice, and draws each line thick with its own marker and Crystal\'s line colours', () => {
+    const pie = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 3, graphType: 31, dataLabels: { kind: 3, format: 7 } }), source, { reportName: 'C', subreport: true }).rdl;
+    assert.ok(/<ChartDataLabel>[\s\S]*<Visible>=CDbl\(IIf\(IsNothing\(Sum\(Fields!Share\.Value\)\), 0, Sum\(Fields!Share\.Value\)\)\) &lt;&gt; 0<\/Visible>/.test(pie), 'zero slices unlabelled');
+    const line = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 1, graphType: 13 }), source, { reportName: 'C', subreport: true }).rdl;
+    const point = line.slice(line.indexOf('<ChartDataPoint>'), line.indexOf('</ChartDataPoint>'));
+    assert.ok(point.includes('<Width>2.25pt</Width>') && point.includes('<Size>6pt</Size>'), point);
+    assert.ok(/<ChartCustomPaletteColor>#3E6A9E<\/ChartCustomPaletteColor>\s*<ChartCustomPaletteColor>#E02C2C</.test(line), 'blue, then red');
+  });
+
   it('puts the legend where Crystal does and leaves points unlabelled when it does', () => {
     const { rdl } = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 1, graphType: 13,
       legend: { visible: true, position: 2 }, dataLabels: { kind: 0, format: 0 } }), source, { reportName: 'C', subreport: true });
@@ -1464,6 +1473,25 @@ describe('tables framed in a group header', () => {
     const frame = rdl.slice(rdl.indexOf('<Rectangle Name="Frame">'), rdl.indexOf('</Rectangle>', rdl.indexOf('<Rectangle Name="Frame">')));
     assert.ok(frame.includes('<TopBorder>') && !frame.includes('<BottomBorder>'), 'the cut box has no bottom edge across the next row');
   });
+  it('reaches out to its frame and closes it at the foot of every page', () => {
+    const { rdl } = convertToRdl(definition(), source, { reportName: 'G', subreport: true });
+    const tablix = descendants(parseXml(rdl)).find((e) => e.name === 'Tablix')!;
+    assert.equal(child(tablix, 'Left')!.children.join(''), '0.031in', 'from the frame\'s left side');
+    assert.ok(descendants(child(tablix, 'Style')!).some((e) => e.name === 'BottomBorder'), 'the table\'s own bottom border');
+  });
+
+  it('draws the column line as a cell border in a row laid out freely, so it reaches down a row that grows', () => {
+    const def = definition();
+    const detail = def.layout.find((a) => a.name === 'DetailArea1')!.sections[0];
+    detail.height = 420;
+    detail.objects.push({ ...field('NoteCell', 'T.Kind', 120), position: { x: 120, y: 210 } });
+    const { rdl } = convertToRdl(def, source, { reportName: 'G', subreport: true });
+    const row = descendants(parseXml(rdl)).filter((e) => e.name === 'TablixRow').find((r) => descendants(r).some((e) => e.attributes.Name === 'NoteCell'))!;
+    const rectangles = childElements(child(row, 'TablixCells')!).map((c) => child(child(c, 'CellContents')!, 'Rectangle')!);
+    assert.equal(rectangles.length, 3, 'a cell per column');
+    assert.ok(descendants(child(rectangles[1], 'Style')!).some((e) => e.name === 'LeftBorder'), 'the column line is the cell\'s border');
+    assert.ok(!descendants(row).some((e) => e.name === 'Line'), 'no line of fixed height');
+  });
 });
 
 describe('subreports in the report footer', () => {
@@ -1514,6 +1542,26 @@ describe('subreports in the report footer', () => {
     const panelBox = descendants(parseXml(rdl)).find((r) => r.name === 'Rectangle' && r.attributes.Name === 'Panel')!;
     const held = childElements(child(panelBox, 'ReportItems')!).map((e) => e.attributes.Name);
     assert.ok(held.includes('Left') && !held.includes('Below'), held.join(', '));
+  });
+
+  it('keeps the height of the subreport\'s report header, whatever it shows', () => {
+    const tall: ReportDefinition = { ...panel, layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 2880, objects: [{ kind: 'text', name: 'Note', text: 'Note', position: { x: 0, y: 1300 }, size: { width: 2000, height: 220 } }] }] },
+      ...panel.layout.slice(1),
+    ] };
+    const { rdl } = convertToRdl(main([sub('Tall', 1, 150)]), source, { reportName: 'M', subreports: new Map([[1, { name: 'M_Subdocument_1', links: [], definition: tall, dataSource: source }]]) });
+    const rectangle = descendants(parseXml(rdl)).find((r) => r.name === 'Rectangle' && r.attributes.Name === 'Tall')!;
+    assert.equal(child(rectangle, 'Height')!.children.join(''), '2in');
+  });
+
+  it('prints what a formula on a database field suppresses when there are no records, as Crystal does', () => {
+    const formulas = [{ name: 'Object_Visibility', index: 0, kind: 'conditionalFormat' as const, text: 'Count ({T.Label}) = 0', referencedFields: ['T.Label'] }];
+    const withTitle: ReportDefinition = { ...panel, formulas, formulaTexts: [formulas[0].text], layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 400, objects: [{ kind: 'text', name: 'Heading', text: 'Heading', position: { x: 0, y: 0 }, size: { width: 2000, height: 220 }, conditions: { suppress: { name: 'Object_Visibility', index: 0 } } }] }] },
+      ...panel.layout.slice(1),
+    ] };
+    const { rdl } = convertToRdl(main([sub('Titled', 1, 150)]), source, { reportName: 'M', subreports: new Map([[1, { name: 'M_Subdocument_1', links: [], definition: withTitle, dataSource: source }]]) });
+    assert.ok(/<Hidden>=CountRows\("DataSet_M_Subdocument_1"\) &gt; 0 AndAlso \(/.test(rdl), rdl.slice(rdl.indexOf('<Textbox Name="Heading">'), rdl.indexOf('<Textbox Name="Heading">') + 1500));
   });
 
   it('hides a subreport by its own suppress formula', () => {

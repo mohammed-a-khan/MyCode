@@ -953,7 +953,9 @@ function buildLayout(records: RecordNode[]): AreaInfo[] {
         if (object.chart && field) {
           // The bytes after the field: the sixth is the sort order (0 ascending, 1 descending, 2 original order).
           const run = tokenize(ownBytes(record)).find((t): t is { bytes: Uint8Array } => 'bytes' in t && t.bytes.length >= 6);
-          const order = run && run.bytes[5] <= 2 ? run.bytes[5] : undefined;
+          // A third byte of 1 marks a group sorted in ascending order (seen where Crystal sorts the categories
+          // alphabetically although the sixth byte says 2).
+          const order = run && run.bytes[2] === 1 ? 0 : run && run.bytes[5] <= 2 ? run.bytes[5] : undefined;
           if (!object.chart.onChangeOf) {
             object.chart.onChangeOf = field;
             if (order !== undefined) object.chart.categoryOrder = order;

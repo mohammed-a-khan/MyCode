@@ -127,6 +127,10 @@ export function layoutSummary(doc: CfbDocument, find: string[]): string {
       }
     }
     describe(report.definition!, true);
+    // How its records are sorted (record sorts, then group sorts / Top N by summary).
+    const sorts = report.definition!.sorts ?? report.definition!.sortFields.map((field) => ({ field, descending: false, bySummary: false }));
+    if (sorts.length) lines.push(`  sorts: ${sorts.map((s) => `${shownField(s.field)}${s.descending ? ' desc' : ' asc'}${s.bySummary ? ' (by summary)' : ''}`).join(', ')}`);
+    if (report.definition!.groups.length) lines.push(`  groups: ${report.definition!.groups.map((g) => shownField(g)).join(', ')}`);
   }
   if (!lines.length) return `No report or subreport contains ${find.map((f) => `"${f}"`).join(' or ')}.\n`;
   return `${lines.join('\n').trim()}\n\n(Positions and sizes in twips; names and text are replaced by S1, N1, F1, ...; [text] is a text you searched for.)\n`;
