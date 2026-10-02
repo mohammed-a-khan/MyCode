@@ -785,14 +785,19 @@ class RdlBuilder {
     }
     const border = backColor ? { ...(obj?.border ?? { sides: [0, 0, 0, 0] as [number, number, number, number] }), background: backColor } : obj?.border;
     const framed = !!obj?.border && obj.border.sides.every((side) => side > 0);
+    // Paragraphs aligned each their own way (a plain text, not a formula's value).
+    const paragraphs = obj && !value.startsWith('=Fields') ? textParagraphs(obj)?.map((p) => ({
+      value: p.lines.length > 1 ? `=${p.lines.map((l) => vbString(l)).join(' & vbCrLf & ')}` : (p.lines[0].startsWith('=') ? `=${vbString(p.lines[0])}` : p.lines[0]),
+      align: p.align,
+    })) : undefined;
     return el('Textbox', { Name: name },
       // A page header or footer keeps its size, as Crystal's does: a text box growing there pushes what is
       // below it down (on to a rule drawn under it).
       el('CanGrow', scope === 'page' ? 'false' : 'true'),
       el('KeepTogether', 'true'),
-      el('Paragraphs', el('Paragraph',
-        el('TextRuns', el('TextRun', el('Value', value), this.textRunStyle(obj, format, scope))),
-        el('Style', obj?.align ? el('TextAlign', TEXT_ALIGN[obj.align]) : null))),
+      el('Paragraphs', ...(paragraphs ?? [{ value, align: obj?.align }]).map((p) => el('Paragraph',
+        el('TextRuns', el('TextRun', el('Value', p.value), this.textRunStyle(obj, format, scope))),
+        el('Style', p.align ? el('TextAlign', TEXT_ALIGN[p.align]) : null)))),
       hyperlink ? el('ActionInfo', el('Actions', el('Action', el('Hyperlink', hyperlink)))) : null,
       toolTip ? el('ToolTip', toolTip) : null,
       box ? el('Top', inches(box.top)) : null,
@@ -3149,26 +3154,40 @@ function paddedCentred(obj: ReportObject): boolean {
   return obj.size.height >= lineHeight * 1.8 && runs > 0 && (/^ {2,}\S/.test(text) || runs >= 2);
 }
 
-function wrapSpaces(text: string, obj: ReportObject, part = false): string {
+function wrapSpaces(text: string, obj: ReportObject, part = false, align = obj.align): string {
   const lineHeight = (obj.style?.size ?? 10) * 20 * 1.2;
   if (!obj.size || obj.size.height < lineHeight * 1.8) return text.replace(/\u00a0/g, ' ');
-  const centred = obj.align === 'center';
-  // Runs of spaces, non-breaking ones included (SSRS keeps those together on one line).
-  // Line ends of any kind (a lone carriage return too), tabs and wide or non-breaking spaces.
-  // Spaces centring the first line are not a line of their own.
-  if (centred && !part) text = text.replace(/^[ \t\u00a0]+/, '');
+  const centred = align === 'center' || align === 'right';
+  // Line ends of any kind (a lone carriage return too), tabs and wide or non-breaking spaces (SSRS keeps those
+  // together on one line).
   const lines = text.replace(/\r\n?/g, '\n').replace(/[\t\u00a0\u2000-\u200a\u202f\u3000]/g, ' ').replace(/[\u200b\ufeff]/g, '')
-    .split('\n').map((line) => line.replace(/ {3,}/g, '\n')).join('\n').split('\n')
-    // Centred text loses the spaces at its lines' ends (they would push it aside); a piece between embedded
-    // fields keeps those at its own ends, where it meets a field.
+    .split('\n')
+    // Crystal drops the spaces where it wraps a line: spaces at a line's end are dropped (they would add a blank
+    // line), and so are those starting a centred line (they would push it aside); a run of spaces between words
+    // pushed the next words on to a new line. A piece between embedded fields keeps the spaces at its own ends,
+    // where it meets a field.
     .map((line, i, all) => {
       let out = line;
       if (!part || i < all.length - 1) out = out.replace(/\s+$/, '');
       if (centred && (!part || i > 0)) out = out.replace(/^\s+/, '');
-      return out;
+      return out.replace(/(\S) {3,}(?=\S)/g, '$1\n');
     });
   const joined = lines.join('\n');
   return part ? joined : joined.replace(/\n+$/, '');
+}
+
+/**
+ * A text object's paragraphs with their own alignments, where they differ (Crystal aligns each paragraph on its
+ * own): each paragraph's lines (as wrapSpaces gives them) and alignment. Undefined for one alignment throughout,
+ * or text with embedded fields.
+ */
+function textParagraphs(obj: ReportObject): { lines: string[]; align?: ReportObject['align'] }[] | undefined {
+  if (obj.kind !== 'text' || obj.embeddedFields?.length || !obj.paragraphAligns || obj.paragraphAligns.length < 2) return undefined;
+  const parts = (obj.text ?? '').split('\n');
+  if (parts.length !== obj.paragraphAligns.length) return undefined;
+  const aligns = obj.paragraphAligns.map((a) => a ?? obj.align);
+  if (aligns.every((a) => (a ?? 'left') === (aligns[0] ?? 'left'))) return undefined;
+  return parts.map((text, i) => ({ align: aligns[i], lines: wrapSpaces(text, obj, false, aligns[i]).split('\n') }));
 }
 
 function flattenRectangle(item: XmlElement): XmlElement[] {
@@ -3294,6 +3313,12 @@ function joinBoxes(items: XmlElement[]): XmlElement[] {
     }
   }
   return items.map((item) => {
+    // Boxes held in a rectangle of their own (a section starting a new page) are joined there.
+    if (item.name === 'Rectangle' && !framed(item) && !changes.has(item)) {
+      return { ...item, children: item.children.map((e) => (typeof e === 'object' && e !== null && (e as XmlElement).name === 'ReportItems'
+        ? { ...(e as XmlElement), children: joinBoxes((e as XmlElement).children.filter((x): x is XmlElement => typeof x === 'object' && x !== null)) }
+        : e)) };
+    }
     const c = changes.get(item);
     if (!c) return item;
     const p = pos(item);

@@ -1699,6 +1699,20 @@ describe('formulas without data, page breaks by formula and the default font', (
     assert.ok(sides('B').includes('LeftBorder') && Math.abs(num('B', 'Left') - (num('A', 'Left') + num('A', 'Width'))) < 0.002, 'B moves to A');
     assert.ok(sides('C').includes('TopBorder'), 'C leaves its top to A');
   });
+  it('joins framed boxes in a section that starts a new page too', () => {
+    const box = (name: string, x: number) => ({ kind: 'box', name, position: { x, y: 0 }, size: { width: 2000, height: 1000 }, border: { sides: [1, 1, 1, 1] as [number, number, number, number] } });
+    const { rdl } = convertToRdl(report([box('P', 100), box('Q', 2166)], {}, { height: 1100, newPageBefore: true }), source, { reportName: 'R' });
+    const q = descendants(parseXml(rdl)).find((e) => e.attributes.Name === 'Q')!;
+    assert.ok(descendants(child(q, 'Style')!).some((e) => e.name === 'LeftBorder'));
+  });
+  it('aligns each paragraph of a text as Crystal does, without blank lines from trailing spaces', () => {
+    const { rdl } = convertToRdl(report([{ kind: 'text', name: 'Contact', text: 'First line\nSecond line      \nThird', align: 'left', paragraphAligns: ['left', 'center', 'center'],
+      border: { sides: [1, 1, 1, 1] }, position: { x: 0, y: 0 }, size: { width: 3000, height: 1080 } }], {}, { height: 1100 }), source, { reportName: 'R' });
+    const box = descendants(parseXml(rdl)).find((e) => e.attributes.Name === 'Contact')!;
+    const paragraphs = descendants(box).filter((e) => e.name === 'Paragraph');
+    assert.deepEqual(paragraphs.map((p) => descendants(p).find((e) => e.name === 'Value')!.children.join('')), ['First line', 'Second line', 'Third']);
+    assert.deepEqual(paragraphs.map((p) => descendants(p).find((e) => e.name === 'TextAlign')?.children.join('')), ['Left', 'Center', 'Center']);
+  });
   it('takes the font most of the text uses as the report default', () => {
     const { rdl } = convertToRdl(report([]), source, { reportName: 'R' });
     assert.ok(rdl.includes('<df:DefaultFontFamily>Times New Roman</df:DefaultFontFamily>'));
