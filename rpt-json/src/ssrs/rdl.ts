@@ -784,8 +784,10 @@ class RdlBuilder {
     if (hidden) this.note(`Section ${section.name}`, 'its suppress condition was applied to each item as a Hidden expression');
     const items: XmlElement[] = [];
     let bottom = 0;
-    // Boxes first: SSRS draws items in document order, so they stay behind the text as in Crystal.
-    const ordered = [...section.objects.filter((o) => o.kind === 'box'), ...section.objects.filter((o) => o.kind !== 'box')];
+    // Boxes first, then charts and pictures: SSRS draws items in document order, so they stay behind the text
+    // (a chart title placed over a chart's top stays readable), as in Crystal.
+    const layer = (o: ReportObject) => (o.kind === 'box' ? 0 : o.kind === 'chart' || o.kind === 'picture' ? 1 : 2);
+    const ordered = [...section.objects].sort((a, b) => layer(a) - layer(b));
     for (const obj of ordered) {
       const box = this.boxOf(obj, top);
       if (scope === 'body' && this.runOn.has(obj)) {
@@ -1100,7 +1102,8 @@ class RdlBuilder {
     // Data labels as Crystal shows them: the category, the value (in the chart's number format), or both.
     const labelFormat = chart.dataLabels ? CHART_NUMBER_FORMATS[chart.dataLabels.format] : undefined;
     const valueKeyword = labelFormat ? `#VALY{${labelFormat}}` : '#VALY';
-    const labelText = { 1: '#VALX', 2: valueKeyword, 3: `#VALX ${valueKeyword}` }[chart.dataLabels?.kind ?? 0];
+    // #AXISLABEL is the category's text (#VALX would give its position for text categories).
+    const labelText = { 1: '#AXISLABEL', 2: valueKeyword, 3: `#AXISLABEL ${valueKeyword}` }[chart.dataLabels?.kind ?? 0];
     const dataLabel = labelText
       ? el('ChartDataLabel', el('Style', el('FontSize', '7pt')), el('Label', labelText), el('Visible', 'true'))
       : el('ChartDataLabel', el('Style'));

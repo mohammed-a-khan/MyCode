@@ -1156,7 +1156,7 @@ describe('chart options', () => {
   it('labels pie slices outside with the category and the value as a percentage, without a legend', () => {
     const { rdl } = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 3, graphType: 31,
       legend: { visible: false, position: 0 }, dataLabels: { kind: 3, format: 7 } }), source, { reportName: 'C', subreport: true });
-    assert.ok(rdl.includes('<Label>#VALX #VALY{0.00%}</Label>') && rdl.includes('<Value>Outside</Value>'));
+    assert.ok(rdl.includes('<Label>#AXISLABEL #VALY{0.00%}</Label>') && rdl.includes('<Value>Outside</Value>'));
     assert.ok(/<ChartLegend Name="Default">\s*<Hidden>true<\/Hidden>/.test(rdl));
   });
   it('puts the legend where Crystal does and leaves points unlabelled when it does', () => {
@@ -1360,5 +1360,16 @@ describe('a page header that differs on page 1', () => {
     assert.ok(header.includes('>Logo<') && header.includes('>Short<') && !header.includes('>Address<'), 'other pages: logo and the short block');
     assert.ok(header.includes('<PrintOnFirstPage>false</PrintOnFirstPage>'));
     assert.ok(!rdl.includes('Globals!PageNumber &gt; 1') && !/<Height>0\.833in<\/Height>\s*<PrintOnFirstPage>/.test(rdl), 'no page-number conditions left; header is the short one');
+  });
+});
+
+describe('layout summary', { skip: !process.env.RPT_SAMPLES_DIR && 'set RPT_SAMPLES_DIR to enable' }, () => {
+  it('prints the subreports showing a text, with other names and text hidden', async () => {
+    const { layoutSummary } = await import('../src/crystal/layoutinfo.ts');
+    const dir = process.env.RPT_SAMPLES_DIR!;
+    const outputs = readdirSync(dir).filter((f) => f.endsWith('.rpt')).map((f) => layoutSummary(readCfb(readFileSync(join(dir, f))), ['total']));
+    const found = outputs.find((o) => o.startsWith('=='));
+    assert.ok(found, 'some sample has a subreport with "total" in a text');
+    assert.ok(/\[total\]/.test(found!) && !/"[A-Za-z][^"]*[a-z ][^"]*"/.test(found!), 'only placeholders and the searched text are shown');
   });
 });
