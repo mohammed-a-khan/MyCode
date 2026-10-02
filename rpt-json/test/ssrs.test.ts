@@ -1171,7 +1171,7 @@ describe('chart options', () => {
   it('labels pie slices outside with the category and the value as a percentage, without a legend', () => {
     const { rdl } = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 3, graphType: 31,
       legend: { visible: false, position: 0 }, dataLabels: { kind: 3, format: 7 } }), source, { reportName: 'C', subreport: true });
-    assert.ok(rdl.includes('<Label>#AXISLABEL #VALY{0.00%}</Label>') && rdl.includes('<Value>Outside</Value>'));
+    assert.ok(rdl.includes('<Label>="#AXISLABEL" &amp; vbCrLf &amp; "#VALY{0.00%}"</Label>') && rdl.includes('<Value>Outside</Value>'));
     assert.ok(/<ChartLegend Name="Default">\s*<Hidden>true<\/Hidden>/.test(rdl));
   });
   it('uses the given axis format for a chart whose own format is not stored', () => {
@@ -1190,7 +1190,7 @@ describe('chart options', () => {
     const pie = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 3, graphType: 31 }), source, { reportName: 'C', subreport: true }).rdl;
     assert.ok(/<Inclination>50<\/Inclination>/.test(pie) && pie.includes('<AllowOutSidePlotArea>True</AllowOutSidePlotArea>'));
     const line = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 1, graphType: 13 }), source, { reportName: 'C', subreport: true }).rdl;
-    assert.ok(line.includes('<IncludeZero>false</IncludeZero>') && line.includes('<Width>2.25pt</Width>') && line.includes('<Interval>1</Interval>'));
+    assert.ok(line.includes('<IncludeZero>false</IncludeZero>') && line.includes('<Width>1.5pt</Width>') && line.includes('<Interval>1</Interval>'));
   });
 
   it('starts a chart below a title placed over its top', () => {
@@ -1218,7 +1218,7 @@ describe('chart options', () => {
     assert.ok(/<ChartDataLabel>[\s\S]*<Visible>=CDbl\(IIf\(IsNothing\(Sum\(Fields!Share\.Value\)\), 0, Sum\(Fields!Share\.Value\)\)\) &lt;&gt; 0<\/Visible>/.test(pie), 'zero slices unlabelled');
     const line = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 1, graphType: 13 }), source, { reportName: 'C', subreport: true }).rdl;
     const point = line.slice(line.indexOf('<ChartDataPoint>'), line.indexOf('</ChartDataPoint>'));
-    assert.ok(point.includes('<Width>2.25pt</Width>') && point.includes('<Size>6pt</Size>'), point);
+    assert.ok(point.includes('<Width>1.5pt</Width>') && point.includes('<Size>4pt</Size>'), point);
     assert.ok(/<ChartCustomPaletteColor>#3E6A9E<\/ChartCustomPaletteColor>\s*<ChartCustomPaletteColor>#E02C2C</.test(line), 'blue, then red');
   });
 
@@ -1477,7 +1477,14 @@ describe('tables framed in a group header', () => {
     const { rdl } = convertToRdl(definition(), source, { reportName: 'G', subreport: true });
     const tablix = descendants(parseXml(rdl)).find((e) => e.name === 'Tablix')!;
     assert.equal(child(tablix, 'Left')!.children.join(''), '0.031in', 'from the frame\'s left side');
-    assert.ok(descendants(child(tablix, 'Style')!).some((e) => e.name === 'BottomBorder'), 'the table\'s own bottom border');
+    assert.ok(!descendants(child(tablix, 'Style')!).some((e) => e.name === 'BottomBorder') && rdl.includes('Group1Frame'), 'each group closed by its own row');
+    // A group holding every record: the table's own bottom border closes it on every page, drawn once.
+    const single = definition();
+    single.groups = ['@One'];
+    single.formulas = [{ name: 'One', index: 0, kind: 'formula', text: '1', referencedFields: [] }];
+    const one = convertToRdl(single, source, { reportName: 'G', subreport: true }).rdl;
+    const table = descendants(parseXml(one)).find((e) => e.name === 'Tablix')!;
+    assert.ok(descendants(child(table, 'Style')!).some((e) => e.name === 'BottomBorder') && !one.includes('Group1Frame'));
   });
 
   it('draws the column line as a cell border in a row laid out freely, so it reaches down a row that grows', () => {
@@ -1561,7 +1568,7 @@ describe('subreports in the report footer', () => {
       ...panel.layout.slice(1),
     ] };
     const { rdl } = convertToRdl(main([sub('Titled', 1, 150)]), source, { reportName: 'M', subreports: new Map([[1, { name: 'M_Subdocument_1', links: [], definition: withTitle, dataSource: source }]]) });
-    assert.ok(/<Hidden>=CountRows\("DataSet_M_Subdocument_1"\) &gt; 0 AndAlso \(/.test(rdl), rdl.slice(rdl.indexOf('<Textbox Name="Heading">'), rdl.indexOf('<Textbox Name="Heading">') + 1500));
+    assert.ok(/<Hidden>=\(Not \(IsNothing\(First\(Fields!Label\.Value, "DataSet_M_Subdocument_1"\)\)\)\) AndAlso \(/.test(rdl), rdl.slice(rdl.indexOf('<Textbox Name="Heading">'), rdl.indexOf('<Textbox Name="Heading">') + 1500));
   });
 
   it('hides a subreport by its own suppress formula', () => {
@@ -1569,6 +1576,61 @@ describe('subreports in the report footer', () => {
     const { rdl } = convertToRdl(main([sub('Chart1', 3, 150, { conditions: { suppress: { name: 'Object_Visibility', index: 0 } } })], formulas), source, { reportName: 'M', subreports });
     const chart = rdl.slice(rdl.indexOf('<Rectangle Name="Chart1">'));
     assert.ok(/<Hidden>=[^<]*Flag[^<]*<\/Hidden>/.test(chart.slice(0, chart.indexOf('</Rectangle>') + 4000)), 'the formula decides');
+  });
+});
+
+describe('text and group order as Crystal prints them', () => {
+  const source: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Name', type: 'string' }, { name: 'Amount', type: 'number' }] }] };
+  it('breaks a line where a run of spaces pushed the words on in a box of several lines', () => {
+    const definition: ReportDefinition = { ...emptyDefinition(), layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 1100, objects: [
+        { kind: 'text', name: 'Note', text: 'First line here       Second line      ', align: 'center', position: { x: 0, y: 0 }, size: { width: 3000, height: 1080 } },
+        { kind: 'text', name: 'Label', text: 'A     B', position: { x: 0, y: 1080 }, size: { width: 3000, height: 200 } }] }] },
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF', objects: [] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', objects: [] }] },
+    ] };
+    const { rdl } = convertToRdl(definition, source, { reportName: 'T', subreport: true });
+    assert.ok(rdl.includes('<Value>="First line here" &amp; vbCrLf &amp; "Second line"</Value>'), 'a line break');
+    assert.ok(rdl.includes('<Value>A     B</Value>'), 'spaces kept on one line');
+  });
+  it('orders groups with equal summaries by their own value', () => {
+    const definition: ReportDefinition = { ...emptyDefinition(), groups: ['T.Name'],
+      sorts: [{ field: 'Sum of T.Amount', descending: true, bySummary: true }],
+      layout: [
+        { name: 'ReportHeaderArea1', sections: [{ name: 'RH', objects: [] }] },
+        { name: 'ReportFooterArea1', sections: [{ name: 'RF', objects: [] }] },
+        { name: 'GroupHeaderArea1', sections: [{ name: 'GH', height: 200, objects: [{ kind: 'field', name: 'N', field: 'T.Name', position: { x: 0, y: 0 }, size: { width: 2000, height: 200 } }] }] },
+        { name: 'GroupFooterArea1', sections: [{ name: 'GF', objects: [] }] },
+        { name: 'DetailArea1', sections: [{ name: 'D', objects: [] }] },
+      ] };
+    const { rdl } = convertToRdl(definition, source, { reportName: 'T', subreport: true });
+    assert.ok(/<Value>=Sum\(Fields!Amount\.Value\)<\/Value>\s*<Direction>Descending<\/Direction>\s*<\/SortExpression>\s*<SortExpression>\s*<Value>=Fields!Name\.Value<\/Value>/.test(rdl),
+      rdl.slice(rdl.indexOf('<SortExpressions>'), rdl.indexOf('</SortExpressions>')));
+  });
+});
+
+describe('formulas without data, page breaks by formula and the default font', () => {
+  const source: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Name', type: 'string' }] }] };
+  const report = (objects: ReportObject[], extra: Partial<ReportDefinition> = {}, section: object = {}): ReportDefinition => ({ ...emptyDefinition(), ...extra, layout: [
+    { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 400, objects, ...section }] },
+    { name: 'ReportFooterArea1', sections: [{ name: 'RF', objects: [] }] },
+    { name: 'DetailArea1', sections: [{ name: 'D', height: 200, objects: [{ kind: 'field', name: 'N', field: 'T.Name', position: { x: 0, y: 0 }, size: { width: 1000, height: 200 }, font: 'Times New Roman' }] }] },
+  ] });
+  it('prints a formula that reads no field as its expression, not a dataset field', () => {
+    const formulas = [{ name: 'Title', index: 0, kind: 'formula' as const, text: '"A title"', referencedFields: [], valueType: 'string' }];
+    const { rdl } = convertToRdl(report([{ kind: 'field', name: 'T1', field: '@Title', position: { x: 0, y: 0 }, size: { width: 2000, height: 200 } }], { formulas, formulaTexts: ['"A title"'] }), source, { reportName: 'R' });
+    assert.ok(/<Value>=\("A title"\)<\/Value>/.test(rdl) && !rdl.includes('F_Title'), rdl.slice(rdl.indexOf('<Textbox Name="T1">'), rdl.indexOf('<Textbox Name="T1">') + 400));
+  });
+  it('breaks the page before a section where its formula says so', () => {
+    const formulas = [{ name: 'New_Page_Before', index: 0, kind: 'conditionalFormat' as const, text: '{?Split} = 1', referencedFields: [] }];
+    const definition = report([{ kind: 'text', name: 'X', text: 'X', position: { x: 0, y: 0 }, size: { width: 1000, height: 200 } }],
+      { formulas, formulaTexts: [formulas[0].text], parameters: [{ name: 'Split', valueType: 'number' }] }, { conditions: { newPageBefore: { name: 'New_Page_Before', index: 0 } } });
+    const { rdl } = convertToRdl(definition, source, { reportName: 'R' });
+    assert.ok(/<PageBreak>\s*<BreakLocation>Start<\/BreakLocation>\s*<Disabled>=Not \(/.test(rdl), 'a break the formula switches');
+  });
+  it('takes the font most of the text uses as the report default', () => {
+    const { rdl } = convertToRdl(report([]), source, { reportName: 'R' });
+    assert.ok(rdl.includes('<df:DefaultFontFamily>Times New Roman</df:DefaultFontFamily>'));
   });
 });
 
