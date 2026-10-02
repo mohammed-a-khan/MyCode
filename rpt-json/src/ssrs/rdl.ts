@@ -582,7 +582,9 @@ class RdlBuilder {
       .filter((s) => s.value !== 'Nothing');
     if (!sorts.length) return null;
     return el('SortExpressions', ...sorts.map((s) => el('SortExpression',
-      el('Value', `=First(${s.value})`), s.descending ? el('Direction', 'Descending') : null)));
+      // SSRS allows no First in a sort expression: a category's first record under an ascending sort has its
+      // smallest value (Min), under a descending one its largest (Max).
+      el('Value', `=${s.descending ? 'Max' : 'Min'}(${s.value})`), s.descending ? el('Direction', 'Descending') : null)));
   }
 
   /**
