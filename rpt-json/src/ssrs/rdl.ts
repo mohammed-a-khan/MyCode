@@ -589,7 +589,7 @@ class RdlBuilder {
   }
 
   /** Sort expressions for the report's record sort (taken per group by its first record), or nothing. */
-  private recordOrder(reverse = false): XmlElement | null {
+  private recordOrder(): XmlElement | null {
     const sorts = (this.definition.sorts ?? this.definition.sortFields.map((field) => ({ field, descending: false, bySummary: false })))
       .filter((s) => !s.bySummary)
       .map((s) => ({ ...s, value: this.fieldObjectValue(s.field, 'row', 'Record sort').expression }))
@@ -599,7 +599,7 @@ class RdlBuilder {
       // SSRS allows no First in a sort expression: a category's first record under an ascending sort has its
       // smallest value (Min), under a descending one its largest (Max).
       // A date held as text sorts by its date, as in Crystal (as text, 01/08/2026 would come before 05/08/2025).
-      el('Value', `=${s.descending ? 'Max' : 'Min'}(${this.categorySortValue(s.field, s.value)})`), s.descending !== reverse ? el('Direction', 'Descending') : null)));
+      el('Value', `=${s.descending ? 'Max' : 'Min'}(${this.categorySortValue(s.field, s.value)})`), s.descending ? el('Direction', 'Descending') : null)));
   }
 
   /**
@@ -803,7 +803,7 @@ class RdlBuilder {
       // Crystal draws text right up to the object's edges: SSRS's default 2pt padding would make it wrap sooner.
       el('Style', ...this.borderStyle(border, lines),
         // Crystal keeps a text object's text a little inside its own border.
-        el('PaddingLeft', `${((padding?.left ?? 0) / 20 + (framed ? 6 : 0)).toFixed(1)}pt`), el('PaddingRight', `${((padding?.right ?? 0) / 20 + (framed ? 6 : 0)).toFixed(1)}pt`),
+        el('PaddingLeft', `${((padding?.left ?? 0) / 20 + (framed ? 4 : 0)).toFixed(1)}pt`), el('PaddingRight', `${((padding?.right ?? 0) / 20 + (framed ? 4 : 0)).toFixed(1)}pt`),
         el('PaddingTop', framed ? '1pt' : '0pt'), el('PaddingBottom', '0pt')));
   }
 
@@ -1025,8 +1025,11 @@ class RdlBuilder {
     switch (obj.kind) {
       case 'field':
       case 'text': {
-        const { value, format } = this.objectValue(obj, scope);
-        return this.textbox(name(), value, obj, format, scope, box, hidden);
+        // Lines centred with spaces in Crystal are centred here (the spaces themselves cannot be kept: SSRS wraps
+        // them differently).
+        const shown = paddedCentred(obj) ? { ...obj, align: 'center' as const } : obj;
+        const { value, format } = this.objectValue(shown, scope);
+        return this.textbox(name(), value, shown, format, scope, box, hidden);
       }
       case 'line':
         return el('Line', { Name: name() },
@@ -1244,14 +1247,7 @@ class RdlBuilder {
       this.codeMembers.crPointColors = 'New System.Collections.Hashtable';
       if (!this.codeFunctions.includes(POINT_COLOR_CODE)) this.codeFunctions.push(POINT_COLOR_CODE);
     }
-    // Crystal lays its pie slices out counter-clockwise from three o'clock (the small slices end up to the right
-    // and above the centre); SSRS goes clockwise. The slices go in reverse order, each keeping the colour of its
-    // place in Crystal's order.
-    const pieSlices = style.type === 'Shape' && !!categoryExpression && categoryExpression !== 'Nothing';
-    if (pieSlices) {
-      this.codeMembers.crPieColors = 'New System.Collections.Hashtable';
-      if (!this.codeFunctions.includes(PIE_COLOR_CODE)) this.codeFunctions.push(PIE_COLOR_CODE);
-    }
+
     // Data labels as Crystal shows them: the category, the value (in the chart's number format), or both.
     const labelFormat = chart.dataLabels ? CHART_NUMBER_FORMATS[chart.dataLabels.format] : undefined;
     const valueKeyword = labelFormat ? `#VALY{${labelFormat}}` : '#VALY';
@@ -1268,12 +1264,10 @@ class RdlBuilder {
       const value = this.fieldObjectValue(v, 'row', item);
       return el('ChartSeries', { Name: this.itemNames.make(`${chartName}_Series${i + 1}`) },
         el('ChartDataPoints', el('ChartDataPoint',
-          // An empty pie slice is not drawn (as a 3D wedge of nothing it would still show its sides).
-          el('ChartDataPointValues', el('Y', pieSlices ? `=IIf(CDbl(IIf(IsNothing(${value.expression}), 0, ${value.expression})) = 0, Nothing, ${value.expression})` : `=${value.expression}`)),
+          el('ChartDataPointValues', el('Y', `=${value.expression}`)),
           dataLabel(value.expression),
           // Crystal draws lines thick (SSRS takes a line's width from its data points).
-          el('Style', barPerPoint ? el('Color', `=Code.CrPointColor(${vbString(chartName)}, ${categoryExpression})`)
-            : pieSlices ? el('Color', `=Code.CrPieColor(${vbString(chartName)}, ${categoryExpression}, CountDistinct(${categoryExpression}, ${vbString(this.dataset)}))`) : null,
+          el('Style', barPerPoint ? el('Color', `=Code.CrPointColor(${vbString(chartName)}, ${categoryExpression})`) : null,
             // Crystal outlines each bar and pie slice in black.
             isLine ? el('Border', el('Width', '1.5pt')) : el('Border', el('Color', 'Black'), el('Style', 'Solid'), el('Width', '0.5pt'))),
           // A distinct marker shape per line, clearly visible.
@@ -1304,9 +1298,9 @@ class RdlBuilder {
           // Crystal's order: as the data comes (no sort), or ascending/descending by value.
           // "In original order" is the order of the records after the report's record sort, which a chart group
           // would otherwise lose: sorted by the record sort fields (by the first record of each category).
-          chart.categoryOrder === 2 ? this.recordOrder(pieSlices) : el('SortExpressions', el('SortExpression',
+          chart.categoryOrder === 2 ? this.recordOrder() : el('SortExpressions', el('SortExpression',
             el('Value', `=${this.categorySortValue(category!, categoryExpression)}`),
-            (chart.categoryOrder === 1) !== pieSlices ? el('Direction', 'Descending') : null)),
+            chart.categoryOrder === 1 ? el('Direction', 'Descending') : null)),
           el('Label', `=${categoryExpression}`))
         : el('ChartMember', el('Label', chart.title ?? '')))),
       el('ChartSeriesHierarchy', el('ChartMembers', ...seriesHierarchy)),
@@ -1317,12 +1311,12 @@ class RdlBuilder {
         // Crystal's 3D pies are tilted well back, with a thick edge.
         style.threeD ? el('ChartThreeDProperties', el('Enabled', 'true'),
           el('Rotation', isPie ? '0' : '20'), el('Inclination', isPie ? '50' : '20'),
-          isPie ? el('DepthRatio', '170') : null, el('Shading', 'Real')) : null,
+          isPie ? el('DepthRatio', '150') : null, el('Shading', 'Real')) : null,
         // Crystal draws pies large, with their labels around them.
         // Crystal's chart fills its object: the chart area takes the whole chart, less the legend's strip.
         // With a legend, SSRS lays the area and the legend out itself (fixed sizes would let them overlap).
         chart.legend?.visible && !isPie ? null : el('ChartElementPosition', el('Top', '1'), el('Left', '1'), el('Height', '98'), el('Width', '98')),
-        isPie ? el('ChartInnerPlotPosition', el('Top', '5'), el('Left', '15'), el('Height', '90'), el('Width', '70')) : null,
+        isPie ? el('ChartInnerPlotPosition', el('Top', '7'), el('Left', '17'), el('Height', '86'), el('Width', '66')) : null,
         // Crystal's plot area is light grey behind bars and lines.
         el('Style', isPie ? null : el('BackgroundColor', '#D9D9D9')))),
       // The legend as Crystal has it (shown or not, and where); a bar per colour has none by default.
@@ -3143,12 +3137,26 @@ function hideWhen(item: XmlElement, expression: string): XmlElement {
  * drops spaces where it wraps a line, SSRS keeps them (centred text then shifts aside, and a run can fill a line
  * of its own). Such a run becomes a line break, and lines lose their trailing spaces.
  */
+/**
+ * Text of several lines laid out with spaces: no alignment of its own (or left), its lines pushed apart by runs of
+ * spaces (its first line indented by them, or two runs or more). Crystal drops the spaces where it wraps, so each line shows centred.
+ */
+function paddedCentred(obj: ReportObject): boolean {
+  if (obj.kind !== 'text' || (obj.align && obj.align !== 'left') || !obj.size) return false;
+  const text = (obj.runs ?? [{ text: obj.text ?? '' }]).map((r) => ('text' in r ? r.text : 'x')).join('').replace(/[\t\u00a0\u2000-\u200a\u202f\u3000]/g, ' ');
+  const lineHeight = (obj.style?.size ?? 10) * 20 * 1.2;
+  const runs = (text.trim().match(/\S {3,}(?=\S)/g) ?? []).length;
+  return obj.size.height >= lineHeight * 1.8 && runs > 0 && (/^ {2,}\S/.test(text) || runs >= 2);
+}
+
 function wrapSpaces(text: string, obj: ReportObject, part = false): string {
   const lineHeight = (obj.style?.size ?? 10) * 20 * 1.2;
   if (!obj.size || obj.size.height < lineHeight * 1.8) return text.replace(/\u00a0/g, ' ');
   const centred = obj.align === 'center';
   // Runs of spaces, non-breaking ones included (SSRS keeps those together on one line).
   // Line ends of any kind (a lone carriage return too), tabs and wide or non-breaking spaces.
+  // Spaces centring the first line are not a line of their own.
+  if (centred && !part) text = text.replace(/^[ \t\u00a0]+/, '');
   const lines = text.replace(/\r\n?/g, '\n').replace(/[\t\u00a0\u2000-\u200a\u202f\u3000]/g, ' ').replace(/[\u200b\ufeff]/g, '')
     .split('\n').map((line) => line.replace(/ {3,}/g, '\n')).join('\n').split('\n')
     // Centred text loses the spaces at its lines' ends (they would push it aside); a piece between embedded
@@ -3271,13 +3279,15 @@ function joinBoxes(items: XmlElement[]): XmlElement[] {
       if (a === b) continue;
       const pa = pos(a);
       const gapX = pb.left - pa.right;
-      if (gapX > 0 && gapX <= 0.1 && Math.abs(pa.top - pb.top) <= 0.05) {
+      // Side by side: a row of boxes alike in height (a grid of panels).
+      if (gapX > 0 && gapX <= 0.1 && Math.abs(pa.top - pb.top) <= 0.05 && Math.abs((pa.bottom - pa.top) - (pb.bottom - pb.top)) <= 0.05) {
         const c = changes.get(b) ?? { sides: [] };
         changes.set(b, { ...c, left: pa.right, sides: [...c.sides, 'LeftBorder'] });
       }
       const gapY = pb.top - pa.bottom;
       const overlap = Math.min(pa.right, pb.right) - Math.max(pa.left, pb.left);
-      if (gapY > 0 && gapY <= 0.1 && overlap > 0.5 * Math.min(pa.right - pa.left, pb.right - pb.left)) {
+      // One under another: alike in place and width.
+      if (gapY > 0 && gapY <= 0.1 && Math.abs(pa.left - pb.left) <= 0.05 && Math.abs((pa.right - pa.left) - (pb.right - pb.left)) <= 0.1 && overlap > 0) {
         const c = changes.get(b) ?? { sides: [] };
         changes.set(b, { ...c, top: pa.bottom, sides: [...c.sides, 'TopBorder'] });
       }
@@ -3384,22 +3394,6 @@ const POINT_COLOR_CODE = [
   '    crPointColors(key) = palette(used Mod palette.Length)',
   '  End If',
   '  Return CStr(crPointColors(key))',
-  'End Function',
-].join('\r\n');
-
-/** A pie slice's colour: that of its place in Crystal's order, the slices being drawn in reverse (count: slices). */
-const PIE_COLOR_CODE = [
-  'Public Function CrPieColor(ByVal chart As String, ByVal category As Object, ByVal count As Integer) As String',
-  `  Dim palette() As String = {${CRYSTAL_PIE_PALETTE.map((c) => `"${c}"`).join(', ')}}`,
-  '  Dim key As String = chart & "|" & CStr(category)',
-  '  If Not crPieColors.ContainsKey(key) Then',
-  '    Dim used As Integer = 0',
-  '    For Each entry As System.Collections.DictionaryEntry In crPieColors',
-  '      If CStr(entry.Key).StartsWith(chart & "|") Then used = used + 1',
-  '    Next',
-  '    crPieColors(key) = palette(Math.Max(0, count - 1 - used) Mod palette.Length)',
-  '  End If',
-  '  Return CStr(crPieColors(key))',
   'End Function',
 ].join('\r\n');
 

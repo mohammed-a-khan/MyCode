@@ -1146,7 +1146,7 @@ describe('charts that summarise fields themselves', () => {
   it('draws a pie of one value per category', () => {
     const chart = { values: ['Average of usp_Tests;1.result'], onChangeOf: 'usp_Tests;1.test_name', family: 3, graphType: 31 };
     const { rdl } = convertToRdl({ ...emptyDefinition(), layout: layout(chart) }, source, { reportName: 'Tests', subreport: true });
-    assert.ok(rdl.includes('Nothing, Avg(Fields!result.Value))</Y>') && rdl.includes('<Type>Shape</Type>'));
+    assert.ok(rdl.includes('<Y>=Avg(Fields!result.Value)</Y>') && rdl.includes('<Type>Shape</Type>'));
   });
 });
 
@@ -1193,13 +1193,9 @@ describe('chart options', () => {
     assert.ok(line.includes('<IncludeZero>false</IncludeZero>') && line.includes('<Width>1.5pt</Width>') && line.includes('<Interval>1</Interval>'));
   });
 
-  it('lays pie slices out counter-clockwise as Crystal does, each with the colour of its place', () => {
-    const pie = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 3, graphType: 31, categoryOrder: 0 }), source, { reportName: 'C', subreport: true }).rdl;
-    const categories = pie.slice(pie.indexOf('<ChartCategoryHierarchy>'), pie.indexOf('</ChartCategoryHierarchy>'));
-    assert.ok(categories.includes('<Direction>Descending</Direction>'), 'drawn in reverse');
-    assert.ok(pie.includes('=Code.CrPieColor("Graph1", Fields!Label.Value, CountDistinct(Fields!Label.Value, "DataSet1"))') && pie.includes('Public Function CrPieColor'));
+  it('leaves a gap at both ends of a line chart\'s category axis, as Crystal does', () => {
     const line = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 1, graphType: 13 }), source, { reportName: 'C', subreport: true }).rdl;
-    assert.ok(!line.includes('<Margin>'), 'a gap at both ends of the category axis, as in Crystal');
+    assert.ok(!line.includes('<Margin>'));
   });
 
   it('starts a chart below a title placed over its top', () => {
@@ -1636,7 +1632,13 @@ describe('text and group order as Crystal prints them', () => {
     const nbsp = convertToRdl({ ...definition, layout: [{ name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 1100, objects: [
       { kind: 'text', name: 'Boxed', text: 'Contact us\u00a0\u00a0\u00a0\u00a0\u00a0Service desk', align: 'center', border: { sides: [1, 1, 1, 1] }, position: { x: 0, y: 0 }, size: { width: 3000, height: 1080 } }] }] }, ...definition.layout.slice(1)] }, source, { reportName: 'T', subreport: true }).rdl;
     assert.ok(nbsp.includes('<Value>="Contact us" &amp; vbCrLf &amp; "Service desk"</Value>'), 'non-breaking spaces too');
-    assert.ok(/<PaddingLeft>6\.0pt<\/PaddingLeft>\s*<PaddingRight>6\.0pt<\/PaddingRight>\s*<PaddingTop>1pt<\/PaddingTop>\s*<PaddingBottom>0pt/.test(nbsp), 'text kept inside its border');
+    // Lines centred with spaces in a text without an alignment of its own: centred, without the spaces.
+    const padded = convertToRdl({ ...definition, layout: [{ name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 1100, objects: [
+      { kind: 'text', name: 'Padded', text: '   First line here        Second        Third line', position: { x: 0, y: 0 }, size: { width: 3000, height: 1080 } }] }] }, ...definition.layout.slice(1)] }, source, { reportName: 'T', subreport: true }).rdl;
+    const at = padded.indexOf('<Textbox Name="Padded">');
+    const box = padded.slice(at, padded.indexOf('</Textbox>', at));
+    assert.ok(box.includes('<Value>="First line here" &amp; vbCrLf &amp; "Second" &amp; vbCrLf &amp; "Third line"</Value>') && box.includes('<TextAlign>Center</TextAlign>'), box.slice(0, 600));
+    assert.ok(/<PaddingLeft>4\.0pt<\/PaddingLeft>\s*<PaddingRight>4\.0pt<\/PaddingRight>\s*<PaddingTop>1pt<\/PaddingTop>\s*<PaddingBottom>0pt/.test(nbsp), 'text kept inside its border');
   });
   it('orders groups with equal summaries by their own value', () => {
     const definition: ReportDefinition = { ...emptyDefinition(), groups: ['T.Name'],
