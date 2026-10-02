@@ -1208,7 +1208,7 @@ describe('chart options', () => {
     const sorted = chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', categoryOrder: 2, family: 0, graphType: 0 });
     sorted.sorts = [{ field: 'T.Share', descending: true, bySummary: false }];
     const recordOrder = convertToRdl(sorted, source, { reportName: 'C', subreport: true }).rdl;
-    assert.ok(/<ChartCategoryHierarchy>[\s\S]*<Value>=First\(Fields!Share\.Value\)<\/Value>\s*<Direction>Descending/.test(recordOrder), 'original order follows the record sort');
+    assert.ok(/<ChartCategoryHierarchy>[\s\S]*<Value>=Max\(Fields!Share\.Value\)<\/Value>\s*<Direction>Descending/.test(recordOrder), 'original order follows the record sort');
     const descending = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', categoryOrder: 1, family: 0, graphType: 0 }), source, { reportName: 'C', subreport: true }).rdl;
     assert.ok(/<ChartCategoryHierarchy>[\s\S]*<Direction>Descending<\/Direction>/.test(descending));
   });
