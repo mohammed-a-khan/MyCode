@@ -8,6 +8,7 @@ import { jsonToDocument, sha256 } from './json.ts';
 import { convertDocumentsWithTemplate, convertDocumentToSsrs, reviewMarkdown } from './ssrs/convert.ts';
 import { readHouseTemplate, type HouseTemplate } from './ssrs/house.ts';
 import { chartStructure } from './crystal/chartinfo.ts';
+import { layoutSummary } from './crystal/layoutinfo.ts';
 import { extractHeaders, formatHeadersCsv, formatHeadersText, type HeaderText } from './crystal/headers.ts';
 import { mkdir, readdir, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
@@ -32,6 +33,8 @@ Usage:
                                             chart titles (--all adds footers, details and field objects)
   rpt-json inspect <input.rpt>              Print decoded metadata (no stream data)
   rpt-json charts  <input.rpt>              Print how each chart is stored, with all names and text hidden
+  rpt-json layout  <input.rpt> <text>...    Print the layout of each subreport showing one of the texts, one line
+                                            per section and object, with all other names and text hidden
                                             (safe to share when a chart does not convert)
   rpt-json verify  <input.rpt>              Round-trip rpt -> json -> rpt and compare every stream,
                                             then again with every encrypted stream re-encrypted
@@ -232,6 +235,15 @@ async function main(argv: string[]): Promise<number> {
     const raw = await readFile(input);
     const doc = input.toLowerCase().endsWith('.json') ? jsonToDocument(JSON.parse(raw.toString('utf8'))) : readCfb(raw);
     process.stdout.write(chartStructure(doc));
+    return 0;
+  }
+
+  if (command === 'layout') {
+    const [input, ...texts] = args.filter((a) => !a.startsWith('--'));
+    if (!input || texts.length === 0) throw new Error('layout needs an input .rpt file and at least one text to look for');
+    const raw = await readFile(input);
+    const doc = input.toLowerCase().endsWith('.json') ? jsonToDocument(JSON.parse(raw.toString('utf8'))) : readCfb(raw);
+    process.stdout.write(layoutSummary(doc, texts));
     return 0;
   }
 
