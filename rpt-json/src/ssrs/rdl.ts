@@ -507,7 +507,9 @@ class RdlBuilder {
       return token;
     }
     let result: string;
-    if (AGGREGATE_CALL.test(expression) || expression.includes('Globals!') || expression.includes('Me.Value') || expression.includes(SHARED_TOKEN)) {
+    // A formula reading no database field (a fixed title, a parameter) is its expression: as a dataset field it
+    // would be empty when the dataset has no rows, where Crystal still prints it.
+    if (!expression.includes('Fields!') || AGGREGATE_CALL.test(expression) || expression.includes('Globals!') || expression.includes('Me.Value') || expression.includes(SHARED_TOKEN)) {
       result = `(${expression})`;
     } else {
       const fieldName = this.fieldNames.make(`F_${formula.name}`);
@@ -536,10 +538,17 @@ class RdlBuilder {
     // Outside the table, fields need a dataset scope.
     if (scope === 'row') return t.expression;
     const scoped = scopeOutsideRegion(t.expression.slice(1), this.dataset);
-    // Without records every database field is null, and Crystal (Exceptions For Nulls) gives a formula that reads
-    // one no result: the condition does not hold (what it suppresses still prints), unless it tests IsNull itself.
-    const readsField = /\{[^}@?#]*\.[^}]*\}/.test(text) && !/\bisnull\b/i.test(text);
-    return boolean && readsField ? `=CountRows(${vbString(this.dataset)}) > 0 AndAlso (${scoped})` : `=${scoped}`;
+    // Crystal (Exceptions For Nulls) gives a formula no result when a database field it reads is null on the
+    // current record, here the first one (or there are no records): the condition does not hold, so what it
+    // suppresses still prints. Unless the formula tests IsNull itself.
+    const fields = [...new Set([...text.matchAll(/\{([^}@?#][^}]*\.[^}]*)\}/g)].map((m) => m[1]))];
+    if (boolean && fields.length && !/\bisnull\b/i.test(text)) {
+      const present = translateFormula(fields.map((f) => `not IsNull({${f}})`).join(' and '), this.formulaContext, { boolean: true });
+      if (present.expression !== '=Nothing' && !present.issues.length) {
+        return `=(${scopeOutsideRegion(present.expression.slice(1), this.dataset)}) AndAlso (${scoped})`;
+      }
+    }
+    return `=${scoped}`;
   }
 
   private runningTotalExpression(name: string, item: string): string | undefined {
@@ -689,7 +698,7 @@ class RdlBuilder {
       return { value: `=${expression}`, format: (obj.format && formatFor(obj.format, this.valueTypeOf(obj.field))) ?? format };
     }
     if (obj.kind === 'text') {
-      const text = obj.text ?? '';
+      const text = obj.embeddedFields?.length ? obj.text ?? '' : wrapSpaces(obj.text ?? '', obj);
       if (obj.embeddedFields?.length) {
         // Text and embedded fields in their original order; tabs become spaces (text boxes do not tab).
         const runs = obj.runs ?? [{ text }, ...obj.embeddedFields.map((field) => ({ field }))];
@@ -844,11 +853,15 @@ class RdlBuilder {
     }
     // Crystal's New Page Before: the section's items in a rectangle that starts a new page (hidden with the
     // section, so a hidden section breaks no page).
-    if (scope === 'body' && section.newPageBefore && items.length) {
+    // A New Page Before formula decides on its own (the break is switched off where it is false).
+    const breakFormula = section.conditions?.newPageBefore
+      ? this.conditionExpression(section.conditions.newPageBefore, false, `Section ${section.name}`, 'body')
+      : undefined;
+    if (scope === 'body' && (section.newPageBefore || breakFormula) && items.length) {
       const sectionHeight = Math.max(section.height !== undefined ? twipsToInches(section.height) : 0, bottom);
       const wrapper = el('Rectangle', { Name: this.itemNames.make(`${section.name || 'Section'}_Page`) },
         el('ReportItems', ...items.map((item) => moveItem(item, -top, 0))),
-        el('PageBreak', el('BreakLocation', 'Start')),
+        el('PageBreak', el('BreakLocation', 'Start'), breakFormula ? el('Disabled', `=Not (${breakFormula.slice(1)})`) : null),
         el('KeepTogether', 'false'),
         el('Top', inches(top)), el('Left', '0in'), el('Height', inches(sectionHeight)),
         el('Width', inches(Math.max(...items.map(itemRight), 0.1))),
@@ -972,8 +985,15 @@ class RdlBuilder {
         .reduce((sum, s) => sum + (s.height ?? 0), 0));
     })();
     const height = mode === 'body' ? Math.max(box.height, room ?? 0, fixed) : Math.max(box.height, result.height);
+    // SSRS gives up the space of items hidden at a rectangle's foot: an empty mark at the foot of the sections
+    // that always print keeps it.
+    const keep = mode === 'body' && fixed > 0
+      ? [el('Line', { Name: this.itemNames.make(`${obj.name || 'Subreport'}_Foot`) },
+        el('Top', inches(Math.max(0, Math.min(fixed, height) - 0.01))), el('Left', '0in'), el('Height', '0in'), el('Width', '0.01in'),
+        el('Style', el('Border', el('Style', 'None'))))]
+      : [];
     const rectangle = el('Rectangle', { Name: this.itemNames.make(obj.name || 'Subreport') },
-      result.items.length ? el('ReportItems', ...result.items) : null,
+      result.items.length || keep.length ? el('ReportItems', ...result.items, ...keep) : null,
       el('KeepTogether', 'true'),
       el('Top', inches(box.top)), el('Left', inches(box.left)), el('Height', inches(height)), el('Width', inches(Math.max(box.width, result.width))),
       hidden ? el('Visibility', el('Hidden', hidden)) : null,
@@ -1186,13 +1206,15 @@ class RdlBuilder {
         values.length > 1 ? el('ChartMembers', ...valueMembers) : null,
         el('Label', `=${seriesExpression}`))]
       : valueMembers;
-    // Crystal: horizontal gridlines from the value axis, every category labelled, and line charts scaled to their
+    // Crystal: horizontal gridlines from the value axis, every category labelled, and the value axis scaled to the
     // values (not from zero).
     const isLine = style.type === 'Line';
     const axis = (title: string | undefined, kind: 'category' | 'value', format?: string) => el('ChartAxis', { Name: 'Primary' },
       // Crystal's axis text is small, as small as its data labels.
       el('Style', el('FontFamily', 'Arial'), el('FontSize', '5.5pt'), el('FontWeight', 'Normal'), format ? el('Format', format) : null),
       el('ChartAxisTitle', el('Caption', title ?? ''), el('Style', el('FontFamily', 'Arial'), el('FontSize', '5.5pt'), el('FontWeight', 'Normal'))),
+      // Crystal plots a line's first and last points on the plot's edges.
+      kind === 'category' && isLine ? el('Margin', 'False') : null,
       kind === 'category' ? el('Interval', '1') : null,
       // Crystal angles bar charts' category labels; a line chart's dates are staggered on two rows where they do
       // not fit on one (SSRS may offset them, but neither turn nor resize them).
@@ -1206,7 +1228,8 @@ class RdlBuilder {
       el('ChartMinorGridLines', el('Style')),
       el('ChartMinorTickMarks', el('Length', '0.5')),
       el('CrossAt', 'NaN'),
-      kind === 'value' && isLine ? el('IncludeZero', 'false') : null,
+      // Crystal fits the value axis to the values (bars too: 1.00% to 1.40%, not from zero).
+      kind === 'value' && !isPie ? el('IncludeZero', 'false') : null,
       el('Minimum', 'NaN'), el('Maximum', 'NaN'),
       el('ChartAxisScaleBreak', el('Style')));
     // One value over categories, as bars: Crystal gives each bar its own colour, in its palette's order (SSRS
@@ -1220,7 +1243,8 @@ class RdlBuilder {
     const labelFormat = chart.dataLabels ? CHART_NUMBER_FORMATS[chart.dataLabels.format] : undefined;
     const valueKeyword = labelFormat ? `#VALY{${labelFormat}}` : '#VALY';
     // #AXISLABEL is the category's text (#VALX would give its position for text categories).
-    const labelText = { 1: '#AXISLABEL', 2: valueKeyword, 3: `#AXISLABEL ${valueKeyword}` }[chart.dataLabels?.kind ?? 0];
+    // Both: the category over the value, on two lines, as Crystal prints them.
+    const labelText = { 1: '#AXISLABEL', 2: valueKeyword, 3: `="#AXISLABEL" & vbCrLf & ${vbString(valueKeyword)}` }[chart.dataLabels?.kind ?? 0];
     const isPie = style.type === 'Shape';
     // Crystal labels no empty pie slice.
     const dataLabel = (expression: string) => labelText
@@ -1235,18 +1259,14 @@ class RdlBuilder {
           dataLabel(value.expression),
           // Crystal draws lines thick (SSRS takes a line's width from its data points).
           el('Style', barPerPoint ? el('Color', `=Code.CrPointColor(${vbString(chartName)}, ${categoryExpression})`) : null,
-            isLine ? el('Border', el('Width', '2.25pt')) : null),
+            isLine ? el('Border', el('Width', '1.5pt')) : null),
           // A distinct marker shape per line, clearly visible.
-          el('ChartMarker', style.markers ? el('Type', 'Auto') : null, style.markers ? el('Size', '6pt') : null, el('Style')),
+          el('ChartMarker', style.markers ? el('Type', 'Auto') : null, style.markers ? el('Size', '4pt') : null, el('Style')),
           // Crystal's 3D pies draw their slices pulled out from the centre.
           isPie && style.threeD ? el('CustomProperties', el('CustomProperty', el('Name', 'Exploded'), el('Value', 'True'))) : null,
           el('DataElementOutput', 'Output'))),
         el('Type', style.type),
         style.subtype ? el('Subtype', style.subtype) : null,
-        // Bars split by a series field: SSRS keeps room beside each bar for every series, so they come out thin;
-        // Crystal's are as wide as for one value.
-        style.type === 'Column' && seriesExpression && seriesExpression !== 'Nothing'
-          ? el('CustomProperties', el('CustomProperty', el('Name', 'PointWidth'), el('Value', '1'))) : null,
         // Crystal places pie labels outside the slices, with a line to each.
         isPie && labelText ? el('CustomProperties',
           el('CustomProperty', el('Name', 'PieLabelStyle'), el('Value', 'Outside')),
@@ -1254,7 +1274,7 @@ class RdlBuilder {
           // Crystal's leader lines are short.
           el('CustomProperty', el('Name', '3DLabelLineSize'), el('Value', '40'))) : null,
         // Crystal draws lines solid and clearly visible.
-        isLine ? el('Style', el('Border', el('Width', '2.25pt'))) : el('Style'),
+        isLine ? el('Style', el('Border', el('Width', '1.5pt'))) : el('Style'),
         el('ChartEmptyPoints', el('Style'), el('ChartMarker', el('Style')), el('ChartDataLabel', el('Style'))),
         el('ValueAxisName', 'Primary'),
         el('CategoryAxisName', 'Primary'),
@@ -1286,7 +1306,7 @@ class RdlBuilder {
         // Crystal's chart fills its object: the chart area takes the whole chart, less the legend's strip.
         // With a legend, SSRS lays the area and the legend out itself (fixed sizes would let them overlap).
         chart.legend?.visible && !isPie ? null : el('ChartElementPosition', el('Top', '1'), el('Left', '1'), el('Height', '98'), el('Width', '98')),
-        isPie ? el('ChartInnerPlotPosition', el('Top', '6'), el('Left', '13'), el('Height', '88'), el('Width', '74')) : null,
+        isPie ? el('ChartInnerPlotPosition', el('Top', '10'), el('Left', '20'), el('Height', '80'), el('Width', '60')) : null,
         // Crystal's plot area is light grey behind bars and lines.
         el('Style', isPie ? null : el('BackgroundColor', '#D9D9D9')))),
       // The legend as Crystal has it (shown or not, and where); a bar per colour has none by default.
@@ -1322,7 +1342,8 @@ class RdlBuilder {
     const merged: number[] = [];
     for (const x of xs) if (merged.length === 0 || x - merged[merged.length - 1] > 144) merged.push(x);
     return merged.map((x, i) => {
-      if (i + 1 < merged.length) return { x, width: Math.max(twipsToInches(merged[i + 1] - x), 0.3) };
+      // Each column ends where the next begins, so every column keeps its Crystal position.
+      if (i + 1 < merged.length) return { x, width: twipsToInches(merged[i + 1] - x) };
       const widest = Math.max(0, ...cellObjects.filter((o) => (o.position?.x ?? 0) >= x).map((o) => o.size?.width ?? 0));
       return { x, width: widest ? Math.max(twipsToInches(widest), 0.3) : DEFAULT_WIDTH };
     });
@@ -1450,10 +1471,23 @@ class RdlBuilder {
         const left = columns[first].x;
         const width = columns.slice(first, last + 1).reduce((sum, c) => sum + c.width, 0);
         const items: XmlElement[] = [];
-        for (const p of placed.filter((q) => q.first >= first && q.first <= last)) {
+        const inCell = placed.filter((q) => q.first >= first && q.first <= last);
+        for (const p of inCell) {
           const box = this.boxOf(p.obj, 0);
           box.left = Math.min(Math.max(0, twipsToInches(p.x - left)), width);
           box.width = Math.min(box.width, Math.max(width - box.left, 0.01));
+          // Left-aligned text may run on to the next object beside it or the cell's end (SSRS fonts are a little
+          // wider than Crystal's, and would wrap it sooner).
+          const o = p.obj;
+          if (o.kind === 'text' || o.kind === 'field') {
+            const leftAligned = o.align === 'left' || (!o.align && (o.kind === 'text' || (o.field !== undefined && this.valueTypeOf(o.field) === 'string')));
+            const y = o.position?.y ?? 0;
+            const bottom = y + (o.size?.height ?? 0);
+            const next = inCell
+              .filter((q) => q !== p && q.x > p.x && (q.obj.position?.y ?? 0) < bottom && (q.obj.position?.y ?? 0) + (q.obj.size?.height ?? 0) > y)
+              .reduce((min, q) => Math.min(min, twipsToInches(q.x - left)), width);
+            if (leftAligned && next - box.left > box.width) box.width = next - box.left;
+          }
           const item = this.reportItem(p.obj, 'row', area, box);
           if (item) items.push(item);
         }
@@ -1501,9 +1535,12 @@ class RdlBuilder {
         const ruled = { ...lines, left: rules.left.has(i), right: rules.right.has(i) };
         // The object's place within its column, as padding (keeps text off the column lines, as in Crystal).
         const columnRight = columns[i].x + inchesToTwips(columns[i].width);
+        // Left-aligned text may run on to the column's end (SSRS fonts are a little wider than Crystal's, and
+        // would wrap it sooner).
+        const leftAligned = obj?.align === 'left' || (!obj?.align && (obj?.kind === 'text' || (obj?.field !== undefined && this.valueTypeOf(obj.field) === 'string')));
         const padding = obj?.position && obj.size ? {
           left: Math.min(Math.max(obj.position.x - columns[i].x, 0), 288),
-          right: Math.min(Math.max(columnRight - (obj.position.x + obj.size.width), 0), 288),
+          right: leftAligned ? 0 : Math.min(Math.max(columnRight - (obj.position.x + obj.size.width), 0), 288),
         } : undefined;
         return el('TablixCell', el('CellContents', this.textbox(name, value, this.ruledBorderObject(cellObj, ruled), format, 'row', undefined, undefined, ruled, padding)));
       })));
@@ -1570,6 +1607,17 @@ class RdlBuilder {
       const right = last.x + inchesToTwips(last.width);
       const outerRight = Math.max(...this.tableRules);
       if (outerRight > right && outerRight - right <= 1440) columns[columns.length - 1] = { ...last, width: last.width + twipsToInches(outerRight - right) };
+      // A line running down the table is a column edge: the column nearest it starts there, so the cells'
+      // borders fall where Crystal drew the line (and line up with it where it is drawn above the table).
+      for (const x of [...new Set(this.tableRules)].sort((a, b) => a - b)) {
+        let best = -1;
+        columns.forEach((c, i) => { if (i > 0 && Math.abs(c.x - x) <= 360 && (best < 0 || Math.abs(c.x - x) < Math.abs(columns[best].x - x))) best = i; });
+        if (best < 0) continue;
+        const shift = twipsToInches(columns[best].x - x);
+        if (columns[best - 1].width - shift < 0.05 || columns[best].width + shift < 0.05) continue;
+        columns[best - 1] = { ...columns[best - 1], width: columns[best - 1].width - shift };
+        columns[best] = { ...columns[best], x, width: columns[best].width + shift };
+      }
     }
 
     const rows: XmlElement[] = [];
@@ -1606,7 +1654,9 @@ class RdlBuilder {
     const footerMembers: XmlElement[][] = [];
     for (let level = levels; level >= 1; level--) {
       footerMembers[level - 1] = addRows(areas.groupFooters.get(level), `Group${level}Footer`, `Group Footer ${level}`, 'Before');
-      if (this.frameFooters.has(level)) {
+      // A box framing a group that holds every record is closed by the table's own bottom border (drawn at the
+      // foot of each page, as Crystal closes a box running on to the next page).
+      if (this.frameFooters.has(level) && !(level === 1 && this.isConstantGroup(this.groupFields[0]))) {
         // The bottom edge of a box framing the group: a thin row whose cells have a top border.
         const closing: SectionInfo = { name: `Group${level}Frame`, height: 15, objects: [{ kind: 'line', name: 'FrameBottom', position: { x: 0, y: 0 }, size: { width: 0, height: 0 } }] };
         footerMembers[level - 1].push(...addRows([closing], `Group${level}Frame`, `Group Footer ${level}`, 'Before', false, 0.01));
@@ -1668,7 +1718,9 @@ class RdlBuilder {
           el('GroupExpressions', el('GroupExpression', `=${expression}`)),
           pageBreak(areas.groupHeaders.get(level), areas.groupFooters.get(level)),
           filters.length ? el('Filters', ...filters) : null),
-        el('SortExpressions', el('SortExpression', el('Value', sortValue), descending ? el('Direction', 'Descending') : null)),
+        el('SortExpressions', el('SortExpression', el('Value', sortValue), descending ? el('Direction', 'Descending') : null),
+          // Groups sorted by a summary keep Crystal's order among equal summaries: by the group's own value.
+          sortValue !== `=${expression}` ? el('SortExpression', el('Value', `=${expression}`), fieldSort?.descending ? el('Direction', 'Descending') : null) : null),
         el('TablixMembers', ...headerMembers[level - 1], member, ...footerMembers[level - 1]));
     }
 
@@ -1687,7 +1739,7 @@ class RdlBuilder {
       el('Width', inches(width)),
       // A framed table that runs on to the next page is closed at the foot of each page, as Crystal closes its box
       // (SSRS draws a table's own border on every page).
-      el('Style', el('Border', el('Style', 'None')), this.frameFooters.size
+      el('Style', el('Border', el('Style', 'None')), this.frameFooters.has(1) && this.isConstantGroup(this.groupFields[0])
         ? el('BottomBorder', el('Color', 'Black'), el('Style', 'Solid'), el('Width', `${((this.tableRuleWidth + 10) / 20).toFixed(2)}pt`))
         : null));
     return { tablix, height, width, left };
@@ -2036,6 +2088,17 @@ class RdlBuilder {
    * Page header sections shown on page 1 only ("PageNumber > 1" hides them) and on the other pages only
    * ("PageNumber <= 1" hides them): page 1's sections (with the unconditional ones) and the other pages'.
    */
+  /** The font most of the report's text uses (Arial when none is stored): text without a font of its own takes it. */
+  private defaultFont(): string {
+    const counts = new Map<string, number>();
+    for (const area of this.definition.layout) {
+      for (const section of area.sections) {
+        for (const o of section.objects) if (o.font && (o.kind === 'text' || o.kind === 'field')) counts.set(o.font, (counts.get(o.font) ?? 0) + 1);
+      }
+    }
+    return [...counts].sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'Arial';
+  }
+
   private splitFirstPage(sections: SectionInfo[]): { first: SectionInfo[]; later: SectionInfo[] } | null {
     const textOf = (s: SectionInfo) => {
       const ref = s.conditions?.suppress;
@@ -2725,7 +2788,7 @@ class RdlBuilder {
     const report = el('Report', { MustUnderstand: 'df', xmlns: RDL_NS, 'xmlns:rd': RD_NS, 'xmlns:df': `${RDL_NS}/defaultfontfamily` },
       el('rd:ReportUnitType', 'Inch'),
       el('rd:ReportID', reportId(this.options.reportName)),
-      el('df:DefaultFontFamily', 'Arial'),
+      el('df:DefaultFontFamily', this.defaultFont()),
       el('AutoRefresh', '0'),
       el('DataSources', this.options.sharedDataSource
         ? el('DataSource', { Name: this.dataSourceName },
@@ -2745,11 +2808,11 @@ class RdlBuilder {
           el('rd:DataSourceID', reportId(`${this.options.reportName}/${d.name}`))))),
       el('DataSets', this.datasetElement(this.dataSourceName), ...this.extraDataSets),
       el('ReportSections', el('ReportSection',
-        el('Body', el('ReportItems', ...bodyItems), el('Height', inches(Math.max(top, DEFAULT_HEIGHT))), el('Style')),
+        el('Body', el('ReportItems', ...clearLineOverlaps(bodyItems)), el('Height', inches(Math.max(top, DEFAULT_HEIGHT))), el('Style')),
         el('Width', inches(Math.max(width, 1))),
         el('Page',
-          header.items.length ? el('PageHeader', el('Height', inches(header.height)), el('PrintOnFirstPage', 'true'), el('PrintOnLastPage', 'true'), el('ReportItems', ...header.items), el('Style')) : null,
-          footer.items.length ? el('PageFooter', el('Height', inches(footer.height)), el('PrintOnFirstPage', 'true'), el('PrintOnLastPage', 'true'), el('ReportItems', ...footer.items), el('Style')) : null,
+          header.items.length ? el('PageHeader', el('Height', inches(header.height)), el('PrintOnFirstPage', 'true'), el('PrintOnLastPage', 'true'), el('ReportItems', ...clearLineOverlaps(header.items)), el('Style')) : null,
+          footer.items.length ? el('PageFooter', el('Height', inches(footer.height)), el('PrintOnFirstPage', 'true'), el('PrintOnLastPage', 'true'), el('ReportItems', ...clearLineOverlaps(footer.items)), el('Style')) : null,
           el('PageHeight', inches(landscape ? paperWidth : paperHeight)),
           el('PageWidth', inches(pageWidth)),
           el('LeftMargin', inches(margins.left)), el('RightMargin', inches(margins.right)),
@@ -3009,6 +3072,19 @@ function hideWhen(item: XmlElement, expression: string): XmlElement {
  * The items of a plain rectangle (no border, background or visibility of its own) at their places on the page;
  * any other item as it is.
  */
+/**
+ * Text in a box tall enough for several lines, where runs of spaces push the next words on to a new line: Crystal
+ * drops spaces where it wraps a line, SSRS keeps them (centred text then shifts aside, and a run can fill a line
+ * of its own). Such a run becomes a line break, and lines lose their trailing spaces.
+ */
+function wrapSpaces(text: string, obj: ReportObject): string {
+  const lineHeight = (obj.style?.size ?? 10) * 20 * 1.2;
+  if (!obj.size || obj.size.height < lineHeight * 1.8 || !/ {3,}/.test(text)) return text;
+  return text.split(/\r?\n/).map((line) => line.replace(/ {3,}/g, '\n')).join('\n')
+    .split('\n').map((line) => line.replace(/\s+$/, '')).join('\n')
+    .replace(/\n+$/, '');
+}
+
 function flattenRectangle(item: XmlElement): XmlElement[] {
   if (item.name !== 'Rectangle') return [item];
   const style = item.children.find((c): c is XmlElement => typeof c === 'object' && c !== null && (c as XmlElement).name === 'Style');
@@ -3024,6 +3100,33 @@ function flattenRectangle(item: XmlElement): XmlElement[] {
 }
 
 /** A copy of a report item moved by the given offsets (inches). */
+/**
+ * A text box whose foot reaches just past a line drawn across under it (Crystal draws a rule straight under a
+ * title, overlapping it by a few twips) ends at the line: SSRS moves or drops items that overlap, and the rule
+ * would be lost.
+ */
+function clearLineOverlaps(items: XmlElement[]): XmlElement[] {
+  const rules = items.filter((i) => i.name === 'Line' && itemNumber(i, 'Height') === 0);
+  return items.map((item) => {
+    if (item.name === 'Rectangle') {
+      return { ...item, children: item.children.map((c) => (typeof c === 'object' && c !== null && (c as XmlElement).name === 'ReportItems'
+        ? { ...(c as XmlElement), children: clearLineOverlaps((c as XmlElement).children.filter((x): x is XmlElement => typeof x === 'object' && x !== null)) }
+        : c)) };
+    }
+    if (item.name !== 'Textbox') return item;
+    const top = itemNumber(item, 'Top');
+    const height = itemNumber(item, 'Height');
+    const left = itemNumber(item, 'Left');
+    const right = left + itemNumber(item, 'Width');
+    const cut = rules
+      .map((r) => ({ y: itemNumber(r, 'Top'), left: itemNumber(r, 'Left'), right: itemNumber(r, 'Left') + itemNumber(r, 'Width') }))
+      .filter((r) => r.y > top + height * 0.6 && r.y < top + height && r.left < right && r.right > left)
+      .reduce((min, r) => Math.min(min, r.y), Infinity);
+    if (cut === Infinity) return item;
+    return { ...item, children: item.children.map((c) => (typeof c === 'object' && c !== null && (c as XmlElement).name === 'Height' ? el('Height', inches(cut - top)) : c)) };
+  });
+}
+
 function moveItem(item: XmlElement, top: number, left: number): XmlElement {
   return {
     ...item,
