@@ -191,6 +191,9 @@ export interface ChartInfo {
   graphType?: number;
   /** A second "on change of" field: one series per value of it (several lines or bar colours). */
   series?: string;
+  /** How the categories and the series are ordered: 0 ascending, 1 descending, 2 as the data comes (original order). */
+  categoryOrder?: number;
+  seriesOrder?: number;
   /** Whether the legend shows, and where (0 right, 1 left, 2 bottom, 3 top). */
   legend?: { visible: boolean; position: number };
   /** What each data point is labelled with (0 nothing, 1 its category, 2 its value, 3 both) and the label's number format (Chart Expert list index). */
@@ -292,7 +295,9 @@ export interface SectionInfo {
   conditions?: Record<string, FormulaRef>;
   /** The section's Suppress box is ticked (a suppress formula, when present, decides instead). */
   suppressed?: boolean;
-  /** The section format record's flag bytes, as hex (only partly decoded: byte 6 is the Suppress box). */
+  /** The section's New Page Before box is ticked. */
+  newPageBefore?: boolean;
+  /** The section format record's flag bytes, as hex (byte 6 is the Suppress box, byte 10 New Page Before). */
   formatFlags?: string;
   objects: ReportObject[];
 }
@@ -802,6 +807,8 @@ function buildLayout(records: RecordNode[]): AreaInfo[] {
       const format = findAll([record], SECTION_FORMAT)[0];
       const flags = format && ownBytes(format);
       if (section && flags && flags.length > 6 && flags[6] === 0) section.suppressed = true;
+      // Byte 10 is 1 when New Page Before is ticked.
+      if (section && flags && flags.length > 10 && flags[10] === 1) section.newPageBefore = true;
       if (section && flags) section.formatFlags = Array.from(flags.subarray(0, 24), (b) => b.toString(16).padStart(2, '0')).join('');
       const conditions = namedConditions(record);
       // Before the area's first section the conditions belong to the whole area.
@@ -944,8 +951,16 @@ function buildLayout(records: RecordNode[]): AreaInfo[] {
         // The chart's "on change of" fields: the first gives the categories, a second one the series.
         const field = object.chart ? nonEmpty(ownStrings(record))[0] : undefined;
         if (object.chart && field) {
-          if (!object.chart.onChangeOf) object.chart.onChangeOf = field;
-          else if (!object.chart.series && field !== object.chart.onChangeOf) object.chart.series = field;
+          // The bytes after the field: the sixth is the sort order (0 ascending, 1 descending, 2 original order).
+          const run = tokenize(ownBytes(record)).find((t): t is { bytes: Uint8Array } => 'bytes' in t && t.bytes.length >= 6);
+          const order = run && run.bytes[5] <= 2 ? run.bytes[5] : undefined;
+          if (!object.chart.onChangeOf) {
+            object.chart.onChangeOf = field;
+            if (order !== undefined) object.chart.categoryOrder = order;
+          } else if (!object.chart.series && field !== object.chart.onChangeOf) {
+            object.chart.series = field;
+            if (order !== undefined) object.chart.seriesOrder = order;
+          }
         }
         break;
       }

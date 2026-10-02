@@ -65,6 +65,13 @@ describe('formula translation', () => {
     assert.equal(tr('if CurrentFieldValue < 0 then 255 else DefaultAttribute', true).expression, '=IIf((Me.Value < 0), "#ff0000", Nothing)');
   });
 
+  it('compares text fields without trailing spaces, as Crystal does with padded database columns', () => {
+    const typed: FormulaContext = { ...ctx, fieldType: (ref) => (ref === 'Orders.Kind' ? 'string' : 'number') };
+    assert.equal(translateFormula('if {Orders.Kind} = "N" then "Residual" else "x"', typed).expression, '=IIf((RTrim(Fields!Kind.Value) = "N"), "Residual", "x")');
+    assert.equal(translateFormula('{Orders.Kind} in ["A", "B"]', typed).expression, '=(RTrim(Fields!Kind.Value) = "A" OrElse RTrim(Fields!Kind.Value) = "B")');
+    assert.equal(translateFormula('{Orders.Amount} > 3', typed).expression, '=(Fields!Amount.Value > 3)');
+  });
+
   it('flags what it cannot translate instead of guessing', () => {
     const vars = tr('WhilePrintingRecords; NumberVar total := total + 1; total');
     assert.ok(vars.issues.some((i) => i.includes('WhilePrintingRecords')));
@@ -1087,6 +1094,15 @@ describe('subreports in the report body', () => {
     assert.ok(review.some((r) => /left blank/.test(r.message)));
   });
 
+  it('sizes a subreport as in Crystal so it grows with what it shows, and starts a new page where Crystal does', () => {
+    const paged: ReportDefinition = { ...main, layout: main.layout.map((a) => (a.name === 'ReportFooterArea1'
+      ? { ...a, sections: [{ ...a.sections[0], newPageBefore: true }] } : a)) };
+    const { rdl } = convertToRdl(paged, src('Orders', 'Name'), { reportName: 'Main', subreports });
+    const sub = rdl.slice(rdl.indexOf('<Rectangle Name="Sub1">'));
+    assert.ok(/<\/KeepTogether>\s*<Top>[^<]*<\/Top>\s*<Left>[^<]*<\/Left>\s*<Height>0\.278in<\/Height>/.test(sub), 'the Crystal object height (0.278in), not its content\'s');
+    assert.ok(/<PageBreak>\s*<BreakLocation>Start<\/BreakLocation>\s*<\/PageBreak>/.test(rdl), 'a new page before the section');
+  });
+
   it('keeps separate subreport files on request', () => {
     const { rdl, inlinedOnly } = convertToRdl(main, src('Orders', 'Name'), { reportName: 'Main', subreports, embedSubreports: false });
     assert.ok(rdl.includes('<Subreport ') && rdl.includes('<ReportName>Main_Subdocument_7</ReportName>'));
@@ -1184,6 +1200,14 @@ describe('chart options', () => {
     const { rdl } = convertToRdl(definition, source, { reportName: 'C', subreport: true });
     const chart = rdl.slice(rdl.indexOf('<Chart Name="Graph1">'));
     assert.ok(/<\/DataSetName>\s*<Top>0\.177in<\/Top>/.test(chart), chart.slice(chart.indexOf('<DataSetName>'), chart.indexOf('<DataSetName>') + 120));
+  });
+
+  it('keeps categories in the order the data comes when Crystal does, or sorts them as Crystal does', () => {
+    const original = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', categoryOrder: 2, family: 0, graphType: 0 }), source, { reportName: 'C', subreport: true }).rdl;
+    const categories = original.slice(original.indexOf('<ChartCategoryHierarchy>'), original.indexOf('</ChartCategoryHierarchy>'));
+    assert.ok(!categories.includes('<SortExpressions>'), 'original order: no sort');
+    const descending = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', categoryOrder: 1, family: 0, graphType: 0 }), source, { reportName: 'C', subreport: true }).rdl;
+    assert.ok(/<ChartCategoryHierarchy>[\s\S]*<Direction>Descending<\/Direction>/.test(descending));
   });
 
   it('puts the legend where Crystal does and leaves points unlabelled when it does', () => {
@@ -1360,7 +1384,7 @@ describe('a page header that differs on page 1', () => {
   const source: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Label', type: 'string' }] }] };
   // Away from the detail column, so they stay header text (not column headings).
   const text = (name: string, value: string) => ({ kind: 'text', name, text: value, position: { x: 5000, y: 0 }, size: { width: 3000, height: 240 } });
-  const definition = (): ReportDefinition => ({
+  const definition0 = (): ReportDefinition => ({
     ...emptyDefinition(),
     formulas: [
       { name: 'Section_Visibility', index: 0, kind: 'conditionalFormat', text: 'PageNumber >1', referencedFields: ['Page Number'] },
@@ -1379,14 +1403,17 @@ describe('a page header that differs on page 1', () => {
       { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [{ kind: 'field', name: 'L', field: 'T.Label', position: { x: 0, y: 0 }, size: { width: 2000, height: 240 } }] }] },
     ],
   });
-  it('puts page 1\'s header at the top of the body and keeps the page header for the other pages', () => {
-    const { rdl } = convertToRdl(definition(), source, { reportName: 'H' });
+  it('shows each version of the page header on its pages, and starts page 1\'s body with what does not fit', () => {
+    const definition = definition0();
+    definition.layout[0].sections[1].objects.push({ ...text('Below', 'Below'), position: { x: 5000, y: 700 } });
+    const { rdl } = convertToRdl(definition, source, { reportName: 'H' });
     const body = rdl.slice(rdl.indexOf('<Body>'), rdl.indexOf('</Body>'));
     const header = rdl.slice(rdl.indexOf('<PageHeader>'), rdl.indexOf('</PageHeader>'));
-    assert.ok(body.includes('>Logo<') && body.includes('>Address<') && !body.includes('>Short<'), 'page 1: logo and address');
-    assert.ok(header.includes('>Logo<') && header.includes('>Short<') && !header.includes('>Address<'), 'other pages: logo and the short block');
-    assert.ok(header.includes('<PrintOnFirstPage>false</PrintOnFirstPage>'));
-    assert.ok(!rdl.includes('Globals!PageNumber &gt; 1') && !/<Height>0\.833in<\/Height>\s*<PrintOnFirstPage>/.test(rdl), 'no page-number conditions left; header is the short one');
+    const hiddenOf = (name: string) => { const at = header.indexOf(`<Textbox Name="${name}">`); return /<Hidden>([^<]*)<\/Hidden>/.exec(header.slice(at, header.indexOf('</Textbox>', at)))?.[1]; };
+    assert.equal(hiddenOf('Short'), '=Globals!PageNumber = 1', 'the other pages\' version is hidden on page 1');
+    assert.equal(hiddenOf('Address'), '=Globals!PageNumber &gt; 1', 'page 1\'s version is hidden after page 1');
+    assert.ok(header.includes('<PrintOnFirstPage>true</PrintOnFirstPage>'));
+    assert.ok(body.includes('>Below<') && !header.includes('>Below<'), 'what lies below the page header\'s height starts page 1\'s body');
   });
 });
 

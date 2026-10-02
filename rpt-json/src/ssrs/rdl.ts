@@ -823,6 +823,20 @@ class RdlBuilder {
       if (item) items.push(item);
       bottom = Math.max(bottom, box.top - top + box.height);
     }
+    // Crystal's New Page Before: the section's items in a rectangle that starts a new page (hidden with the
+    // section, so a hidden section breaks no page).
+    if (scope === 'body' && section.newPageBefore && items.length) {
+      const sectionHeight = Math.max(section.height !== undefined ? twipsToInches(section.height) : 0, bottom);
+      const wrapper = el('Rectangle', { Name: this.itemNames.make(`${section.name || 'Section'}_Page`) },
+        el('ReportItems', ...items.map((item) => moveItem(item, -top, 0))),
+        el('PageBreak', el('BreakLocation', 'Start')),
+        el('KeepTogether', 'false'),
+        el('Top', inches(top)), el('Left', '0in'), el('Height', inches(sectionHeight)),
+        el('Width', inches(Math.max(...items.map(itemRight), 0.1))),
+        hidden ? el('Visibility', el('Hidden', hidden)) : null,
+        el('Style', el('Border', el('Style', 'None'))));
+      items.splice(0, items.length, wrapper);
+    }
     const height = Math.max(section.height !== undefined ? twipsToInches(section.height) : 0, bottom);
     return { items, height: section.objects.length || section.height ? height : 0 };
   }
@@ -922,7 +936,10 @@ class RdlBuilder {
     }
     if (mode === 'page') this.note(item, `SSRS allows no subreport in a page header or footer, so its content was placed here directly, reading dataset ${dataset} (first row)`);
 
-    const height = Math.max(box.height, result.height);
+    // In the body a subreport keeps its Crystal size and grows with what it shows, as in Crystal (SSRS rectangles
+    // grow but never shrink: sized to all their content, parts hidden by data would leave blank space). A page
+    // header cannot grow, so there it gets its content's height.
+    const height = mode === 'body' ? box.height : Math.max(box.height, result.height);
     const rectangle = el('Rectangle', { Name: this.itemNames.make(obj.name || 'Subreport') },
       result.items.length ? el('ReportItems', ...result.items) : null,
       el('KeepTogether', 'true'),
@@ -930,8 +947,18 @@ class RdlBuilder {
       hidden ? el('Visibility', el('Hidden', hidden)) : null,
       // The subreport object's own border (Crystal draws a box around the subreport).
       el('Style', ...this.borderStyle(obj.border)));
+    this.contentHeights.set(rectangle, Math.max(box.height, result.height));
     return { item: rectangle, height };
   }
+
+  private keepContentHeight(from: XmlElement, to: XmlElement): XmlElement {
+    const h = this.contentHeights.get(from);
+    if (h !== undefined) this.contentHeights.set(to, h);
+    return to;
+  }
+
+  /** The height of the content of subreports placed in the body (their rectangles start at the Crystal size). */
+  private readonly contentHeights = new Map<XmlElement, number>();
 
   private reportItem(obj: ReportObject, scope: Scope, area: string, box: Box, hidden?: string): XmlElement | null {
     const item = `${obj.kind} object "${obj.name}" in ${area}`;
@@ -1121,7 +1148,8 @@ class RdlBuilder {
     const seriesHierarchy = seriesExpression && seriesExpression !== 'Nothing'
       ? [el('ChartMember',
         el('Group', { Name: this.itemNames.make(`${chartName}_Series`) }, el('GroupExpressions', el('GroupExpression', `=${seriesExpression}`))),
-        el('SortExpressions', el('SortExpression', el('Value', `=${seriesExpression}`))),
+        chart.seriesOrder === 2 ? null : el('SortExpressions', el('SortExpression', el('Value', `=${seriesExpression}`),
+          chart.seriesOrder === 1 ? el('Direction', 'Descending') : null)),
         values.length > 1 ? el('ChartMembers', ...valueMembers) : null,
         el('Label', `=${seriesExpression}`))]
       : valueMembers;
@@ -1129,9 +1157,13 @@ class RdlBuilder {
     // values (not from zero).
     const isLine = style.type === 'Line';
     const axis = (title: string | undefined, kind: 'category' | 'value', format?: string) => el('ChartAxis', { Name: 'Primary' },
-      el('Style', el('FontSize', '8pt'), format ? el('Format', format) : null),
-      el('ChartAxisTitle', el('Caption', title ?? ''), el('Style', el('FontSize', '8pt'))),
+      el('Style', el('FontSize', '7pt'), format ? el('Format', format) : null),
+      el('ChartAxisTitle', el('Caption', title ?? ''), el('Style', el('FontSize', '7pt'))),
       kind === 'category' ? el('Interval', '1') : null,
+      // Crystal angles bar charts' category labels and keeps a line chart's dates on one row.
+      kind === 'category' && !isPie ? el('Angle', isLine ? '0' : '-45') : null,
+      // SSRS would otherwise resize axis text to fit (up to 10pt); Crystal keeps its size.
+      el('LabelsAutoFitDisabled', 'true'),
       el('ChartMajorGridLines', el('Enabled', kind === 'value' ? 'True' : 'False'), el('Style', el('Border', el('Color', 'Black'), el('Width', '0.5pt')))),
       el('ChartMinorGridLines', el('Style')),
       el('ChartMinorTickMarks', el('Length', '0.5')),
@@ -1152,7 +1184,7 @@ class RdlBuilder {
     // #AXISLABEL is the category's text (#VALX would give its position for text categories).
     const labelText = { 1: '#AXISLABEL', 2: valueKeyword, 3: `#AXISLABEL ${valueKeyword}` }[chart.dataLabels?.kind ?? 0];
     const dataLabel = labelText
-      ? el('ChartDataLabel', el('Style', el('FontSize', '7pt')), el('Label', labelText), el('Visible', 'true'))
+      ? el('ChartDataLabel', el('Style', el('FontSize', '6pt')), el('Label', labelText), el('Visible', 'true'))
       : el('ChartDataLabel', el('Style'));
     const isPie = style.type === 'Shape';
     const series = values.map((v, i) => {
@@ -1182,7 +1214,10 @@ class RdlBuilder {
       el('ChartCategoryHierarchy', el('ChartMembers', categoryExpression
         ? el('ChartMember',
           el('Group', { Name: this.itemNames.make(`${chartName}_Category`) }, el('GroupExpressions', el('GroupExpression', `=${categoryExpression}`))),
-          el('SortExpressions', el('SortExpression', el('Value', `=${this.categorySortValue(category!, categoryExpression)}`))),
+          // Crystal's order: as the data comes (no sort), or ascending/descending by value.
+          chart.categoryOrder === 2 ? null : el('SortExpressions', el('SortExpression',
+            el('Value', `=${this.categorySortValue(category!, categoryExpression)}`),
+            chart.categoryOrder === 1 ? el('Direction', 'Descending') : null)),
           el('Label', `=${categoryExpression}`))
         : el('ChartMember', el('Label', chart.title ?? '')))),
       el('ChartSeriesHierarchy', el('ChartMembers', ...seriesHierarchy)),
@@ -1193,14 +1228,17 @@ class RdlBuilder {
         // Crystal's 3D pies are tilted well back, with a thick edge.
         style.threeD ? el('ChartThreeDProperties', el('Enabled', 'true'),
           el('Rotation', isPie ? '0' : '20'), el('Inclination', isPie ? '50' : '20'),
-          isPie ? el('DepthRatio', '40') : null, el('Shading', 'Real')) : null,
+          isPie ? el('DepthRatio', '150') : null, el('Shading', 'Real')) : null,
+        // Crystal draws pies large, with their labels around them.
+        isPie ? el('ChartInnerPlotPosition', el('Top', '12'), el('Left', '22'), el('Height', '76'), el('Width', '56')) : null,
         // Crystal's plot area is light grey behind bars and lines.
         el('Style', isPie ? null : el('BackgroundColor', '#D9D9D9')))),
       // The legend as Crystal has it (shown or not, and where); a bar per colour has none by default.
       el('ChartLegends', el('ChartLegend', { Name: 'Default' },
         (chart.legend ? !chart.legend.visible : barPerPoint) ? el('Hidden', 'true') : null,
         el('Style', el('FontSize', '7pt')),
-        el('Position', LEGEND_POSITIONS[chart.legend?.position ?? 0] ?? 'RightCenter'))),
+        el('Position', LEGEND_POSITIONS[chart.legend?.position ?? 0] ?? 'RightCenter'),
+        el('AutoFitTextDisabled', 'true'))),
       chart.title ? el('ChartTitles', el('ChartTitle', { Name: 'Default' }, el('Caption', chart.title), el('Style', el('FontWeight', 'Bold')))) : null,
       // Crystal's chart colours, in its order.
       el('Palette', 'Custom'),
@@ -1469,7 +1507,7 @@ class RdlBuilder {
       .filter((s) => s.expression !== 'Nothing');
     const summarySort = sorts.find((s) => s.bySummary);
     const pageBreak = (sections: SectionInfo[] | undefined, footer?: SectionInfo[]) => {
-      const before = (sections ?? []).some((s) => s.conditions?.newPageBefore);
+      const before = (sections ?? []).some((s) => s.conditions?.newPageBefore || s.newPageBefore);
       const after = [...(sections ?? []), ...(footer ?? [])].some((s) => s.conditions?.newPageAfter);
       return before || after ? el('PageBreak', el('BreakLocation', before && after ? 'StartAndEnd' : before ? 'Between' : 'End')) : null;
     };
@@ -2409,11 +2447,11 @@ class RdlBuilder {
           : contents.find((item) => item.name === 'Rectangle' && Math.abs(itemNumber(item, 'Left') - x) <= 0.06) ? 'LeftBorder' : undefined;
         if (side) {
           contents = contents.map((item) => item.name === 'Rectangle' && Math.abs((side === 'RightBorder' ? itemRight(item) : itemNumber(item, 'Left')) - x) <= 0.06
-            ? withBorder(item, side, lineObj.border) : item);
+            ? this.keepContentHeight(item, withBorder(item, side, lineObj.border)) : item);
         } else {
           // A divider over a subreport runs down with it, to the bottom of the subreport it crosses.
           const crossed = contents.filter((item) => item.name === 'Rectangle' && itemNumber(item, 'Left') < x && itemRight(item) > x);
-          const reach = Math.max(line.box.top + line.box.height, ...crossed.map((item) => itemNumber(item, 'Top') + itemNumber(item, 'Height')));
+          const reach = Math.max(line.box.top + line.box.height, ...crossed.map((item) => itemNumber(item, 'Top') + (this.contentHeights.get(item) ?? itemNumber(item, 'Height'))));
           const drawn = this.reportItem(line.obj, 'body', line.area, { ...line.box, height: reach - line.box.top }, line.hidden);
           if (drawn) kept.push(drawn);
         }
@@ -2479,15 +2517,30 @@ class RdlBuilder {
     // A page header with sections for page 1 only and for the other pages: SSRS's page header has one height,
     // so page 1's version goes at the top of the body and the page header skips page 1.
     const pageOne = this.splitFirstPage(areas.pageHeader);
-    const firstPage = pageOne ? placeAll(pageOne.first, 'Page Header (page 1)', 'body') : { items: [], height: 0 };
+    let header = placeAll(pageOne ? pageOne.later : areas.pageHeader, 'Page Header');
+    let firstPage: { items: XmlElement[]; height: number } = { items: [], height: 0 };
     if (pageOne) {
-      areas.pageHeader = pageOne.later;
-      this.note('Page header', 'Crystal prints a different page header on page 1: that one is placed at the top of the body, and the SSRS page header (the other pages\' version) is not printed on page 1');
+      // SSRS has one page header height, and reserves it on every page. The other pages' header is printed on
+      // every page but hidden on page 1; page 1's header items within that height go into the page header too
+      // (hidden after page 1), and the rest of it starts the body.
+      const later = header.height;
+      const first = placeAll(pageOne.first, 'Page Header (page 1)').items.flatMap((item) => flattenRectangle(item));
+      const inHeader = first.filter((item) => itemNumber(item, 'Top') < later - 0.005);
+      const height = Math.max(later, ...inHeader.map((item) => itemNumber(item, 'Top') + itemNumber(item, 'Height')));
+      const inBody = first.filter((item) => !inHeader.includes(item)).map((item) => moveItem(item, -height, 0));
+      header = {
+        items: [
+          ...header.items.map((item) => hideWhen(item, 'Globals!PageNumber = 1')),
+          ...inHeader.map((item) => hideWhen(item, 'Globals!PageNumber > 1')),
+        ],
+        height,
+      };
+      firstPage = { items: inBody, height: Math.max(0, ...inBody.map((item) => itemNumber(item, 'Top') + itemNumber(item, 'Height'))) };
+      this.note('Page header', 'Crystal prints a different page header on page 1: both versions are in the SSRS page header, each shown on its pages; what of page 1\'s does not fit the page header\'s height starts the body of page 1');
     }
     const body = this.bodyItems(areas, firstPage.height);
     const bodyItems = [...firstPage.items, ...body.items];
     const top = body.height;
-    const header = placeAll(areas.pageHeader, 'Page Header');
     const footer = placeAll(areas.pageFooter, 'Page Footer');
 
     let width = 0;
@@ -2553,7 +2606,7 @@ class RdlBuilder {
         el('Body', el('ReportItems', ...bodyItems), el('Height', inches(Math.max(top, DEFAULT_HEIGHT))), el('Style')),
         el('Width', inches(Math.max(width, 1))),
         el('Page',
-          header.items.length ? el('PageHeader', el('Height', inches(header.height)), el('PrintOnFirstPage', pageOne ? 'false' : 'true'), el('PrintOnLastPage', 'true'), el('ReportItems', ...header.items), el('Style')) : null,
+          header.items.length ? el('PageHeader', el('Height', inches(header.height)), el('PrintOnFirstPage', 'true'), el('PrintOnLastPage', 'true'), el('ReportItems', ...header.items), el('Style')) : null,
           footer.items.length ? el('PageFooter', el('Height', inches(footer.height)), el('PrintOnFirstPage', 'true'), el('PrintOnLastPage', 'true'), el('ReportItems', ...footer.items), el('Style')) : null,
           el('PageHeight', inches(landscape ? paperWidth : paperHeight)),
           el('PageWidth', inches(pageWidth)),
@@ -2772,6 +2825,41 @@ function withBorder(item: XmlElement, side: 'LeftBorder' | 'RightBorder', border
       ? item.children.map((c) => (typeof c === 'object' && c !== null && (c as XmlElement).name === 'Style' ? { ...(c as XmlElement), children: [...(c as XmlElement).children, edge] } : c))
       : [...item.children, el('Style', edge)],
   };
+}
+
+/** A copy of a report item hidden when the expression (without "=") is true, besides when it already was. */
+function hideWhen(item: XmlElement, expression: string): XmlElement {
+  const visibility = item.children.find((c): c is XmlElement => typeof c === 'object' && c !== null && (c as XmlElement).name === 'Visibility');
+  const current = visibility?.children.find((c): c is XmlElement => typeof c === 'object' && c !== null && (c as XmlElement).name === 'Hidden');
+  const value = current ? String(current.children[0] ?? '') : '';
+  const hidden = !value || /^false$/i.test(value) ? `=${expression}`
+    : /^=?true$/i.test(value) ? '=True'
+    : `=(${value.replace(/^=/, '')}) OrElse (${expression})`;
+  const element = el('Visibility', el('Hidden', hidden));
+  if (visibility) return { ...item, children: item.children.map((c) => (c === visibility ? element : c)) };
+  // Visibility goes right after the item's Width, as the schema orders them.
+  const width = item.children.findIndex((c) => typeof c === 'object' && c !== null && (c as XmlElement).name === 'Width');
+  const children = [...item.children];
+  children.splice(width < 0 ? children.length : width + 1, 0, element);
+  return { ...item, children };
+}
+
+/**
+ * The items of a plain rectangle (no border, background or visibility of its own) at their places on the page;
+ * any other item as it is.
+ */
+function flattenRectangle(item: XmlElement): XmlElement[] {
+  if (item.name !== 'Rectangle') return [item];
+  const style = item.children.find((c): c is XmlElement => typeof c === 'object' && c !== null && (c as XmlElement).name === 'Style');
+  const plain = !style || !toXml(style).match(/<(Top|Bottom|Left|Right)?Border>\s*(<Color>[^<]*<\/Color>\s*)?<Style>(Solid|Dashed|Dotted|Double)|BackgroundColor/);
+  const visible = !item.children.some((c) => typeof c === 'object' && c !== null && (c as XmlElement).name === 'Visibility');
+  const contents = item.children.find((c): c is XmlElement => typeof c === 'object' && c !== null && (c as XmlElement).name === 'ReportItems');
+  if (!plain || !visible || !contents) return [item];
+  const top = itemNumber(item, 'Top');
+  const left = itemNumber(item, 'Left');
+  return contents.children
+    .filter((c): c is XmlElement => typeof c === 'object' && c !== null)
+    .flatMap((c) => flattenRectangle(moveItem(c, top, left)));
 }
 
 /** A copy of a report item moved by the given offsets (inches). */
