@@ -122,7 +122,8 @@ export function layoutSummary(doc: CfbDocument, find: string[]): string {
         const holder = section.objects.find((o) => o.subreport?.index === index);
         if (holder) {
           lines.push(`  placed in ${shownName(area.name)}/${shownName(section.name)} h=${section.height ?? '?'}${section.suppressed ? ' SUPPRESSED' : ''}${section.formatFlags ? ` flags=${section.formatFlags}` : ''}${conditions(main!.definition!, section.conditions)}`);
-          lines.push(objectLine(main!.definition!, holder));
+          // Everything placed around it in that section (boxes and lines framing it, other subreports).
+          for (const o of section.objects) lines.push(`${o === holder ? '  >' : '   '}${objectLine(main!.definition!, o).slice(3)}`);
         }
       }
     }

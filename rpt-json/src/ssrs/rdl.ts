@@ -589,7 +589,7 @@ class RdlBuilder {
   }
 
   /** Sort expressions for the report's record sort (taken per group by its first record), or nothing. */
-  private recordOrder(): XmlElement | null {
+  private recordOrder(reverse = false): XmlElement | null {
     const sorts = (this.definition.sorts ?? this.definition.sortFields.map((field) => ({ field, descending: false, bySummary: false })))
       .filter((s) => !s.bySummary)
       .map((s) => ({ ...s, value: this.fieldObjectValue(s.field, 'row', 'Record sort').expression }))
@@ -599,7 +599,7 @@ class RdlBuilder {
       // SSRS allows no First in a sort expression: a category's first record under an ascending sort has its
       // smallest value (Min), under a descending one its largest (Max).
       // A date held as text sorts by its date, as in Crystal (as text, 01/08/2026 would come before 05/08/2025).
-      el('Value', `=${s.descending ? 'Max' : 'Min'}(${this.categorySortValue(s.field, s.value)})`), s.descending ? el('Direction', 'Descending') : null)));
+      el('Value', `=${s.descending ? 'Max' : 'Min'}(${this.categorySortValue(s.field, s.value)})`), s.descending !== reverse ? el('Direction', 'Descending') : null)));
   }
 
   /**
@@ -802,8 +802,8 @@ class RdlBuilder {
       // Crystal draws text right up to the object's edges: SSRS's default 2pt padding would make it wrap sooner.
       el('Style', ...this.borderStyle(border, lines),
         // Crystal keeps a text object's text a little inside its own border.
-        el('PaddingLeft', `${((padding?.left ?? 0) / 20 + (framed ? 2 : 0)).toFixed(1)}pt`), el('PaddingRight', `${((padding?.right ?? 0) / 20 + (framed ? 2 : 0)).toFixed(1)}pt`),
-        el('PaddingTop', framed ? '1pt' : '0pt'), el('PaddingBottom', '0pt')));
+        el('PaddingLeft', `${((padding?.left ?? 0) / 20 + (framed ? 6 : 0)).toFixed(1)}pt`), el('PaddingRight', `${((padding?.right ?? 0) / 20 + (framed ? 6 : 0)).toFixed(1)}pt`),
+        el('PaddingTop', framed ? '2pt' : '0pt'), el('PaddingBottom', framed ? '2pt' : '0pt')));
   }
 
   // ---- free-standing items (page header/footer, report header/footer) -------------------------
@@ -1219,8 +1219,6 @@ class RdlBuilder {
       // Crystal's axis text is small, as small as its data labels.
       el('Style', el('FontFamily', 'Arial'), el('FontSize', '5.5pt'), el('FontWeight', 'Normal'), format ? el('Format', format) : null),
       el('ChartAxisTitle', el('Caption', title ?? ''), el('Style', el('FontFamily', 'Arial'), el('FontSize', '5.5pt'), el('FontWeight', 'Normal'))),
-      // Crystal plots a line's first and last points on the plot's edges.
-      kind === 'category' && isLine ? el('Margin', 'False') : null,
       kind === 'category' ? el('Interval', '1') : null,
       // Crystal angles bar charts' category labels; a line chart's dates are staggered on two rows where they do
       // not fit on one (SSRS may offset them, but neither turn nor resize them).
@@ -1245,6 +1243,14 @@ class RdlBuilder {
       this.codeMembers.crPointColors = 'New System.Collections.Hashtable';
       if (!this.codeFunctions.includes(POINT_COLOR_CODE)) this.codeFunctions.push(POINT_COLOR_CODE);
     }
+    // Crystal lays its pie slices out counter-clockwise from three o'clock (the small slices end up to the right
+    // and above the centre); SSRS goes clockwise. The slices go in reverse order, each keeping the colour of its
+    // place in Crystal's order.
+    const pieSlices = style.type === 'Shape' && !!categoryExpression && categoryExpression !== 'Nothing';
+    if (pieSlices) {
+      this.codeMembers.crPieColors = 'New System.Collections.Hashtable';
+      if (!this.codeFunctions.includes(PIE_COLOR_CODE)) this.codeFunctions.push(PIE_COLOR_CODE);
+    }
     // Data labels as Crystal shows them: the category, the value (in the chart's number format), or both.
     const labelFormat = chart.dataLabels ? CHART_NUMBER_FORMATS[chart.dataLabels.format] : undefined;
     const valueKeyword = labelFormat ? `#VALY{${labelFormat}}` : '#VALY';
@@ -1264,7 +1270,8 @@ class RdlBuilder {
           el('ChartDataPointValues', el('Y', `=${value.expression}`)),
           dataLabel(value.expression),
           // Crystal draws lines thick (SSRS takes a line's width from its data points).
-          el('Style', barPerPoint ? el('Color', `=Code.CrPointColor(${vbString(chartName)}, ${categoryExpression})`) : null,
+          el('Style', barPerPoint ? el('Color', `=Code.CrPointColor(${vbString(chartName)}, ${categoryExpression})`)
+            : pieSlices ? el('Color', `=Code.CrPieColor(${vbString(chartName)}, ${categoryExpression}, CountDistinct(${categoryExpression}, ${vbString(this.dataset)}))`) : null,
             // Crystal outlines each bar and pie slice in black.
             isLine ? el('Border', el('Width', '1.5pt')) : el('Border', el('Color', 'Black'), el('Style', 'Solid'), el('Width', '0.5pt'))),
           // A distinct marker shape per line, clearly visible.
@@ -1295,9 +1302,9 @@ class RdlBuilder {
           // Crystal's order: as the data comes (no sort), or ascending/descending by value.
           // "In original order" is the order of the records after the report's record sort, which a chart group
           // would otherwise lose: sorted by the record sort fields (by the first record of each category).
-          chart.categoryOrder === 2 ? this.recordOrder() : el('SortExpressions', el('SortExpression',
+          chart.categoryOrder === 2 ? this.recordOrder(pieSlices) : el('SortExpressions', el('SortExpression',
             el('Value', `=${this.categorySortValue(category!, categoryExpression)}`),
-            chart.categoryOrder === 1 ? el('Direction', 'Descending') : null)),
+            (chart.categoryOrder === 1) !== pieSlices ? el('Direction', 'Descending') : null)),
           el('Label', `=${categoryExpression}`))
         : el('ChartMember', el('Label', chart.title ?? '')))),
       el('ChartSeriesHierarchy', el('ChartMembers', ...seriesHierarchy)),
@@ -1307,13 +1314,13 @@ class RdlBuilder {
         el('ChartValueAxes', axis(chart.valueTitle, 'value', labelFormat ?? (isPie ? undefined : this.options.chartAxisFormat))),
         // Crystal's 3D pies are tilted well back, with a thick edge.
         style.threeD ? el('ChartThreeDProperties', el('Enabled', 'true'),
-          el('Rotation', isPie ? '0' : '20'), el('Inclination', isPie ? '50' : '20'),
-          isPie ? el('DepthRatio', '150') : null, el('Shading', 'Real')) : null,
+          el('Rotation', isPie ? '0' : '20'), el('Inclination', isPie ? '40' : '20'),
+          isPie ? el('DepthRatio', '200') : null, el('Shading', 'Real')) : null,
         // Crystal draws pies large, with their labels around them.
         // Crystal's chart fills its object: the chart area takes the whole chart, less the legend's strip.
         // With a legend, SSRS lays the area and the legend out itself (fixed sizes would let them overlap).
         chart.legend?.visible && !isPie ? null : el('ChartElementPosition', el('Top', '1'), el('Left', '1'), el('Height', '98'), el('Width', '98')),
-        isPie ? el('ChartInnerPlotPosition', el('Top', '7'), el('Left', '17'), el('Height', '86'), el('Width', '66')) : null,
+        isPie ? el('ChartInnerPlotPosition', el('Top', '5'), el('Left', '15'), el('Height', '90'), el('Width', '70')) : null,
         // Crystal's plot area is light grey behind bars and lines.
         el('Style', isPie ? null : el('BackgroundColor', '#D9D9D9')))),
       // The legend as Crystal has it (shown or not, and where); a bar per colour has none by default.
@@ -3319,6 +3326,22 @@ const POINT_COLOR_CODE = [
   '    crPointColors(key) = palette(used Mod palette.Length)',
   '  End If',
   '  Return CStr(crPointColors(key))',
+  'End Function',
+].join('\r\n');
+
+/** A pie slice's colour: that of its place in Crystal's order, the slices being drawn in reverse (count: slices). */
+const PIE_COLOR_CODE = [
+  'Public Function CrPieColor(ByVal chart As String, ByVal category As Object, ByVal count As Integer) As String',
+  `  Dim palette() As String = {${CRYSTAL_PIE_PALETTE.map((c) => `"${c}"`).join(', ')}}`,
+  '  Dim key As String = chart & "|" & CStr(category)',
+  '  If Not crPieColors.ContainsKey(key) Then',
+  '    Dim used As Integer = 0',
+  '    For Each entry As System.Collections.DictionaryEntry In crPieColors',
+  '      If CStr(entry.Key).StartsWith(chart & "|") Then used = used + 1',
+  '    Next',
+  '    crPieColors(key) = palette(Math.Max(0, count - 1 - used) Mod palette.Length)',
+  '  End If',
+  '  Return CStr(crPieColors(key))',
   'End Function',
 ].join('\r\n');
 
