@@ -783,6 +783,7 @@ class RdlBuilder {
       if (!['fontColor', 'hyperlink', 'toolTip', 'backColor', 'suppress'].includes(key)) this.note(item, `formatting formula ${conditions[key].name} is not converted; set it on the text box manually`);
     }
     const border = backColor ? { ...(obj?.border ?? { sides: [0, 0, 0, 0] as [number, number, number, number] }), background: backColor } : obj?.border;
+    const framed = !!obj?.border && obj.border.sides.every((side) => side > 0);
     return el('Textbox', { Name: name },
       // A page header or footer keeps its size, as Crystal's does: a text box growing there pushes what is
       // below it down (on to a rule drawn under it).
@@ -800,8 +801,9 @@ class RdlBuilder {
       hidden || suppress ? el('Visibility', el('Hidden', hidden && suppress ? `=(${hidden.slice(1)}) OrElse (${suppress.slice(1)})` : (hidden ?? suppress)!)) : null,
       // Crystal draws text right up to the object's edges: SSRS's default 2pt padding would make it wrap sooner.
       el('Style', ...this.borderStyle(border, lines),
-        el('PaddingLeft', `${((padding?.left ?? 0) / 20).toFixed(1)}pt`), el('PaddingRight', `${((padding?.right ?? 0) / 20).toFixed(1)}pt`),
-        el('PaddingTop', '0pt'), el('PaddingBottom', '0pt')));
+        // Crystal keeps a text object's text a little inside its own border.
+        el('PaddingLeft', `${((padding?.left ?? 0) / 20 + (framed ? 2 : 0)).toFixed(1)}pt`), el('PaddingRight', `${((padding?.right ?? 0) / 20 + (framed ? 2 : 0)).toFixed(1)}pt`),
+        el('PaddingTop', framed ? '1pt' : '0pt'), el('PaddingBottom', '0pt')));
   }
 
   // ---- free-standing items (page header/footer, report header/footer) -------------------------
@@ -1115,7 +1117,8 @@ class RdlBuilder {
     return el('Image', { Name: this.itemNames.make(obj.name || 'Image') },
       el('Source', 'Embedded'),
       el('Value', imageName),
-      el('Sizing', 'FitProportional'),
+      // Crystal stretches a picture to its frame.
+      el('Sizing', obj.size ? 'Fit' : 'FitProportional'),
       el('Top', inches(box.top)), el('Left', inches(box.left)), el('Height', inches(box.height)), el('Width', inches(box.width)),
       visibility,
       el('Style', el('Border', el('Style', 'None'))));
@@ -1450,14 +1453,15 @@ class RdlBuilder {
     return !!formula && formula.referencedFields.length === 0 && !/[{]/.test(formula.text);
   }
 
-  private tableRow(columns: Column[], section: SectionInfo, rowName: string, area: string, minHeight = MIN_ROW_HEIGHT, outerOnly = false): { row: XmlElement; height: number; hidden?: string; more?: { row: XmlElement; height: number }[] } {
-    const split = this.splitAtRule(columns, section);
+  private tableRow(columns: Column[], section: SectionInfo, rowName: string, area: string, minHeight = MIN_ROW_HEIGHT, outerOnly = false, splitDone = false): { row: XmlElement; height: number; hidden?: string; more?: { row: XmlElement; height: number }[] } {
+    // Split once, at the first rule (the one under the heading's title); a rule lower down closes the headings.
+    const split = splitDone ? null : this.splitAtRule(columns, section);
     if (split) {
       // A line across the middle of the section (a rule under a heading): two rows, the upper ending at the line
       // (its bottom border), the lower starting there; the lines running down from it are the lower row's cell
       // borders, drawn as in the rows below it.
-      const upper = this.tableRow(columns, split.upper, rowName, area, minHeight, true);
-      const lower = this.tableRow(columns, split.lower, `${rowName}_Lower`, area, minHeight);
+      const upper = this.tableRow(columns, split.upper, rowName, area, minHeight, true, true);
+      const lower = this.tableRow(columns, split.lower, `${rowName}_Lower`, area, minHeight, false, true);
       return { row: upper.row, height: upper.height + lower.height, hidden: upper.hidden, more: [{ row: lower.row, height: lower.height }] };
     }
     const suppress = section.conditions?.suppress;
@@ -3132,9 +3136,10 @@ function hideWhen(item: XmlElement, expression: string): XmlElement {
  */
 function wrapSpaces(text: string, obj: ReportObject, part = false): string {
   const lineHeight = (obj.style?.size ?? 10) * 20 * 1.2;
-  if (!obj.size || obj.size.height < lineHeight * 1.8) return text;
+  if (!obj.size || obj.size.height < lineHeight * 1.8) return text.replace(/\u00a0/g, ' ');
   const centred = obj.align === 'center';
-  const lines = text.split(/\r?\n/).map((line) => line.replace(/ {3,}/g, '\n')).join('\n').split('\n')
+  // Runs of spaces, non-breaking ones included (SSRS keeps those together on one line).
+  const lines = text.replace(/\u00a0/g, ' ').split(/\r?\n/).map((line) => line.replace(/ {3,}/g, '\n')).join('\n').split('\n')
     // Centred text loses the spaces at its lines' ends (they would push it aside); a piece between embedded
     // fields keeps those at its own ends, where it meets a field.
     .map((line, i, all) => {
