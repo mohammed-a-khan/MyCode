@@ -22,6 +22,7 @@ const FORMULA_WORDS = new Set(('if then else and or not in to step do while for 
 
 export function layoutSummary(doc: CfbDocument, find: string[]): string {
   const reports = (buildMetadata(doc).reports ?? []).filter((r) => r.definition);
+  if (find.includes('--sections')) return sectionList(reports.find((r) => !r.storage)?.definition);
   const placeholders = new Map<string, string>();
   const hide = (text: string, prefix = 'S'): string => {
     let id = placeholders.get(text);
@@ -78,7 +79,7 @@ export function layoutSummary(doc: CfbDocument, find: string[]): string {
   };
   const sectionLines = (definition: ReportDefinition, label: string, sections: SectionInfo[]) => {
     for (const s of sections) {
-      lines.push(`  ${label} ${shownName(s.name)} h=${s.height ?? '?'}${s.suppressed ? ' SUPPRESSED' : ''}${conditions(definition, s.conditions)}`);
+      lines.push(`  ${label} ${shownName(s.name)} h=${s.height ?? '?'}${s.suppressed ? ' SUPPRESSED' : ''}${s.formatFlags ? ` flags=${s.formatFlags}` : ''}${conditions(definition, s.conditions)}`);
       for (const o of s.objects) lines.push(objectLine(definition, o));
     }
   };
@@ -118,7 +119,7 @@ export function layoutSummary(doc: CfbDocument, find: string[]): string {
       for (const section of area.sections) {
         const holder = section.objects.find((o) => o.subreport?.index === index);
         if (holder) {
-          lines.push(`  placed in ${shownName(area.name)}/${shownName(section.name)} h=${section.height ?? '?'}${section.suppressed ? ' SUPPRESSED' : ''}${conditions(main!.definition!, section.conditions)}`);
+          lines.push(`  placed in ${shownName(area.name)}/${shownName(section.name)} h=${section.height ?? '?'}${section.suppressed ? ' SUPPRESSED' : ''}${section.formatFlags ? ` flags=${section.formatFlags}` : ''}${conditions(main!.definition!, section.conditions)}`);
           lines.push(objectLine(main!.definition!, holder));
         }
       }
@@ -127,4 +128,21 @@ export function layoutSummary(doc: CfbDocument, find: string[]): string {
   }
   if (!lines.length) return `No report or subreport contains ${find.map((f) => `"${f}"`).join(' or ')}.\n`;
   return `${lines.join('\n').trim()}\n\n(Positions and sizes in twips; names and text are replaced by S1, N1, F1, ...; [text] is a text you searched for.)\n`;
+}
+
+/** Every main-report section on one line: height, format flags, conditions named, and the subreports it holds. */
+function sectionList(definition: ReportDefinition | undefined): string {
+  if (!definition) return 'No main report.\n';
+  const lines: string[] = [];
+  for (const area of definition.layout) {
+    for (const section of area.sections) {
+      const subs = section.objects.filter((o) => o.subreport).map((o) => `#${o.subreport!.index}`);
+      const kinds = [...new Set(section.objects.filter((o) => !o.subreport).map((o) => o.kind))];
+      lines.push(`${GENERIC_NAME.test(area.name) ? area.name : 'Area'}/${GENERIC_NAME.test(section.name) ? section.name : 'Section'} h=${section.height ?? '?'}` +
+        `${section.suppressed ? ' SUPPRESSED' : ''} flags=${section.formatFlags ?? '?'}` +
+        `${section.conditions ? ` conditions=${Object.keys(section.conditions).join(',')}` : ''}` +
+        `${subs.length ? ` subreports=${subs.join(',')}` : ''}${kinds.length ? ` objects=${kinds.join(',')}` : ''}`);
+    }
+  }
+  return `${lines.join('\n')}\n`;
 }

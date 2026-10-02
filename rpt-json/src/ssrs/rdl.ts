@@ -742,7 +742,7 @@ class RdlBuilder {
     return out;
   }
 
-  private textbox(name: string, value: string, obj: ReportObject | undefined, format: string | undefined, scope: Scope, box?: Box, hidden?: string, lines: { top?: boolean; bottom?: boolean; left?: boolean; right?: boolean } = {}): XmlElement {
+  private textbox(name: string, value: string, obj: ReportObject | undefined, format: string | undefined, scope: Scope, box?: Box, hidden?: string, lines: { top?: boolean; bottom?: boolean; left?: boolean; right?: boolean } = {}, padding?: { left: number; right: number }): XmlElement {
     const item = obj ? `${obj.kind} object "${obj.name}"` : name;
     const conditions = obj?.conditions ?? {};
     const hyperlink = conditions.hyperlink ? this.conditionExpression(conditions.hyperlink, false, item, scope) : undefined;
@@ -769,7 +769,9 @@ class RdlBuilder {
       box ? el('Width', inches(box.width)) : null,
       hidden || suppress ? el('Visibility', el('Hidden', hidden && suppress ? `=(${hidden.slice(1)}) OrElse (${suppress.slice(1)})` : (hidden ?? suppress)!)) : null,
       // Crystal draws text right up to the object's edges: SSRS's default 2pt padding would make it wrap sooner.
-      el('Style', ...this.borderStyle(border, lines), el('PaddingLeft', '0pt'), el('PaddingRight', '0pt'), el('PaddingTop', '0pt'), el('PaddingBottom', '0pt')));
+      el('Style', ...this.borderStyle(border, lines),
+        el('PaddingLeft', `${((padding?.left ?? 0) / 20).toFixed(1)}pt`), el('PaddingRight', `${((padding?.right ?? 0) / 20).toFixed(1)}pt`),
+        el('PaddingTop', '0pt'), el('PaddingBottom', '0pt')));
   }
 
   // ---- free-standing items (page header/footer, report header/footer) -------------------------
@@ -784,7 +786,7 @@ class RdlBuilder {
   }
 
   /** Places a section's objects at their positions starting at `top`; returns items and the block height. */
-  private placeSection(section: SectionInfo, top: number, scope: Scope, area: string): { items: XmlElement[]; height: number } {
+  private placeSection(section: SectionInfo, top: number, scope: Scope, area: string, pageLike = false): { items: XmlElement[]; height: number } {
     const hidden = section.conditions?.suppress ? this.conditionExpression(section.conditions.suppress, false, `Section ${section.name}`, scope) : undefined;
     if (hidden) this.note(`Section ${section.name}`, 'its suppress condition was applied to each item as a Hidden expression');
     const items: XmlElement[] = [];
@@ -795,6 +797,7 @@ class RdlBuilder {
     const ordered = [...section.objects].sort((a, b) => layer(a) - layer(b));
     for (const obj of ordered) {
       const box = this.boxOf(obj, top);
+      if (obj.kind === 'chart') this.belowTitles(obj, section, box);
       if (scope === 'body' && this.runOn.has(obj)) {
         this.spanning.push({ obj, section, box, area, hidden });
         bottom = Math.max(bottom, box.top - top + box.height);
@@ -809,7 +812,9 @@ class RdlBuilder {
           ? this.conditionExpression(obj.conditions.suppress, false, `subreport object "${obj.name}" in ${area}`, scope)
           : obj.suppressed ? '=True' : undefined;
         const both = hidden && own ? `=(${hidden.slice(1)}) OrElse (${own.slice(1)})` : (hidden ?? own);
-        const inline = this.inlineSubreport(obj, box, area, both, scope === 'page' ? 'page' : 'body');
+        // Page 1's page header, moved into the body, keeps its subreports as in a page header (first row, items
+        // at their places).
+        const inline = this.inlineSubreport(obj, box, area, both, scope === 'page' || pageLike ? 'page' : 'body');
         if (inline) items.push(inline.item);
         bottom = Math.max(bottom, box.top - top + (inline?.height ?? box.height));
         continue;
@@ -820,6 +825,29 @@ class RdlBuilder {
     }
     const height = Math.max(section.height !== undefined ? twipsToInches(section.height) : 0, bottom);
     return { items, height: section.objects.length || section.height ? height : 0 };
+  }
+
+  /**
+   * Text placed over the top of a chart (its title, drawn over the chart's empty top strip in Crystal): the chart
+   * starts below it instead, as SSRS cannot draw items over each other in every viewer.
+   */
+  private belowTitles(chart: ReportObject, section: SectionInfo, box: Box): void {
+    const x = chart.position?.x ?? 0;
+    const y = chart.position?.y ?? 0;
+    const w = chart.size?.width ?? 0;
+    const h = chart.size?.height ?? 0;
+    let titleBottom = y;
+    for (const o of section.objects) {
+      if ((o.kind !== 'text' && o.kind !== 'field') || !o.position || !o.size) continue;
+      const overlapsX = o.position.x < x + w && o.position.x + o.size.width > x;
+      // Only text in the chart's top fifth is a title; text further down (a "no data" message) is left alone.
+      if (overlapsX && o.position.y >= y - 60 && o.position.y < y + h / 5) titleBottom = Math.max(titleBottom, o.position.y + o.size.height);
+    }
+    const shift = twipsToInches(titleBottom - y);
+    if (shift > 0 && shift < box.height / 3) {
+      box.top += shift;
+      box.height -= shift;
+    }
   }
 
   /**
@@ -918,7 +946,7 @@ class RdlBuilder {
       case 'line':
         return el('Line', { Name: name() },
           el('Top', inches(box.top)), el('Left', inches(box.left)),
-          el('Height', inches(obj.size ? twipsToInches(obj.size.height) : 0)), el('Width', inches(box.width)),
+          el('Height', inches(obj.size ? box.height : 0)), el('Width', inches(box.width)),
           visibility,
           el('Style', el('Border',
             el('Color', obj.border?.color ?? 'Black'),
@@ -1097,13 +1125,19 @@ class RdlBuilder {
         values.length > 1 ? el('ChartMembers', ...valueMembers) : null,
         el('Label', `=${seriesExpression}`))]
       : valueMembers;
-    const axis = (title: string | undefined, name: string, format?: string) => el('ChartAxis', { Name: name },
+    // Crystal: horizontal gridlines from the value axis, every category labelled, and line charts scaled to their
+    // values (not from zero).
+    const isLine = style.type === 'Line';
+    const axis = (title: string | undefined, kind: 'category' | 'value', format?: string) => el('ChartAxis', { Name: 'Primary' },
       el('Style', el('FontSize', '8pt'), format ? el('Format', format) : null),
       el('ChartAxisTitle', el('Caption', title ?? ''), el('Style', el('FontSize', '8pt'))),
-      el('ChartMajorGridLines', el('Enabled', name === 'Primary' && title === chart.categoryTitle ? 'False' : 'True'), el('Style', el('Border', el('Color', 'Gainsboro')))),
+      kind === 'category' ? el('Interval', '1') : null,
+      el('ChartMajorGridLines', el('Enabled', kind === 'value' ? 'True' : 'False'), el('Style', el('Border', el('Color', 'Black'), el('Width', '0.5pt')))),
       el('ChartMinorGridLines', el('Style')),
       el('ChartMinorTickMarks', el('Length', '0.5')),
-      el('CrossAt', 'NaN'), el('Minimum', 'NaN'), el('Maximum', 'NaN'),
+      el('CrossAt', 'NaN'),
+      kind === 'value' && isLine ? el('IncludeZero', 'false') : null,
+      el('Minimum', 'NaN'), el('Maximum', 'NaN'),
       el('ChartAxisScaleBreak', el('Style')));
     // One value over categories, as bars: Crystal gives each bar its own colour, in its palette's order (SSRS
     // would colour the whole series alike), and shows no legend for it.
@@ -1136,11 +1170,13 @@ class RdlBuilder {
         isPie && labelText ? el('CustomProperties',
           el('CustomProperty', el('Name', 'PieLabelStyle'), el('Value', 'Outside')),
           el('CustomProperty', el('Name', 'PieLineColor'), el('Value', 'Black'))) : null,
-        el('Style'),
+        // Crystal draws lines solid and clearly visible.
+        isLine ? el('Style', el('Border', el('Width', '1.5pt'))) : el('Style'),
         el('ChartEmptyPoints', el('Style'), el('ChartMarker', el('Style')), el('ChartDataLabel', el('Style'))),
         el('ValueAxisName', 'Primary'),
         el('CategoryAxisName', 'Primary'),
-        el('ChartSmartLabel', el('CalloutLineColor', 'Black'), el('MinMovingDistance', '0pt')));
+        // Labels may sit outside the plot area (not cut short to fit beside a small pie).
+        el('ChartSmartLabel', el('AllowOutSidePlotArea', 'True'), el('CalloutLineColor', 'Black'), el('MinMovingDistance', '0pt')));
     });
     return el('Chart', { Name: chartName },
       el('ChartCategoryHierarchy', el('ChartMembers', categoryExpression
@@ -1152,10 +1188,14 @@ class RdlBuilder {
       el('ChartSeriesHierarchy', el('ChartMembers', ...seriesHierarchy)),
       el('ChartData', el('ChartSeriesCollection', ...series)),
       el('ChartAreas', el('ChartArea', { Name: 'Default' },
-        el('ChartCategoryAxes', axis(chart.categoryTitle, 'Primary')),
-        el('ChartValueAxes', axis(chart.valueTitle, 'Primary', labelFormat ?? (isPie ? undefined : this.options.chartAxisFormat))),
-        style.threeD ? el('ChartThreeDProperties', el('Enabled', 'true'), el('Rotation', '20'), el('Inclination', '20')) : null,
-        el('Style'))),
+        el('ChartCategoryAxes', axis(chart.categoryTitle, 'category')),
+        el('ChartValueAxes', axis(chart.valueTitle, 'value', labelFormat ?? (isPie ? undefined : this.options.chartAxisFormat))),
+        // Crystal's 3D pies are tilted well back, with a thick edge.
+        style.threeD ? el('ChartThreeDProperties', el('Enabled', 'true'),
+          el('Rotation', isPie ? '0' : '20'), el('Inclination', isPie ? '50' : '20'),
+          isPie ? el('DepthRatio', '40') : null, el('Shading', 'Real')) : null,
+        // Crystal's plot area is light grey behind bars and lines.
+        el('Style', isPie ? null : el('BackgroundColor', '#D9D9D9')))),
       // The legend as Crystal has it (shown or not, and where); a bar per colour has none by default.
       el('ChartLegends', el('ChartLegend', { Name: 'Default' },
         (chart.legend ? !chart.legend.visible : barPerPoint) ? el('Hidden', 'true') : null,
@@ -1257,20 +1297,30 @@ class RdlBuilder {
       let bottom = 0;
       for (const obj of section.objects) {
         const box = this.boxOf(obj, 0);
+        if (obj.kind === 'line' && this.runOn.has(obj)) {
+          // A line running down the table sits on the column edge the rows' borders use.
+          const x = obj.position?.x ?? 0;
+          const edge = [...columns.map((c) => c.x), tableLeft + inchesToTwips(tableWidth)].reduce((a, b) => (Math.abs(b - x) < Math.abs(a - x) ? b : a));
+          if (Math.abs(edge - x) <= 360) box.left = twipsToInches(edge);
+        }
         box.left = Math.max(0, box.left - twipsToInches(tableLeft));
         box.width = Math.min(box.width, Math.max(tableWidth - box.left, 0.1));
         const item = this.reportItem(obj, 'row', area, box);
         if (item) items.push(item);
         bottom = Math.max(bottom, box.top + box.height);
       }
-      const height = Math.max(sectionHeight, bottom, MIN_ROW_HEIGHT);
-      // Lines running down the table (tableRules) cross this row too: drawn as lines the row's full height.
-      const tableRight = tableLeft + inchesToTwips(tableWidth);
-      for (const x of this.tableRules) {
-        if (x < tableLeft - 360 || x > tableRight + 360) continue;
-        const left = Math.min(Math.max(twipsToInches(x - tableLeft), 0), tableWidth);
+      const height = sectionHeight > 0 ? sectionHeight : Math.max(bottom, MIN_ROW_HEIGHT);
+      // Lines running down the table (tableRules) cross this row too, at the column edges the cells' borders use;
+      // not in the section they start in, which draws them itself from where they start.
+      const startsHere = section.objects.some((o) => this.runOn.has(o));
+      const rules = this.columnRules(columns);
+      const edges = startsHere ? [] : [
+        ...[...rules.left].map((i) => twipsToInches(columns[i].x - tableLeft)),
+        ...(rules.right.size ? [tableWidth] : []),
+      ];
+      for (const left of edges) {
         items.push(el('Line', { Name: this.itemNames.make(`${rowName}_Rule`) },
-          el('Top', '0in'), el('Left', inches(left)), el('Height', inches(height)), el('Width', '0in'),
+          el('Top', '0in'), el('Left', inches(Math.min(Math.max(left, 0), tableWidth))), el('Height', inches(height)), el('Width', '0in'),
           el('Style', el('Border', el('Color', 'Black'), el('Style', 'Solid'), el('Width', '1pt')))));
       }
       const rectangle = el('Rectangle', { Name: this.itemNames.make(`${rowName}_Area`) },
@@ -1299,7 +1349,8 @@ class RdlBuilder {
       cells[this.columnIndex(columns, obj.position?.x ?? 0)] = obj;
       rowHeight = Math.max(rowHeight, twipsToInches(obj.size?.height ?? 0) + twipsToInches(obj.position?.y ?? 0));
     }
-    const height = Math.max(rowHeight, Math.min(sectionHeight, rowHeight + 0.1), minHeight);
+    // A row is as tall as its Crystal section (text boxes grow when their text needs more room).
+    const height = sectionHeight > 0 ? Math.max(sectionHeight, Math.min(minHeight, 0.03)) : Math.max(rowHeight, minHeight);
     const row = el('TablixRow',
       el('Height', inches(height)),
       el('TablixCells', ...cells.map((obj, i) => {
@@ -1307,7 +1358,13 @@ class RdlBuilder {
         const name = this.itemNames.make(obj?.name || `${rowName}_${i + 1}`);
         const cellObj = background ? { ...(obj ?? { kind: 'text', name }), border: { ...(obj?.border ?? { sides: [0, 0, 0, 0] as [number, number, number, number] }), background } } : obj;
         const ruled = { ...lines, left: rules.left.has(i), right: rules.right.has(i) };
-        return el('TablixCell', el('CellContents', this.textbox(name, value, cellObj, format, 'row', undefined, undefined, ruled)));
+        // The object's place within its column, as padding (keeps text off the column lines, as in Crystal).
+        const columnRight = columns[i].x + inchesToTwips(columns[i].width);
+        const padding = obj?.position && obj.size ? {
+          left: Math.min(Math.max(obj.position.x - columns[i].x, 0), 288),
+          right: Math.min(Math.max(columnRight - (obj.position.x + obj.size.width), 0), 288),
+        } : undefined;
+        return el('TablixCell', el('CellContents', this.textbox(name, value, cellObj, format, 'row', undefined, undefined, ruled, padding)));
       })));
     return { row, height, hidden };
   }
@@ -2278,7 +2335,8 @@ class RdlBuilder {
     this.frameFooters = new Set();
     if (table.tablix) {
       items.push(table.tablix);
-      top += table.height + 0.1;
+      // Crystal prints the next section straight after the last row.
+      top += table.height;
     }
     const footerTop = top;
     for (const section of areas.reportFooter) {
@@ -2353,7 +2411,10 @@ class RdlBuilder {
           contents = contents.map((item) => item.name === 'Rectangle' && Math.abs((side === 'RightBorder' ? itemRight(item) : itemNumber(item, 'Left')) - x) <= 0.06
             ? withBorder(item, side, lineObj.border) : item);
         } else {
-          const drawn = this.reportItem(line.obj, 'body', line.area, line.box, line.hidden);
+          // A divider over a subreport runs down with it, to the bottom of the subreport it crosses.
+          const crossed = contents.filter((item) => item.name === 'Rectangle' && itemNumber(item, 'Left') < x && itemRight(item) > x);
+          const reach = Math.max(line.box.top + line.box.height, ...crossed.map((item) => itemNumber(item, 'Top') + itemNumber(item, 'Height')));
+          const drawn = this.reportItem(line.obj, 'body', line.area, { ...line.box, height: reach - line.box.top }, line.hidden);
           if (drawn) kept.push(drawn);
         }
       }
@@ -2412,7 +2473,7 @@ class RdlBuilder {
     }
 
     const placeAll = (sections: SectionInfo[], label: string, scope: Scope = 'page') => sections.reduce((acc, s) => {
-      const placed = this.placeSection(s, acc.height, scope, label);
+      const placed = this.placeSection(s, acc.height, scope, label, scope === 'body');
       return { items: [...acc.items, ...placed.items], height: acc.height + placed.height };
     }, { items: [] as XmlElement[], height: 0 });
     // A page header with sections for page 1 only and for the other pages: SSRS's page header has one height,

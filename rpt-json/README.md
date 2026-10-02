@@ -36,7 +36,7 @@ node src/cli.ts headers  report.rpt                      # header text: titles, 
 node src/cli.ts headers  reports/ headers.csv --csv      # every report in a folder, as CSV (or --json)
 node src/cli.ts inspect  report.rpt                      # just the readable model and stream catalog
 node src/cli.ts charts   report.rpt                      # how each chart is stored, names hidden (to share safely)
-node src/cli.ts layout   report.rpt "Some title" ...       # layout of the subreports showing those texts, names hidden
+node src/cli.ts layout   report.rpt "Some title" ...       # layout of the subreports showing those texts, names hidden (--sections: every main-report section)
 node src/cli.ts verify   report.rpt                      # round-trip checks (see below)
 ```
 

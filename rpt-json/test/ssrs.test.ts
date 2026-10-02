@@ -1171,6 +1171,21 @@ describe('chart options', () => {
     assert.ok(rdl.includes('<Hidden>=CountRows("DataSet1") = 0</Hidden>') || /<Hidden>=CountRows\("[^"]+"\) = 0<\/Hidden>/.test(rdl));
   });
 
+  it('tilts 3D pies back like Crystal, scales line charts to their values and keeps lines visible', () => {
+    const pie = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 3, graphType: 31 }), source, { reportName: 'C', subreport: true }).rdl;
+    assert.ok(/<Inclination>50<\/Inclination>/.test(pie) && pie.includes('<AllowOutSidePlotArea>True</AllowOutSidePlotArea>'));
+    const line = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 1, graphType: 13 }), source, { reportName: 'C', subreport: true }).rdl;
+    assert.ok(line.includes('<IncludeZero>false</IncludeZero>') && line.includes('<Width>1.5pt</Width>') && line.includes('<Interval>1</Interval>'));
+  });
+
+  it('starts a chart below a title placed over its top', () => {
+    const definition = chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 0, graphType: 0 });
+    definition.layout[0].sections[0].objects.push({ kind: 'text', name: 'ChartTitle', text: 'Title', position: { x: 100, y: 15 }, size: { width: 3000, height: 240 } });
+    const { rdl } = convertToRdl(definition, source, { reportName: 'C', subreport: true });
+    const chart = rdl.slice(rdl.indexOf('<Chart Name="Graph1">'));
+    assert.ok(/<\/DataSetName>\s*<Top>0\.177in<\/Top>/.test(chart), chart.slice(chart.indexOf('<DataSetName>'), chart.indexOf('<DataSetName>') + 120));
+  });
+
   it('puts the legend where Crystal does and leaves points unlabelled when it does', () => {
     const { rdl } = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 1, graphType: 13,
       legend: { visible: true, position: 2 }, dataLabels: { kind: 0, format: 0 } }), source, { reportName: 'C', subreport: true });
@@ -1280,7 +1295,7 @@ describe('matching the Crystal page', () => {
     };
     const { rdl } = convertToRdl(definition, source, { reportName: 'S', subreport: true });
     assert.ok(rdl.includes('<Format>#,0.00;-#,0.00</Format>'));
-    assert.ok(rdl.includes('<PaddingLeft>0pt</PaddingLeft>') && !rdl.includes('<PaddingLeft>2pt</PaddingLeft>'));
+    assert.ok(rdl.includes('<PaddingLeft>0.0pt</PaddingLeft>') && !rdl.includes('<PaddingLeft>2pt</PaddingLeft>'));
   });
 });
 
@@ -1464,5 +1479,21 @@ describe('subreports in the report footer', () => {
     const { rdl } = convertToRdl(main([sub('Chart1', 3, 150, { conditions: { suppress: { name: 'Object_Visibility', index: 0 } } })], formulas), source, { reportName: 'M', subreports });
     const chart = rdl.slice(rdl.indexOf('<Rectangle Name="Chart1">'));
     assert.ok(/<Hidden>=[^<]*Flag[^<]*<\/Hidden>/.test(chart.slice(0, chart.indexOf('</Rectangle>') + 4000)), 'the formula decides');
+  });
+});
+
+describe('row heights', () => {
+  it('makes each table row as tall as its Crystal section', () => {
+    const source: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'A', type: 'string' }, { name: 'B', type: 'string' }] }] };
+    const definition: ReportDefinition = { ...emptyDefinition(), layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', objects: [] }] },
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF', objects: [] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 190, objects: [
+        { kind: 'field', name: 'A1', field: 'T.A', position: { x: 0, y: 0 }, size: { width: 1400, height: 180 } },
+        { kind: 'field', name: 'B1', field: 'T.B', position: { x: 1500, y: 0 }, size: { width: 1400, height: 180 } },
+      ] }] },
+    ] };
+    const { rdl } = convertToRdl(definition, source, { reportName: 'R', subreport: true });
+    assert.ok(/<TablixRow>\s*<Height>0\.132in<\/Height>/.test(rdl), 'not raised to 0.2in');
   });
 });
