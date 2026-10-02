@@ -900,7 +900,8 @@ class RdlBuilder {
       el('KeepTogether', 'true'),
       el('Top', inches(box.top)), el('Left', inches(box.left)), el('Height', inches(height)), el('Width', inches(Math.max(box.width, result.width))),
       hidden ? el('Visibility', el('Hidden', hidden)) : null,
-      el('Style', el('Border', el('Style', 'None'))));
+      // The subreport object's own border (Crystal draws a box around the subreport).
+      el('Style', ...this.borderStyle(obj.border)));
     return { item: rectangle, height };
   }
 
@@ -978,7 +979,7 @@ class RdlBuilder {
           this.note(item, 'SSRS allows no charts or cross-tabs in a page header or footer; it was left out, place it in the report body');
           return null;
         }
-        return obj.kind === 'chart' ? this.chart(obj, box, item) : this.matrix(obj, box, item);
+        return obj.kind === 'chart' ? this.chart(obj, box, item, scope === 'body' ? hidden ?? '' : undefined) : this.matrix(obj, box, item);
       default:
         this.note(item, 'this object type is not converted');
         return null;
@@ -1068,7 +1069,8 @@ class RdlBuilder {
   // ---- chart --------------------------------------------------------------------------------
 
 
-  private chart(obj: ReportObject, box: Box, item: string): XmlElement | null {
+  /** `hidden`: in the body ("" when nothing else hides it), the chart is also hidden when it has no data. */
+  private chart(obj: ReportObject, box: Box, item: string, hidden?: string): XmlElement | null {
     const chart = obj.chart;
     // Layout 2 charts a cross-tab: its summaries and columns.
     const crossTab = this.definition.layout.flatMap((a) => a.sections.flatMap((s) => s.objects)).find((o) => o.crossTab)?.crossTab;
@@ -1168,6 +1170,11 @@ class RdlBuilder {
       el('ChartNoDataMessage', { Name: 'NoDataMessage' }, el('Caption', ''), el('Style')),
       el('DataSetName', this.dataset),
       el('Top', inches(box.top)), el('Left', inches(box.left)), el('Height', inches(box.height)), el('Width', inches(box.width)),
+      // Crystal prints nothing for a chart without data; hidden, it leaves the space to what is placed over it
+      // (such as a "no data" message), which SSRS would otherwise move aside.
+      hidden !== undefined ? el('Visibility', el('Hidden', hidden
+        ? `=(${hidden.slice(1)}) OrElse (CountRows(${vbString(this.dataset)}) = 0)`
+        : `=CountRows(${vbString(this.dataset)}) = 0`)) : null,
       // Transparent, as in Crystal: a title placed over the chart's top stays readable.
       el('Style', el('Border', el('Style', 'None')), el('BackgroundColor', 'Transparent')));
   }
