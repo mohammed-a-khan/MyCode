@@ -483,7 +483,7 @@ function briefRecords(node: RecordNode): string {
       while (i + w + 1 < bytes.length && bytes[i + w] >= 0x20 && bytes[i + w] < 0x7f && bytes[i + w + 1] === 0) w += 2;
       // Crystal's own group labels ("Group #1 Name") are shown: they say nothing about the report.
       const text = (from: number, count: number, step: number) => String.fromCharCode(...Array.from({ length: count }, (_, k) => bytes[from + k * step]));
-      const label = (t: string) => (/^Group #\d+ Name$/.test(t) ? `<${t}>` : undefined);
+      const label = (t: string) => (/^Group #\d+( Name)?$/.test(t) ? `<${t}>` : undefined);
       if (w >= 6) { out += label(text(i, w / 2, 2)) ?? `<t${w / 2}>`; i += w; continue; }
       if (n >= 3) { out += label(text(i, n, 1)) ?? `<t${n}>`; i += n; continue; }
       out += bytes[i].toString(16).padStart(2, '0');
@@ -1108,8 +1108,8 @@ export function buildReportDefinition(records: RecordNode[]): ReportDefinition {
     const linkedField = candidate && /^[^{}]+\.[^{}]+$/.test(candidate) && !candidate.startsWith('crobj:') && candidate !== name ? candidate : undefined;
     report.parameters.push({ name, prompt: strings[0] || undefined, valueType, linkedField });
   }
-  // Report groups are named "Group #n Name"; cross-tabs and charts have group records of their own.
-  const isReportGroup = (node: RecordNode) => ownStrings(node).some((s) => /^Group #\d+ Name$/.test(s));
+  // Report groups are named "Group #n Name" (or "Group #n" in some versions); cross-tabs and charts have group records of their own.
+  const isReportGroup = (node: RecordNode) => ownStrings(node).some((s) => /^Group #\d+( Name)?$/.test(s));
   for (const node of findAll(records, GROUP).filter(isReportGroup)) {
     const field = ownStrings(node)[0];
     if (field) report.groups.push(field);

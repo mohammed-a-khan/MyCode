@@ -1808,6 +1808,21 @@ describe('formulas without data, page breaks by formula and the default font', (
       assert.ok(rdl.includes('<Value>=Fields!kind.Value</Value>') && !rdl.includes('Nothing = "A"'), ref);
     }
   });
+  it('keeps a message laid across a row\'s fields from cutting a sliver of a column', () => {
+    const src: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [
+      { name: 'A', type: 'string' }, { name: 'B', type: 'string' }, { name: 'C', type: 'string' }, { name: 'D', type: 'string' },
+    ] }] };
+    const field = (name: string, ref: string, x: number, width: number) => ({ kind: 'field', name, field: ref, position: { x, y: 0 }, size: { width, height: 210 } });
+    const def: ReportDefinition = { ...emptyDefinition(), layout: [{ name: 'DetailArea1', sections: [{ name: 'D', height: 264, objects: [
+      field('First', 'T.A', 165, 1080), field('Second', 'T.B', 1245, 1005), field('Third', 'T.C', 2535, 450), field('Fourth', 'T.D', 3120, 3225),
+      // Shown in place of the values when a field is empty: it starts just before the third field.
+      { kind: 'text', name: 'Message', text: 'None', position: { x: 2355, y: 45 }, size: { width: 4125, height: 219 } },
+    ] }] }] };
+    const { rdl } = convertToRdl(def, src, { reportName: 'R' });
+    const widths = [...rdl.slice(rdl.indexOf('<TablixColumns>'), rdl.indexOf('</TablixColumns>')).matchAll(/<Width>([\d.]+)in<\/Width>/g)].map((m) => Number(m[1]));
+    assert.equal(widths.length, 4, 'one column per field');
+    assert.ok(Math.min(...widths) > 0.3, `no sliver of a column: ${widths}`);
+  });
   it('takes the font most of the text uses as the report default', () => {
     const { rdl } = convertToRdl(report([]), source, { reportName: 'R' });
     assert.ok(rdl.includes('<df:DefaultFontFamily>Times New Roman</df:DefaultFontFamily>'));
