@@ -373,8 +373,27 @@ class RdlBuilder {
     return fieldName;
   }
 
+  /**
+   * A dataset field by Crystal's table and column. The table may be named differently from the data source's alias
+   * (by its own name, with its owner or database in front, or a stored procedure's ";1"): it is then matched by its
+   * last part, by the source table's name, or, failing those, by a column only one table has.
+   */
+  private findField(table: string, column: string): DatasetField | undefined {
+    const direct = this.fields.get(fieldKey(table, column));
+    if (direct) return direct;
+    const bare = (name: string) => name.replace(/;\d+$/, '').replace(/^.*[.\\]/, '').replace(/^\[|\]$/g, '').toLowerCase();
+    const wanted = bare(table);
+    const source = this.source.tables.find((t) => bare(t.alias) === wanted || bare(t.name) === wanted);
+    if (source) {
+      const byTable = this.fields.get(fieldKey(source.alias, column));
+      if (byTable) return byTable;
+    }
+    const same = [...this.fields.values()].filter((f) => f.column.toLowerCase() === column.toLowerCase());
+    return same.length === 1 ? same[0] : undefined;
+  }
+
   private lookupField(table: string, column: string): DatasetField | undefined {
-    const field = this.fields.get(fieldKey(table, column));
+    const field = this.findField(table, column);
     if (field) field.used = true;
     return field;
   }
@@ -396,7 +415,7 @@ class RdlBuilder {
     nextValue: (ref) => this.nextValue(ref),
     fieldType: (ref) => {
       const dot = ref.lastIndexOf('.');
-      return dot > 0 ? this.fields.get(fieldKey(ref.slice(0, dot), ref.slice(dot + 1)))?.type : undefined;
+      return dot > 0 ? this.findField(ref.slice(0, dot), ref.slice(dot + 1))?.type : undefined;
     },
   };
 
@@ -1997,7 +2016,7 @@ class RdlBuilder {
     const orderColumns = [...this.groupFields, ...(this.definition.sorts ?? []).filter((s) => !s.bySummary).map((s) => s.field)]
       .map((ref) => {
         const dot = ref.lastIndexOf('.');
-        const f = dot > 0 ? this.fields.get(fieldKey(ref.slice(0, dot), ref.slice(dot + 1))) : undefined;
+        const f = dot > 0 ? this.findField(ref.slice(0, dot), ref.slice(dot + 1)) : undefined;
         const direction = (this.definition.sorts ?? []).find((s) => s.field === ref)?.descending ? ' DESC' : '';
         return f ? `${this.quote(f.table)}.${this.quote(f.column)}${direction}` : undefined;
       })
@@ -2090,10 +2109,10 @@ class RdlBuilder {
         return { start: `@${range.start}`, end: `@${range.end}` };
       },
       column: (table, field) => {
-        const f = this.fields.get(fieldKey(table, field));
+        const f = this.findField(table, field);
         return f ? `${this.quote(f.table)}.${this.quote(f.column)}` : undefined;
       },
-      columnType: (table, field) => this.fields.get(fieldKey(table, field))?.type,
+      columnType: (table, field) => this.findField(table, field)?.type,
       parameterType: (name) => this.parameterInfo(name)?.valueType,
       parameterMultiple: (name) => this.parameterInfo(name)?.allowMultiple === true && !this.parameterRange(name),
       parameter: (name) => {

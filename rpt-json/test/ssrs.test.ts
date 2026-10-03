@@ -1797,6 +1797,17 @@ describe('formulas without data, page breaks by formula and the default font', (
     assert.equal(values.length, 3, 'one paragraph per line');
     assert.equal(values[1], 'Some text');
   });
+  it('finds a field whose table is named differently from the data source alias (owner in front, own name)', () => {
+    const src: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'Lines', name: 'dbo.order_lines', kind: 'table', fields: [
+      { name: 'shipped_on', type: 'date' }, { name: 'kind', type: 'string' },
+    ] }] };
+    const def = (ref: string): ReportDefinition => ({ ...emptyDefinition(), selectionFormulas: { record: `${ref} = "A"` },
+      layout: [{ name: 'DetailArea1', sections: [{ name: 'D', objects: [{ kind: 'field', name: 'Cell', field: ref.slice(1, -1), position: { x: 0, y: 0 } }] }] }] });
+    for (const ref of ['{dbo.order_lines.kind}', '{order_lines.kind}', '{Other.kind}']) {
+      const { rdl } = convertToRdl(def(ref), src, { reportName: 'R' });
+      assert.ok(rdl.includes('<Value>=Fields!kind.Value</Value>') && !rdl.includes('Nothing = "A"'), ref);
+    }
+  });
   it('takes the font most of the text uses as the report default', () => {
     const { rdl } = convertToRdl(report([]), source, { reportName: 'R' });
     assert.ok(rdl.includes('<df:DefaultFontFamily>Times New Roman</df:DefaultFontFamily>'));
