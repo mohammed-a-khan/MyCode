@@ -36,8 +36,10 @@ export function layoutSummary(doc: CfbDocument, find: string[]): string {
     }
     return id;
   };
-  const terms = find.filter((f) => !/^#\d+$/.test(f.trim())).map((f) => f.toLowerCase()).filter(Boolean);
-  const matched = (text: string) => terms.find((t) => text.toLowerCase().includes(t));
+  // Spaces and line breaks count alike (a heading may be split over lines).
+  const words = (text: string) => text.toLowerCase().replace(/\s+/g, ' ').trim();
+  const terms = find.filter((f) => !/^#\d+$/.test(f.trim())).map(words).filter(Boolean);
+  const matched = (text: string) => terms.find((t) => words(text).includes(t));
   const shownText = (text: string) => {
     const term = matched(text);
     return term ? `[${term}]` : `"${hide(text)}"`;
