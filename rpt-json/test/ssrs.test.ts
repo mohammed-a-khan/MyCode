@@ -1744,6 +1744,30 @@ describe('formulas without data, page breaks by formula and the default font', (
   });
 });
 
+describe('heading rows', () => {
+  it('keeps a heading\'s place down its row and a thick rule\'s width', () => {
+    const source: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'A', type: 'string' }, { name: 'B', type: 'string' }] }] };
+    const definition: ReportDefinition = { ...emptyDefinition(), groups: ['T.A'], layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', objects: [] }] },
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF', objects: [] }] },
+      { name: 'GroupHeaderArea1', sections: [{ name: 'GH', height: 600, objects: [
+        { kind: 'text', name: 'HeadA', text: 'A', position: { x: 0, y: 240 }, size: { width: 1400, height: 220 } },
+        { kind: 'text', name: 'HeadB', text: 'B', position: { x: 1500, y: 100 }, size: { width: 1400, height: 220 } },
+        { kind: 'line', name: 'Under', position: { x: 0, y: 580 }, size: { width: 2900, height: 0 }, border: { sides: [0, 0, 1, 0], width: 60 } },
+      ] }] },
+      { name: 'GroupFooterArea1', sections: [{ name: 'GF', objects: [] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 200, objects: [
+        { kind: 'field', name: 'A1', field: 'T.A', position: { x: 0, y: 0 }, size: { width: 1400, height: 180 } },
+        { kind: 'field', name: 'B1', field: 'T.B', position: { x: 1500, y: 0 }, size: { width: 1400, height: 180 } },
+      ] }] },
+    ] };
+    const { rdl } = convertToRdl(definition, source, { reportName: 'R', subreport: true });
+    const box = (name: string) => { const at = rdl.indexOf(`<Textbox Name="${name}">`); return rdl.slice(at, rdl.indexOf('</Textbox>', at)); };
+    assert.ok(box('HeadA').includes('<PaddingTop>12pt</PaddingTop>') && box('HeadB').includes('<PaddingTop>5pt</PaddingTop>'), box('HeadA'));
+    assert.ok(/<BottomBorder>\s*<Style>Solid<\/Style>\s*<Width>3\.50pt<\/Width>/.test(box('HeadA')), 'the thick rule keeps its width');
+  });
+});
+
 describe('row heights', () => {
   it('makes each table row as tall as its Crystal section', () => {
     const source: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'A', type: 'string' }, { name: 'B', type: 'string' }] }] };

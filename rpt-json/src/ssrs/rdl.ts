@@ -787,7 +787,7 @@ class RdlBuilder {
     return out;
   }
 
-  private textbox(name: string, value: string, obj: ReportObject | undefined, format: string | undefined, scope: Scope, box?: Box, hidden?: string, lines: { top?: boolean; bottom?: boolean; left?: boolean; right?: boolean } = {}, padding?: { left: number; right: number }): XmlElement {
+  private textbox(name: string, value: string, obj: ReportObject | undefined, format: string | undefined, scope: Scope, box?: Box, hidden?: string, lines: { top?: boolean; bottom?: boolean; left?: boolean; right?: boolean } = {}, padding?: { left: number; right: number; top?: number }): XmlElement {
     const item = obj ? `${obj.kind} object "${obj.name}"` : name;
     const conditions = obj?.conditions ?? {};
     const hyperlink = conditions.hyperlink ? this.conditionExpression(conditions.hyperlink, false, item, scope) : undefined;
@@ -825,7 +825,7 @@ class RdlBuilder {
       el('Style', ...this.borderStyle(border, lines),
         // Crystal keeps a text object's text a little inside its own border.
         el('PaddingLeft', `${((padding?.left ?? 0) / 20 + (framed ? 4 : 0)).toFixed(1)}pt`), el('PaddingRight', `${((padding?.right ?? 0) / 20 + (framed ? 4 : 0)).toFixed(1)}pt`),
-        el('PaddingTop', framed ? '1pt' : '0pt'), el('PaddingBottom', '0pt')));
+        el('PaddingTop', `${((padding?.top ?? 0) / 20 + (framed ? 1 : 0)).toFixed(1).replace(/\.0$/, '')}pt`), el('PaddingBottom', '0pt')));
   }
 
   // ---- free-standing items (page header/footer, report header/footer) -------------------------
@@ -1416,12 +1416,14 @@ class RdlBuilder {
    * A table cell's border, as wide as the lines it continues (SSRS draws a table cell's border thinner than a
    * rectangle's of the same width, so it gets half a point more, matching the boxes around it).
    */
-  private ruledBorder(border: BorderInfo | undefined, ruled: { top?: boolean; bottom?: boolean; left?: boolean; right?: boolean }): BorderInfo | undefined {
+  private ruledBorder(border: BorderInfo | undefined, ruled: { top?: boolean; bottom?: boolean; left?: boolean; right?: boolean; width?: number }): BorderInfo | undefined {
     if (!ruled.top && !ruled.bottom && !ruled.left && !ruled.right) return border;
-    return { ...(border ?? { sides: [0, 0, 0, 0] }), width: Math.max(border?.width ?? 0, this.tableRuleWidth + 10) };
+    // A line along the row keeps its own width (Crystal draws thick rules under headings).
+    const along = (ruled.top || ruled.bottom) && ruled.width ? ruled.width + 10 : 0;
+    return { ...(border ?? { sides: [0, 0, 0, 0] }), width: Math.max(border?.width ?? 0, this.tableRuleWidth + 10, along) };
   }
 
-  private ruledBorderObject(obj: ReportObject | undefined, ruled: { top?: boolean; bottom?: boolean; left?: boolean; right?: boolean }): ReportObject | undefined {
+  private ruledBorderObject(obj: ReportObject | undefined, ruled: { top?: boolean; bottom?: boolean; left?: boolean; right?: boolean; width?: number }): ReportObject | undefined {
     const border = this.ruledBorder(obj?.border, ruled);
     return border === obj?.border ? obj : { ...(obj ?? { kind: 'text', name: '' }), border };
   }
@@ -1506,7 +1508,7 @@ class RdlBuilder {
       const tableRight = tableLeft + inchesToTwips(tableWidth);
       const edges = [...columns.map((c) => c.x), tableRight];
       const placed: { obj: ReportObject; first: number; last: number; x: number }[] = [];
-      const lines = { top: false, bottom: false };
+      const lines = { top: false, bottom: false, width: 0 };
       let bottom = 0;
       for (const obj of section.objects) {
         let x = obj.position?.x ?? 0;
@@ -1515,6 +1517,7 @@ class RdlBuilder {
           // A line along the whole row: the row's top or bottom border.
           if (section.height && (obj.position?.y ?? 0) > section.height / 2) lines.bottom = true;
           else lines.top = true;
+          lines.width = Math.max(lines.width, obj.border?.width ?? 20);
           continue;
         }
         if (obj.kind === 'line' && this.runOn.has(obj)) {
@@ -1593,12 +1596,13 @@ class RdlBuilder {
     const rules = this.columnRules(columns);
     const cells: (ReportObject | undefined)[] = columns.map(() => undefined);
     let rowHeight = 0;
-    const lines = { top: false, bottom: false };
+    const lines = { top: false, bottom: false, width: 0 };
     for (const obj of section.objects) {
       if (obj.kind === 'line') {
         const y = obj.position?.y ?? 0;
         if (section.height && y > section.height / 2) lines.bottom = true;
         else lines.top = true;
+        lines.width = Math.max(lines.width, obj.border?.width ?? 20);
         continue;
       }
       cells[this.columnIndex(columns, obj.position?.x ?? 0)] = obj;
@@ -1621,6 +1625,8 @@ class RdlBuilder {
         const padding = obj?.position && obj.size ? {
           left: Math.min(Math.max(obj.position.x - columns[i].x, 0), 288),
           right: leftAligned ? 0 : Math.min(Math.max(columnRight - (obj.position.x + obj.size.width), 0), 288),
+          // Its place down the section (a heading set lower in its row), as far as the row's height allows.
+          top: section.height ? Math.min(Math.max(obj.position.y, 0), Math.max(section.height - obj.size.height, 0), 288) : 0,
         } : undefined;
         return el('TablixCell', el('CellContents', this.textbox(name, value, this.ruledBorderObject(cellObj, ruled), format, 'row', undefined, undefined, ruled, padding)));
       })));
