@@ -857,10 +857,16 @@ function buildLayout(records: RecordNode[]): AreaInfo[] {
         const b = ownBytes(record);
         // An alignment set on the object itself is kept when the paragraph just says left.
         if (object.kind === 'text' && !object.runs?.length && b.length > 12 && ALIGNMENTS[b[12]] && (!object.align || b[12] !== 1)) object.align = ALIGNMENTS[b[12]];
+        // A text's paragraphs after its first each start a new line, an empty first paragraph too (Crystal shows
+        // it as a blank line).
+        const later = object.kind === 'text' && !!object.paragraphAligns?.length;
         // Each paragraph keeps its own alignment too.
         if (object.kind === 'text') (object.paragraphAligns ??= []).push(b.length > 12 ? ALIGNMENTS[b[12]] : undefined);
-        // A new paragraph after existing text is a line break.
-        if (object.runs?.length) {
+        if (later && !object.runs?.length) {
+          object.text = `${object.text ?? ''}\n`;
+          (object.runs ??= []).push({ text: '\n' });
+        } else if (object.runs?.length) {
+          // A new paragraph after existing text is a line break.
           // The plain text only gets a break after some text; runs keep it for fields too.
           if (object.text) object.text = `${object.text}\n`;
           object.runs.push({ text: '\n' });

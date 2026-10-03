@@ -700,7 +700,7 @@ class RdlBuilder {
       return { value: `=${expression}`, format: (obj.format && formatFor(obj.format, this.valueTypeOf(obj.field))) ?? format };
     }
     if (obj.kind === 'text') {
-      const text = obj.embeddedFields?.length ? obj.text ?? '' : wrapSpaces(obj.text ?? '', obj);
+      const text = obj.embeddedFields?.length ? obj.text ?? '' : wrapSpaces(tabIndent(obj).text, obj);
       if (obj.embeddedFields?.length) {
         // Text and embedded fields in their original order; tabs become spaces (text boxes do not tab).
         // Consecutive text runs are one piece of text (a paragraph break is a run of its own).
@@ -806,6 +806,8 @@ class RdlBuilder {
       value: p.lines.length > 1 ? `=${p.lines.map((l) => vbString(l)).join(' & vbCrLf & ')}` : (p.lines[0].startsWith('=') ? `=${vbString(p.lines[0])}` : p.lines[0]),
       align: p.align,
     })) : undefined;
+    // Lines all starting at a tab stop: the paragraphs are indented there (text boxes do not tab).
+    const indent = obj && !value.startsWith('=Fields') ? tabIndent(obj).indent : 0;
     return el('Textbox', { Name: name },
       // A page header or footer keeps its size, as Crystal's does: a text box growing there pushes what is
       // below it down (on to a rule drawn under it).
@@ -813,7 +815,8 @@ class RdlBuilder {
       el('KeepTogether', 'true'),
       el('Paragraphs', ...(paragraphs ?? [{ value, align: obj?.align }]).map((p) => el('Paragraph',
         el('TextRuns', el('TextRun', el('Value', p.value), this.textRunStyle(obj, format, scope))),
-        el('Style', p.align ? el('TextAlign', TEXT_ALIGN[p.align]) : null)))),
+        el('Style', p.align ? el('TextAlign', TEXT_ALIGN[p.align]) : null),
+        indent ? el('LeftIndent', `${(indent / 20).toFixed(1)}pt`) : null))),
       hyperlink ? el('ActionInfo', el('Actions', el('Action', el('Hyperlink', hyperlink)))) : null,
       toolTip ? el('ToolTip', toolTip) : null,
       box ? el('Top', inches(box.top)) : null,
@@ -3235,6 +3238,22 @@ function paddedCentred(obj: ReportObject): boolean {
   return obj.size.height >= lineHeight * 1.8 && runs > 0 && (/^ {2,}\S/.test(text) || runs >= 2);
 }
 
+/** Crystal's default tab stops, in twips (every quarter inch from the text's left edge). */
+const TAB_STOP = 360;
+
+/**
+ * A plain text whose lines all start with tabs: the text without its common leading tabs, and the indent they
+ * make (the tab stop they reach). Otherwise the text as it is and no indent.
+ */
+function tabIndent(obj: ReportObject): { text: string; indent: number } {
+  const text = obj.text ?? '';
+  if (obj.kind !== 'text' || obj.embeddedFields?.length || !text.startsWith('\t')) return { text, indent: 0 };
+  const lines = text.split('\n');
+  const tabs = Math.min(...lines.filter((l) => l.trim()).map((l) => /^\t*/.exec(l)![0].length));
+  if (!tabs) return { text, indent: 0 };
+  return { text: lines.map((l) => (l.trim() ? l.slice(tabs) : l)).join('\n'), indent: tabs * TAB_STOP };
+}
+
 function wrapSpaces(text: string, obj: ReportObject, part = false, align = obj.align, ends: { start: boolean; end: boolean } = { start: !part, end: !part }): string {
   const lineHeight = (obj.style?.size ?? 10) * 20 * 1.2;
   if (!obj.size || obj.size.height < lineHeight * 1.8) return text.replace(/\u00a0/g, ' ');
@@ -3264,11 +3283,14 @@ function wrapSpaces(text: string, obj: ReportObject, part = false, align = obj.a
  */
 function textParagraphs(obj: ReportObject): { lines: string[]; align?: ReportObject['align'] }[] | undefined {
   if (obj.kind !== 'text' || obj.embeddedFields?.length || !obj.paragraphAligns || obj.paragraphAligns.length < 2) return undefined;
-  const parts = (obj.text ?? '').split('\n');
+  const parts = tabIndent(obj).text.split('\n');
   if (parts.length !== obj.paragraphAligns.length) return undefined;
   const aligns = obj.paragraphAligns.map((a) => a ?? obj.align);
   if (aligns.every((a) => (a ?? 'left') === (aligns[0] ?? 'left'))) return undefined;
-  return parts.map((text, i) => ({ align: aligns[i], lines: wrapSpaces(text, obj, false, aligns[i]).split('\n') }));
+  // Empty paragraphs at the end add nothing to see (as a single paragraph's trailing line breaks are dropped).
+  let end = parts.length;
+  while (end > 1 && !parts[end - 1].trim()) end--;
+  return parts.slice(0, end).map((text, i) => ({ align: aligns[i], lines: wrapSpaces(text, obj, false, aligns[i]).split('\n') }));
 }
 
 function flattenRectangle(item: XmlElement): XmlElement[] {
