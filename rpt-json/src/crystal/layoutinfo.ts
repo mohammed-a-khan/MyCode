@@ -76,6 +76,8 @@ export function layoutSummary(doc: CfbDocument, find: string[]): string {
     ...definition.formulas.filter((f) => /^Group #\d+ Order$/i.test(f.name)).map((f) => `  ${f.name}: {${shownFormula(f.text ?? '')}}`),
     // Each group: its field, then its records (sort order, named groups and their conditions; text masked).
     ...definition.groups.map((g, i) => `  group ${i + 1} {${shownField(g)}}: ${groupRecords.get(definition)?.[i] ?? '?'}`),
+    // A group named by a formula's value.
+    ...(definition.groupNameFormulas ?? []).map((g) => `  group {${shownField(g.field)}} is named by {@${hide(g.formula, 'F')}}`),
   ];
   const formulaOf = (definition: ReportDefinition, ref: FormulaRef) =>
     definition.formulaTexts?.[ref.index] ?? definition.formulas.find((f) => f.index === ref.index)?.text ?? '';

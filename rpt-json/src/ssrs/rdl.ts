@@ -2441,6 +2441,12 @@ class RdlBuilder {
       this.groupFields.push(field);
       this.groupNames.push(this.itemNames.make(`Group${i + 1}_${field.split('.').pop()}`));
     }
+    // A group named by a formula shows the formula's value as its name.
+    for (const named of def.groupNameFormulas ?? []) {
+      const level = this.groupFields.findIndex((g) => g.toLowerCase() === named.field.toLowerCase()) + 1;
+      const expression = level ? this.formulaExpression(named.formula) : null;
+      if (level && expression) this.groupDisplay.set(level, expression);
+    }
     for (const p of def.parameters) this.parameterName(p.name);
   }
 

@@ -1880,6 +1880,22 @@ describe('formulas without data, page breaks by formula and the default font', (
     assert.ok(box('SumA').includes('<Width>0.896in</Width>'), 'the first total keeps its width, short of the next column');
     assert.ok(rdl.includes('<Rectangle Name="SumA_Area">'));
   });
+  it('heads a group named by a formula with the formula\'s value', () => {
+    const src: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Flag', type: 'string' }, { name: 'Amount', type: 'number' }] }] };
+    const def: ReportDefinition = { ...emptyDefinition(), groups: ['T.Flag'],
+      formulas: [{ name: 'FlagName', kind: 'formula', text: 'if {T.Flag} = "A" then "First kind" else "Second kind"', referencedFields: ['T.Flag'] }],
+      groupNameFormulas: [{ field: 'T.Flag', formula: 'FlagName' }],
+      layout: [
+        { name: 'GroupHeaderArea1', sections: [{ name: 'GH1', height: 240, objects: [{ kind: 'field', name: 'Heading', field: 'Group #1', position: { x: 0, y: 0 }, size: { width: 2000, height: 240 } }] }] },
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 210, objects: [{ kind: 'field', name: 'Cell', field: 'T.Amount', position: { x: 0, y: 0 }, size: { width: 1200, height: 210 } }] }] },
+        { name: 'GroupFooterArea1', sections: [{ name: 'GF1', height: 0, objects: [] }] },
+      ] };
+    const { rdl } = convertToRdl(def, src, { reportName: 'R' });
+    const box = rdl.slice(rdl.indexOf('<Textbox Name="Heading">'), rdl.indexOf('</Textbox>', rdl.indexOf('<Textbox Name="Heading">')));
+    // The formula's value: inline, or as the calculated field the formula became.
+    assert.ok(/"First kind"|Fields!F_FlagName\.Value/.test(box) && rdl.includes('"First kind"') && rdl.includes('"Second kind"'), box.slice(0, 500));
+    assert.ok(rdl.includes('<GroupExpression>=Fields!Flag.Value</GroupExpression>'), 'still grouped by the field');
+  });
   it('takes the font most of the text uses as the report default', () => {
     const { rdl } = convertToRdl(report([]), source, { reportName: 'R' });
     assert.ok(rdl.includes('<df:DefaultFontFamily>Times New Roman</df:DefaultFontFamily>'));
