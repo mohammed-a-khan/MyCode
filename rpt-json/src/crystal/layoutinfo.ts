@@ -6,7 +6,7 @@
 import type { CfbDocument } from '../cfb/types.ts';
 import { buildMetadata } from '../json.ts';
 import { classifyAreas } from './areas.ts';
-import { groupRecords, textRecords, type FormulaRef, type ReportDefinition, type ReportObject, type SectionInfo } from './model.ts';
+import { allGroupRecords, groupRecords, textRecords, type FormulaRef, type ReportDefinition, type ReportObject, type SectionInfo } from './model.ts';
 
 /** Object names Crystal generates (kept: they say nothing about the report). */
 const GENERIC_NAME = /^((Text|Field|Line|Box|Graph|Chart|Subreport|Picture|Drawing|CrossTab|Map|OLAP)\d*|(Page|Report|Group)(Header|Footer)\d*(Area\d*)?(Section\d*)?|Detail(Area\d*)?(Section\d*)?|TSection\d+|Section\d+)$/i;
@@ -120,6 +120,16 @@ export function layoutSummary(doc: CfbDocument, find: string[]): string {
   const texts = (definition: ReportDefinition) => definition.layout.flatMap((a) => a.sections.flatMap((s) => s.objects.map((o) => o.text ?? '')));
 
   const main = reports.find((r) => !r.storage);
+  // --all: the whole main report, its groups and every group record (text masked).
+  if (find.includes('--all') && main?.definition) {
+    lines.push('== main report');
+    describe(main.definition, false);
+    lines.push(...selections(main.definition));
+    const sorts = main.definition.sorts ?? [];
+    if (sorts.length) lines.push(`  sorts: ${sorts.map((s) => `${shownField(s.field)}${s.descending ? ' desc' : ' asc'}${s.bySummary ? ' (by summary)' : ''}`).join(', ')}`);
+    (allGroupRecords.get(main.definition) ?? []).forEach((g, i) => lines.push(`  group record ${i + 1}: ${g}`));
+    return `${lines.join('\n')}\n\n(Positions and sizes in twips; names and text are replaced by S1, N1, F1, ...; <tN> is N characters of text.)\n`;
+  }
   // "#339" asks for Subdocument 339 by number.
   const numbers = new Set(find.map((f) => /^#(\d+)$/.exec(f.trim())?.[1]).filter((n): n is string => !!n).map(Number));
   // Main-report sections showing a searched text, with what is placed around them.

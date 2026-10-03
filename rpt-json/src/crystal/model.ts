@@ -466,6 +466,8 @@ export interface DataSourceInfo {
 export const textRecords = new WeakMap<ReportObject, string[]>();
 /** Each report group's records in brief (see briefRecords), for the layout tool. */
 export const groupRecords = new WeakMap<object, string[]>();
+/** Every group record of a report in brief, for the layout tool. */
+export const allGroupRecords = new WeakMap<object, string[]>();
 
 /**
  * A record and those inside it, one "type/size:hex" entry each, with any run of three or more printable characters
@@ -479,8 +481,11 @@ function briefRecords(node: RecordNode): string {
       while (i + n < bytes.length && bytes[i + n] >= 0x20 && bytes[i + n] < 0x7f) n++;
       let w = 0;
       while (i + w + 1 < bytes.length && bytes[i + w] >= 0x20 && bytes[i + w] < 0x7f && bytes[i + w + 1] === 0) w += 2;
-      if (w >= 6) { out += `<t${w / 2}>`; i += w; continue; }
-      if (n >= 3) { out += `<t${n}>`; i += n; continue; }
+      // Crystal's own group labels ("Group #1 Name") are shown: they say nothing about the report.
+      const text = (from: number, count: number, step: number) => String.fromCharCode(...Array.from({ length: count }, (_, k) => bytes[from + k * step]));
+      const label = (t: string) => (/^Group #\d+ Name$/.test(t) ? `<${t}>` : undefined);
+      if (w >= 6) { out += label(text(i, w / 2, 2)) ?? `<t${w / 2}>`; i += w; continue; }
+      if (n >= 3) { out += label(text(i, n, 1)) ?? `<t${n}>`; i += n; continue; }
       out += bytes[i].toString(16).padStart(2, '0');
       i++;
     }
@@ -1121,6 +1126,8 @@ export function buildReportDefinition(records: RecordNode[]): ReportDefinition {
   }
   // Each report group's records in brief, for the layout tool (text masked).
   groupRecords.set(report, findAll(records, GROUP).filter(isReportGroup).map((node) => briefRecords(node)));
+  // Every group record (charts' and cross-tabs' too), for when a report's groups are not recognised.
+  allGroupRecords.set(report, findAll(records, GROUP).map((node) => briefRecords(node)));
   report.groupOptions = [];
   for (const node of findAll(records, GROUP).filter(isReportGroup)) {
     const bytes = ownBytes(node);
