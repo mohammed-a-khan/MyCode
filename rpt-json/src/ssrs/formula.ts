@@ -753,7 +753,7 @@ export const SAME_ARGS: Record<string, string> = {
 
   year: 'Year', month: 'Month', day: 'Day', hour: 'Hour', minute: 'Minute', second: 'Second',
   dateadd: 'DateAdd', datediff: 'DateDiff', datepart: 'DatePart', dayofweek: 'Weekday', weekday: 'Weekday',
-  monthname: 'MonthName', weekdayname: 'WeekdayName', datevalue: 'DateValue', timevalue: 'TimeValue',
+  monthname: 'MonthName', weekdayname: 'WeekdayName',
   dateserial: 'DateSerial', timeserial: 'TimeSerial', isnumber: 'IsNumeric', numerictext: 'IsNumeric', lbound: 'LBound',
   strcmp: 'StrComp', filter: 'Filter',
   iif: 'IIf', choose: 'Choose', switch: 'Switch', isnumeric: 'IsNumeric', isdate: 'IsDate',
@@ -1281,6 +1281,15 @@ export class Emitter {
     return false;
   }
 
+  /** A value VB sees as a number: a numeric literal, field or variable, a function giving a number, or sums of them. */
+  private isNumericValue(node: Node): boolean {
+    if (this.isNumberNode(node)) return true;
+    if (node.t === 'call') return ['year', 'month', 'day', 'hour', 'minute', 'second', 'dayofweek', 'weekday', 'len', 'length', 'tonumber', 'cdbl', 'int', 'round', 'abs', 'datediff', 'datepart', 'instr', 'remainder', 'truncate', 'fix', 'count', 'sum'].includes(node.name.toLowerCase());
+    if (node.t === 'binary') return ['+', '-', '*', '/', '\\', 'mod'].includes(node.op) && this.isNumericValue(node.left) && this.isNumericValue(node.right);
+    if (node.t === 'unary') return node.op === '-' && this.isNumericValue(node.arg);
+    return false;
+  }
+
   /** A database field of a text type. */
   private isTextField(node: Node): boolean {
     return node.t === 'field' && !node.ref.startsWith('@') && !node.ref.startsWith('?') && ['string', 'memo'].includes(this.ctx.fieldType?.(node.ref) ?? '');
@@ -1485,22 +1494,34 @@ export class Emitter {
         return `(${x} Mod ${y})`;
       }
       case 'date':
-      case 'cdate': {
-        const v = a();
-        return v.length === 3 ? `DateSerial(${v.join(', ')})` : `CDate(${v[0]})`;
-      }
+      case 'cdate':
+      case 'datevalue':
       case 'datetime':
       case 'datetimevalue':
       case 'cdatetime':
       case 'dtstodate': {
+        // Crystal builds a date (or date-time) from year, month, day [, hour, minute, second], from a date and a
+        // time, from a number of days, or from text or a date.
         const v = a();
-        if (v.length === 6) return `(DateSerial(${v.slice(0, 3).join(', ')}) + TimeSerial(${v.slice(3).join(', ')}))`;
-        if (v.length === 2) return `(CDate(${v[0]}).Date + CDate(${v[1]}).TimeOfDay)`;
-        return `CDate(${v[0]})`;
+        if (v.length >= 6) return `DateSerial(${v.slice(0, 3).join(', ')}).Add(TimeSerial(${v.slice(3, 6).join(', ')}).TimeOfDay)`;
+        if (v.length >= 3) return `DateSerial(${v.slice(0, 3).join(', ')})`;
+        if (v.length === 2) {
+          // Time(x) of one value is already a time of day (a TimeSpan, which CDate does not take).
+          const time = args[1].t === 'call' && ['time', 'ctime', 'timevalue'].includes(args[1].name.toLowerCase()) && args[1].args.length < 3;
+          return `CDate(${v[0]}).Date.Add(${time ? v[1] : `CDate(${v[1]}).TimeOfDay`})`;
+        }
+        // A number is a count of days (VB will not turn a number into a date).
+        if (args[0] && this.isNumericValue(args[0])) return `DateTime.FromOADate(CDbl(${v[0]}))`;
+        return key === 'datevalue' ? `CDate(${v[0]}).Date` : `CDate(${v[0]})`;
       }
       case 'time':
       case 'ctime':
-        return a().length === 3 ? `TimeSerial(${a().join(', ')})` : `CDate(${a()[0]}).TimeOfDay`;
+      case 'timevalue': {
+        const v = a();
+        if (v.length >= 3) return `TimeSerial(${v.slice(0, 3).join(', ')})`;
+        if (args[0] && this.isNumericValue(args[0])) return `DateTime.FromOADate(CDbl(${v[0]})).TimeOfDay`;
+        return `CDate(${v[0]}).TimeOfDay`;
+      }
       case 'roundup': {
         const [x, n] = a();
         return n === undefined ? `Math.Ceiling(${x})` : `(Math.Ceiling(${x} * 10 ^ ${n}) / 10 ^ ${n})`;
