@@ -148,6 +148,9 @@ export function layoutSummary(doc: CfbDocument, find: string[]): string {
     if (sorts.length) lines.push(`  sorts: ${sorts.map((s) => `${shownField(s.field)}${s.descending ? ' desc' : ' asc'}${s.bySummary ? ' (by summary)' : ''}`).join(', ')}`);
     if (report.definition!.groups.length) lines.push(`  groups: ${report.definition!.groups.map((g) => shownField(g)).join(', ')}`);
     lines.push(...selections(report.definition!));
+    // Its parameters, and the main-report field each linked one takes its value from.
+    const params = report.definition!.parameters.map((p) => `?${hide(p.name, 'P')}${p.linkedField ? ` <- {${shownField(p.linkedField)}}` : ''}`);
+    if (params.length) lines.push(`  parameters: ${params.join(', ')}`);
   }
   // The main report's record and group selection (what decides which rows are shown).
   if (main?.definition && lines.length) lines.push('', '== main report selection', ...selections(main.definition));
