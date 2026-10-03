@@ -1023,10 +1023,13 @@ class RdlBuilder {
         el('Top', inches(Math.max(0, Math.min(fixed, height) - 0.01))), el('Left', '0in'), el('Height', '0in'), el('Width', '0.01in'),
         el('Style', el('Border', el('Style', 'None'))))]
       : [];
+    // Crystal clips a subreport's content to the subreport object's frame: items reaching past it are trimmed to it
+    // (otherwise the frame would grow, possibly past the page's edge).
+    const content = result.width > box.width + 0.001 ? fitWidth(result.items, box.width) : result.items;
     const rectangle = el('Rectangle', { Name: this.itemNames.make(obj.name || 'Subreport') },
-      result.items.length || keep.length ? el('ReportItems', ...result.items, ...keep) : null,
+      content.length || keep.length ? el('ReportItems', ...content, ...keep) : null,
       el('KeepTogether', 'true'),
-      el('Top', inches(box.top)), el('Left', inches(box.left)), el('Height', inches(height)), el('Width', inches(Math.max(box.width, result.width))),
+      el('Top', inches(box.top)), el('Left', inches(box.left)), el('Height', inches(height)), el('Width', inches(box.width)),
       hidden ? el('Visibility', el('Hidden', hidden)) : null,
       // The subreport object's own border (Crystal draws a box around the subreport).
       el('Style', ...this.borderStyle(obj.border)));
@@ -1462,7 +1465,7 @@ class RdlBuilder {
   }
 
   /**
-   * A section whose last object is a line across the table drawn some way above its bottom (a rule under the
+   * A section whose last object is a line across the table drawn above its bottom (a rule under the
    * column headings): the row ends at the line (its bottom border) and an empty row keeps the space Crystal leaves
    * below it, so the next row's text does not touch the line.
    */
@@ -1472,8 +1475,10 @@ class RdlBuilder {
     const rules = section.objects.filter((o) => o.kind === 'line' && !this.runOn.has(o) && !(o.size?.height) && (o.size?.width ?? 0) >= tableWidth * 0.8);
     const rule = rules.map((o) => ({ o, y: o.position?.y ?? 0 })).filter((r) => r.y > section.height! / 2).sort((a, b) => b.y - a.y)[0];
     if (!rule) return null;
-    const gap = section.height - rule.y - (rule.o.border?.width ?? 20) / 2;
-    if (gap < 40) return null;
+    // SSRS draws a cell's bottom border over the edge (a thick rule reaches into the next row): any space Crystal
+    // leaves below the rule is kept.
+    const gap = section.height - rule.y;
+    if (gap < 44) return null; // a row is at least 0.03in high
     // Nothing else may reach below the line, nor any line run down the table from this section.
     if (section.objects.some((o) => o !== rule.o && ((o.position?.y ?? 0) + (o.size?.height ?? 0) > rule.y + 30 || this.runOn.has(o)))) return null;
     const { conditions, ...base } = section;
@@ -1505,18 +1510,21 @@ class RdlBuilder {
     return !!formula && formula.referencedFields.length === 0 && !/[{]/.test(formula.text);
   }
 
-  private tableRow(columns: Column[], section: SectionInfo, rowName: string, area: string, minHeight = MIN_ROW_HEIGHT, outerOnly = false, splitDone = false): { row: XmlElement; height: number; hidden?: string; more?: { row: XmlElement; height: number }[] } {
+  private tableRow(columns: Column[], section: SectionInfo, rowName: string, area: string, minHeight = MIN_ROW_HEIGHT, outerOnly = false, splitDone: boolean | 'below' = false): { row: XmlElement; height: number; hidden?: string; more?: { row: XmlElement; height: number }[] } {
     // Split once, at the first rule (the one under the heading's title); a rule lower down closes the headings.
+    // The part below a title's rule may still end at a rule of its own (the one under the column headings).
     const atRule = splitDone ? null : this.splitAtRule(columns, section);
-    const split = atRule ?? (splitDone ? null : this.splitBelowRule(columns, section));
+    const split = atRule ?? (splitDone === true ? null : this.splitBelowRule(columns, section));
     if (split) {
       // A line across the middle of the section (a rule under a heading): two rows, the upper ending at the line
       // (its bottom border), the lower starting there; the lines running down from it are the lower row's cell
       // borders, drawn as in the rows below it.
       // Above a title's rule the row is the title's alone; a row ending at a rule below it is laid out as usual.
       const upper = this.tableRow(columns, split.upper, rowName, area, minHeight, !!atRule, true);
-      const lower = this.tableRow(columns, split.lower, `${rowName}_Lower`, area, minHeight, false, true);
-      return { row: upper.row, height: upper.height + lower.height, hidden: upper.hidden, more: [{ row: lower.row, height: lower.height }] };
+      const lower = this.tableRow(columns, split.lower, `${rowName}_Lower`, area, minHeight, false, atRule ? 'below' : true);
+      // The lower part may itself end at a rule, with an empty row after it.
+      const lowerOwn = lower.height - (lower.more ?? []).reduce((h, m) => h + m.height, 0);
+      return { row: upper.row, height: upper.height + lower.height, hidden: upper.hidden, more: [{ row: lower.row, height: lowerOwn }, ...(lower.more ?? [])] };
     }
     const suppress = section.conditions?.suppress;
     const hidden = suppress ? this.conditionExpression(suppress, false, `Section ${section.name}`) : undefined;
@@ -2873,6 +2881,15 @@ class RdlBuilder {
     if (!def.page && landscape && !this.options.subreport) this.note('Page', `the layout is ${inches(width)} wide, so the page was set to landscape; check the page setup`);
     if (def.page?.paperSize && !PAPER_SIZES[def.page.paperSize]) this.note('Page', `paper size code ${def.page.paperSize} is not mapped; Letter was used`);
     const pageWidth = landscape ? paperHeight : paperWidth;
+    // Crystal prints nothing past the printable width (an object reaching past it is cut off at the edge); SSRS would
+    // print the overflow on a page of its own, after every page. Items reaching past the edge are trimmed to it.
+    const printable = pageWidth - margins.left - margins.right;
+    if (!this.options.subreport && width > printable + 0.001) {
+      bodyItems.splice(0, bodyItems.length, ...fitWidth(bodyItems, printable));
+      header.items = fitWidth(header.items, printable);
+      footer.items = fitWidth(footer.items, printable);
+      width = printable;
+    }
     if (width > pageWidth - margins.left - margins.right + 0.01 && !this.options.subreport) this.note('Page', `the layout (${inches(width)}) is wider than the printable page; SSRS will add horizontal pages`);
     // A subreport's margins never apply: it prints inside the main report.
     if (!def.margins && !this.options.subreport) this.note('Page', 'the report uses the printer default margins; 0.25in margins were used');
@@ -3400,6 +3417,37 @@ function joinBoxes(input: XmlElement[]): XmlElement[] {
 
 function childNames(e: XmlElement): string[] {
   return e.children.filter((c): c is XmlElement => typeof c === 'object' && c !== null).map((c) => c.name);
+}
+
+/**
+ * Items trimmed to end at `limit` (inches from their container's left): a wider item narrowed, a table by its last
+ * column, a rectangle's own items likewise.
+ */
+function fitWidth(items: XmlElement[], limit: number): XmlElement[] {
+  return items.map((item) => {
+    const left = itemNumber(item, 'Left');
+    const width = itemNumber(item, 'Width');
+    const over = left + width - limit;
+    if (over <= 0.0005) return item;
+    const newWidth = Math.max(limit - left, 0.01);
+    const cut = width - newWidth;
+    let lastColumnDone = false;
+    const fix = (e: XmlElement): XmlElement => {
+      if (e.name === 'TablixColumns' && !lastColumnDone) {
+        lastColumnDone = true;
+        const columns = e.children.filter((c): c is XmlElement => typeof c === 'object' && c !== null);
+        const last = columns[columns.length - 1];
+        const lastWidth = last ? itemNumber(last, 'Width') : 0;
+        if (!last || lastWidth - cut < 0.05) return e;
+        return { ...e, children: e.children.map((c) => (c === last ? { ...last, children: last.children.map((x) => (typeof x === 'object' && x !== null && (x as XmlElement).name === 'Width' ? el('Width', inches(lastWidth - cut)) : x)) } : c)) };
+      }
+      if (e.name === 'TablixBody') return { ...e, children: e.children.map((c) => (typeof c === 'object' && c !== null ? fix(c as XmlElement) : c)) };
+      if (e.name === 'ReportItems') return { ...e, children: fitWidth(e.children.filter((c): c is XmlElement => typeof c === 'object' && c !== null), newWidth) };
+      if (e.name === 'Width') return el('Width', inches(newWidth));
+      return e;
+    };
+    return { ...item, children: item.children.map((c) => (typeof c === 'object' && c !== null ? fix(c as XmlElement) : c)) };
+  });
 }
 
 function moveItem(item: XmlElement, top: number, left: number): XmlElement {
