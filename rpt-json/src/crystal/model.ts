@@ -412,6 +412,8 @@ export interface ReportDefinition {
   groupOptions?: GroupOption[];
   /** Each report group's order: 0 ascending, 1 descending, 2 original (as the records come). */
   groupSorts?: { field: string; order: 0 | 1 | 2 }[];
+  /** A group whose name is a formula's value ("Use a formula as group name"). */
+  groupNameFormulas?: { field: string; formula: string }[];
   runningTotals?: RunningTotal[];
   summarizedFields: string[];
   /** Page orientation and paper size, when the report stores printer settings. */
@@ -1132,6 +1134,7 @@ export function buildReportDefinition(records: RecordNode[]): ReportDefinition {
   allGroupRecords.set(report, findAll(records, GROUP).map((node) => briefRecords(node)));
   report.groupOptions = [];
   report.groupSorts = [];
+  report.groupNameFormulas = [];
   for (const node of findAll(records, GROUP).filter(isReportGroup)) {
     const bytes = ownBytes(node);
     const field = readString(bytes, 0);
@@ -1140,6 +1143,10 @@ export function buildReportDefinition(records: RecordNode[]): ReportDefinition {
     // in a chart's group.
     const order = bytes[field.length + 5];
     if (order !== undefined && order <= 2) report.groupSorts.push({ field: field.text, order: order as 0 | 1 | 2 });
+    // "Use a formula as group name": the group record names the formula ({@name}) whose value heads each group.
+    const named = ownStrings(node).map((t) => t.replace(/^\{|\}$/g, '')).find((t) => t.startsWith('@') && !/^@Group #\d+/i.test(t)
+      && report.formulas.some((f) => f.kind === 'formula' && f.name.toLowerCase() === t.slice(1).toLowerCase()));
+    if (named) report.groupNameFormulas.push({ field: field.text, formula: named.slice(1) });
     // Group: field, 6 bytes, "Others" label, Top N count (u16), keep-others flag (u16).
     const others = readString(bytes, field.length + 6);
     const at = field.length + 6 + (others?.length ?? 0);
