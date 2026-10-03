@@ -1760,6 +1760,21 @@ describe('formulas without data, page breaks by formula and the default font', (
     const { rdl } = convertToRdl(report([{ kind: 'text', name: 'Justified', text: 'Some text', align: 'justify', position: { x: 0, y: 0 }, size: { width: 2000, height: 200 } }]), source, { reportName: 'R' });
     assert.ok(!rdl.includes('Justify') && rdl.includes('<TextAlign>Left</TextAlign>'));
   });
+  it('indents lines that start with tabs to Crystal\'s tab stop (text boxes do not tab)', () => {
+    const { rdl } = convertToRdl(report([{ kind: 'text', name: 'Legend', text: '\t\t* = One\n\t\t+ = Two\n\t\t - = Three', align: 'left', border: { sides: [1, 1, 1, 1] },
+      position: { x: 0, y: 0 }, size: { width: 3000, height: 650 } }]), source, { reportName: 'R' });
+    const box = rdl.slice(rdl.indexOf('<Textbox Name="Legend">'), rdl.indexOf('</Textbox>', rdl.indexOf('<Textbox Name="Legend">')));
+    assert.ok(box.includes('<LeftIndent>36.0pt</LeftIndent>'), 'two tab stops in');
+    assert.ok(box.includes('="* = One" &amp; vbCrLf &amp; "+ = Two" &amp; vbCrLf &amp; " - = Three"'), 'the tabs are gone, other spaces kept');
+  });
+  it('keeps a blank first line', () => {
+    const { rdl } = convertToRdl(report([{ kind: 'text', name: 'Notice', text: '\nSome text\nMore\n\n', align: 'justify', paragraphAligns: ['left', 'justify', 'left', 'left', 'justify'],
+      position: { x: 0, y: 0 }, size: { width: 3000, height: 900 } }]), source, { reportName: 'R' });
+    const box = rdl.slice(rdl.indexOf('<Textbox Name="Notice">'), rdl.indexOf('</Textbox>', rdl.indexOf('<Textbox Name="Notice">')));
+    const values = [...box.matchAll(/<Value>([^<]*)<\/Value>/g)].map((m) => m[1]);
+    assert.equal(values.length, 3, 'one paragraph per line');
+    assert.equal(values[1], 'Some text');
+  });
   it('takes the font most of the text uses as the report default', () => {
     const { rdl } = convertToRdl(report([]), source, { reportName: 'R' });
     assert.ok(rdl.includes('<df:DefaultFontFamily>Times New Roman</df:DefaultFontFamily>'));
