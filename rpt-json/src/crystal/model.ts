@@ -410,6 +410,8 @@ export interface ReportDefinition {
   sorts?: SortInfo[];
   /** Per-group options such as Top N. */
   groupOptions?: GroupOption[];
+  /** Each report group's order: 0 ascending, 1 descending, 2 original (as the records come). */
+  groupSorts?: { field: string; order: 0 | 1 | 2 }[];
   runningTotals?: RunningTotal[];
   summarizedFields: string[];
   /** Page orientation and paper size, when the report stores printer settings. */
@@ -1129,10 +1131,15 @@ export function buildReportDefinition(records: RecordNode[]): ReportDefinition {
   // Every group record (charts' and cross-tabs' too), for when a report's groups are not recognised.
   allGroupRecords.set(report, findAll(records, GROUP).map((node) => briefRecords(node)));
   report.groupOptions = [];
+  report.groupSorts = [];
   for (const node of findAll(records, GROUP).filter(isReportGroup)) {
     const bytes = ownBytes(node);
     const field = readString(bytes, 0);
     if (!field || !field.text) continue;
+    // The sixth of the 6 bytes after the field is the group's order (0 ascending, 1 descending, 2 original), as
+    // in a chart's group.
+    const order = bytes[field.length + 5];
+    if (order !== undefined && order <= 2) report.groupSorts.push({ field: field.text, order: order as 0 | 1 | 2 });
     // Group: field, 6 bytes, "Others" label, Top N count (u16), keep-others flag (u16).
     const others = readString(bytes, field.length + 6);
     const at = field.length + 6 + (others?.length ?? 0);

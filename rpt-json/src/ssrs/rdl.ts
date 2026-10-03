@@ -644,7 +644,8 @@ class RdlBuilder {
     const byField = /^GroupName\s*\(\s*\{?([^{}]+?)\}?\s*(?:,\s*"[^"]*"\s*)?\)$/i.exec(ref);
     const fieldLevel = byField ? this.groupFields.findIndex((g) => g.toLowerCase() === byField[1].trim().toLowerCase()) + 1 : 0;
     if (byField && !fieldLevel) return this.fieldObjectValue(byField[1].trim(), scope, item);
-    const groupName = fieldLevel ? [ref, String(fieldLevel)] : /^Group #(\d+) Name$/i.exec(ref);
+    // "Group #2" alone is how some Crystal versions name the group's name field.
+    const groupName = fieldLevel ? [ref, String(fieldLevel)] : /^Group #(\d+)(?: Name)?$/i.exec(ref);
     if (groupName) {
       const display = this.groupDisplay.get(Number(groupName[1]));
       if (display) return { expression: this.scoped(display, scope) };
@@ -1857,7 +1858,9 @@ class RdlBuilder {
       const fieldSort = sorts.find((s) => !s.bySummary && s.field.toLowerCase() === field.toLowerCase());
       const filters: XmlElement[] = [];
       let sortValue = `=${expression}`;
-      let descending = fieldSort?.descending ?? false;
+      // A record sort on the group's field decides its direction; otherwise the group's own order.
+      const groupOrder = this.definition.groupSorts?.find((g) => g.field.toLowerCase() === field.toLowerCase())?.order;
+      let descending = fieldSort?.descending ?? groupOrder === 1;
       if (summarySort && level === levels) {
         const summary = this.fieldObjectValue(summarySort.field, 'row', `Group ${level} sort`);
         if (summary.expression !== 'Nothing') {
@@ -1888,7 +1891,7 @@ class RdlBuilder {
           filters.length ? el('Filters', ...filters) : null),
         el('SortExpressions', el('SortExpression', el('Value', sortValue), descending ? el('Direction', 'Descending') : null),
           // Groups sorted by a summary keep Crystal's order among equal summaries: by the group's own value.
-          sortValue !== `=${expression}` ? el('SortExpression', el('Value', `=${expression}`), fieldSort?.descending ? el('Direction', 'Descending') : null) : null),
+          sortValue !== `=${expression}` ? el('SortExpression', el('Value', `=${expression}`), (fieldSort?.descending ?? groupOrder === 1) ? el('Direction', 'Descending') : null) : null),
         el('TablixMembers', ...headerMembers[level - 1], member, ...footerMembers[level - 1]));
     }
 
