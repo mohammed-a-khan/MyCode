@@ -1456,11 +1456,14 @@ class RdlBuilder {
     if (rest.some((o) => top(o) < rule.y - 30 && bottom(o) > rule.y + 30)) return null;
     const { conditions, ...base } = section;
     const frameTop = frames.map((f) => ({ ...rule.o, name: `${f.name}_Top`, position: { x: rule.o.position?.x ?? 0, y: 0 }, border: f.border }));
+    // SSRS centres a cell's bottom border on the row's edge: a thick rule would reach up into the title above it
+    // (Crystal draws it from the line down). The row ends half the rule's width lower.
+    const cut = Math.min(rule.y + thickHalf(rule.o), section.height - 44);
     return {
-      upper: { ...section, height: rule.y, objects: [...frameTop, ...rest.filter((o) => top(o) < rule.y), { ...rule.o, position: { x: rule.o.position?.x ?? 0, y: rule.y } }] },
+      upper: { ...section, height: cut, objects: [...frameTop, ...rest.filter((o) => top(o) < rule.y), { ...rule.o, position: { x: rule.o.position?.x ?? 0, y: cut } }] },
       // The lines running down start here: the row's cell borders (the table's rules) draw them.
-      lower: { ...base, conditions: conditions?.backColor ? { backColor: conditions.backColor } : undefined, name: `${section.name}_Lower`, height: section.height - rule.y,
-        objects: rest.filter((o) => top(o) >= rule.y).map((o) => ({ ...o, position: { x: o.position?.x ?? 0, y: top(o) - rule.y } })) },
+      lower: { ...base, conditions: conditions?.backColor ? { backColor: conditions.backColor } : undefined, name: `${section.name}_Lower`, height: section.height - cut,
+        objects: rest.filter((o) => top(o) >= rule.y).map((o) => ({ ...o, position: { x: o.position?.x ?? 0, y: Math.max(top(o) - cut, 0) } })) },
     };
   }
 
@@ -1475,15 +1478,21 @@ class RdlBuilder {
     const rules = section.objects.filter((o) => o.kind === 'line' && !this.runOn.has(o) && !(o.size?.height) && (o.size?.width ?? 0) >= tableWidth * 0.8);
     const rule = rules.map((o) => ({ o, y: o.position?.y ?? 0 })).filter((r) => r.y > section.height! / 2).sort((a, b) => b.y - a.y)[0];
     if (!rule) return null;
-    // SSRS draws a cell's bottom border over the edge (a thick rule reaches into the next row): any space Crystal
-    // leaves below the rule is kept.
-    const gap = section.height - rule.y;
-    if (gap < 44) return null; // a row is at least 0.03in high
+    // SSRS centres a cell's bottom border on the row's edge, half of it in the next row: the row ends half a thick
+    // rule's width below the line, and the space Crystal leaves below the rule is kept; below a thick rule there is
+    // always some (it would otherwise touch the next row's text). A row is at least 0.03in (44 twips) high.
+    const upperHeight = Math.min(rule.y + thickHalf(rule.o), section.height);
+    const thick = thickHalf(rule.o) > 0;
+    let gap = section.height - upperHeight;
+    if (gap < 44) {
+      if (!thick) return null;
+      gap = 44;
+    }
     // Nothing else may reach below the line, nor any line run down the table from this section.
     if (section.objects.some((o) => o !== rule.o && ((o.position?.y ?? 0) + (o.size?.height ?? 0) > rule.y + 30 || this.runOn.has(o)))) return null;
     const { conditions, ...base } = section;
     return {
-      upper: { ...section, height: rule.y },
+      upper: { ...section, height: upperHeight, objects: section.objects.map((o) => (o === rule.o ? { ...o, position: { x: o.position?.x ?? 0, y: upperHeight } } : o)) },
       lower: { ...base, conditions: conditions?.backColor ? { backColor: conditions.backColor } : undefined, name: `${section.name}_Below`, height: gap, objects: [] },
     };
   }
@@ -3423,6 +3432,12 @@ function childNames(e: XmlElement): string[] {
  * Items trimmed to end at `limit` (inches from their container's left): a wider item narrowed, a table by its last
  * column, a rectangle's own items likewise.
  */
+/** Half a thick line's width (twips): what of it SSRS would draw beyond the line's place, as a cell's border. */
+function thickHalf(line: ReportObject): number {
+  const width = line.border?.width ?? 20;
+  return width >= 40 ? width / 2 : 0;
+}
+
 function fitWidth(items: XmlElement[], limit: number): XmlElement[] {
   return items.map((item) => {
     const left = itemNumber(item, 'Left');

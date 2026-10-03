@@ -1799,7 +1799,7 @@ describe('a rule under headings above the section\'s bottom', () => {
     ] };
     const { rdl } = convertToRdl(definition, source, { reportName: 'R', subreport: true });
     const heights = [...rdl.matchAll(/<TablixRow>\s*<Height>([0-9.]+)in<\/Height>/g)].map((m) => m[1]);
-    assert.deepEqual(heights.slice(0, 2), ['0.313', '0.104'], heights.join(', '));
+    assert.deepEqual(heights.slice(0, 2), ['0.333', '0.083'], heights.join(', '));
   });
   it('also below the title\'s rule: title row, heading row ending at its rule, then the space below it', () => {
     const source: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'A', type: 'string' }, { name: 'B', type: 'string' }] }] };
@@ -1821,7 +1821,27 @@ describe('a rule under headings above the section\'s bottom', () => {
     ] };
     const { rdl } = convertToRdl(definition, source, { reportName: 'R', subreport: true });
     const heights = [...rdl.matchAll(/<TablixRow>\s*<Height>([0-9.]+)in<\/Height>/g)].map((m) => m[1]);
-    assert.deepEqual(heights.slice(0, 3), ['0.177', '0.569', '0.042'], heights.join(', '));
+    assert.deepEqual(heights.slice(0, 3), ['0.198', '0.569', '0.031'], heights.join(', '));
+  });
+  it('keeps the next row clear of a thick rule drawn at the very bottom of its section', () => {
+    const source: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'A', type: 'string' }, { name: 'B', type: 'string' }] }] };
+    const definition: ReportDefinition = { ...emptyDefinition(), groups: ['T.A'], layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', objects: [] }] },
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF', objects: [] }] },
+      { name: 'GroupHeaderArea1', sections: [{ name: 'GH', height: 600, objects: [
+        { kind: 'text', name: 'HeadA', text: 'A', position: { x: 0, y: 200 }, size: { width: 1400, height: 225 } },
+        { kind: 'text', name: 'HeadB', text: 'B', position: { x: 1500, y: 200 }, size: { width: 1400, height: 225 } },
+        { kind: 'line', name: 'HeadRule', position: { x: 11, y: 585 }, size: { width: 2880, height: 0 }, border: { sides: [0, 0, 1, 0], width: 60 } },
+      ] }] },
+      { name: 'GroupFooterArea1', sections: [{ name: 'GF', objects: [] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 285, objects: [
+        { kind: 'field', name: 'A1', field: 'T.A', position: { x: 0, y: 0 }, size: { width: 1400, height: 210 } },
+        { kind: 'field', name: 'B1', field: 'T.B', position: { x: 1500, y: 0 }, size: { width: 1400, height: 210 } },
+      ] }] },
+    ] };
+    const { rdl } = convertToRdl(definition, source, { reportName: 'R', subreport: true });
+    const heights = [...rdl.matchAll(/<TablixRow>\s*<Height>([0-9.]+)in<\/Height>/g)].map((m) => m[1]);
+    assert.deepEqual(heights.slice(0, 2), ['0.417', '0.031'], heights.join(', '));
   });
 });
 
