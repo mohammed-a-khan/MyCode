@@ -72,6 +72,12 @@ describe('formula translation', () => {
     assert.equal(translateFormula('{Orders.Amount} > 3', typed).expression, '=(Fields!Amount.Value > 3)');
   });
 
+  it('keeps typographic quotes and odd line breaks out of VB string literals', () => {
+    assert.equal(vbString('(“Owner’s”) said "x"'), '"(" & ChrW(8220) & "Owner’s" & ChrW(8221) & ") said ""x"""');
+    assert.equal(vbString('a\rb c'), '"a" & vbCrLf & "b" & vbCrLf & "c"');
+    assert.equal(vbString('＂'), 'ChrW(65282)');
+  });
+
   it('flags what it cannot translate instead of guessing', () => {
     const vars = tr('WhilePrintingRecords; NumberVar total := total + 1; total');
     assert.ok(vars.issues.some((i) => i.includes('WhilePrintingRecords')));

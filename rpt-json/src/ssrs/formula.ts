@@ -711,9 +711,14 @@ class Parser {
 
 // ---- emitting --------------------------------------------------------------------------
 
-/** A VB string literal; line breaks become vbCrLf (a VB literal cannot span lines). */
+/**
+ * A VB string literal; line breaks of any kind become vbCrLf (a VB literal cannot span lines). VB also takes the
+ * typographic and full-width double quotes (“ ” ＂) as quote marks: inside a literal they would end it, so they
+ * are added as characters (ChrW).
+ */
 export const vbString = (value: string) =>
-  value.split(/\r?\n/).map((line) => `"${line.replace(/"/g, '""')}"`).join(' & vbCrLf & ').replace(/^"" & | & ""$/g, '');
+  value.split(/\r\n|[\r\n\u0085\u2028\u2029]/).map((line) => `"${line.replace(/"/g, '""').replace(/[\u201C\u201D\uFF02]/g, (q) => `" & ChrW(${q.charCodeAt(0)}) & "`)}"`)
+    .join(' & vbCrLf & ').replace(/^"" & | & ""$/g, '').replace(/ & "" & /g, ' & ').replace(/^"" & | & ""$/g, '');
 
 const BINARY_VB: Record<string, string> = {
   and: 'AndAlso',
