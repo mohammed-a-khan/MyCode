@@ -640,7 +640,11 @@ class RdlBuilder {
       if (scope !== 'page' && special.includes('Globals!Page')) this.note(item, 'SSRS shows page numbers only in the page header or footer, so this one was left blank');
       return { expression: special, format: special.includes('ExecutionTime') ? 'd' : undefined };
     }
-    const groupName = /^Group #(\d+) Name$/i.exec(ref);
+    // A group's name: "Group #2 Name", or "GroupName ({Table.Field})" naming the group by its field.
+    const byField = /^GroupName\s*\(\s*\{?([^{}]+?)\}?\s*(?:,\s*"[^"]*"\s*)?\)$/i.exec(ref);
+    const fieldLevel = byField ? this.groupFields.findIndex((g) => g.toLowerCase() === byField[1].trim().toLowerCase()) + 1 : 0;
+    if (byField && !fieldLevel) return this.fieldObjectValue(byField[1].trim(), scope, item);
+    const groupName = fieldLevel ? [ref, String(fieldLevel)] : /^Group #(\d+) Name$/i.exec(ref);
     if (groupName) {
       const display = this.groupDisplay.get(Number(groupName[1]));
       if (display) return { expression: this.scoped(display, scope) };

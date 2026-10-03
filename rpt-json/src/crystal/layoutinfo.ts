@@ -45,8 +45,11 @@ export function layoutSummary(doc: CfbDocument, find: string[]): string {
     return term ? `[${term}]` : `"${hide(text)}"`;
   };
   const shownName = (name: string) => (GENERIC_NAME.test(name) ? name : hide(name, 'N'));
-  const shownField = (ref: string) => {
+  const shownField = (ref: string): string => {
     if (SPECIAL_FIELD.test(ref)) return ref;
+    // A group's name by its field: the wrapper is Crystal's own, the field is hidden like any other.
+    const groupName = /^GroupName\s*\(\s*\{?([^{}]+?)\}?\s*\)$/i.exec(ref);
+    if (groupName) return `GroupName ({${shownField(groupName[1].trim())}})`;
     const prefix = /^[@?#]/.test(ref) ? ref[0] : '';
     const rest = prefix ? ref.slice(1) : ref;
     return `${prefix}${hide(rest, prefix === '@' ? 'F' : prefix === '?' ? 'P' : '#' === prefix ? 'R' : 'D')}`;
@@ -69,6 +72,8 @@ export function layoutSummary(doc: CfbDocument, find: string[]): string {
     ...Object.entries(definition.selectionFormulas ?? {})
       .filter(([, text]) => text)
       .map(([kind, text]) => `  ${kind} selection: {${shownFormula(text!)}}`),
+    // Crystal's "Group #n Order" formulas (which field each group level uses, and how).
+    ...definition.formulas.filter((f) => /^Group #\d+ Order$/i.test(f.name)).map((f) => `  ${f.name}: {${shownFormula(f.text ?? '')}}`),
     // Each group: its field, then its records (sort order, named groups and their conditions; text masked).
     ...definition.groups.map((g, i) => `  group ${i + 1} {${shownField(g)}}: ${groupRecords.get(definition)?.[i] ?? '?'}`),
   ];
