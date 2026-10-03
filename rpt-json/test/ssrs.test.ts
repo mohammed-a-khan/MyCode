@@ -37,7 +37,14 @@ function assertBalancedXml(xml: string): void {
 describe('formula translation', () => {
   it('translates Crystal date-time, rounding and text functions SSRS has no name for', () => {
     assert.equal(tr('DateTimeValue({Orders.Text})').expression, '=CDate(Fields!Text.Value)');
-    assert.equal(tr('DateTimeValue({Orders.Date}, {Orders.Time})').expression, '=(CDate(Fields!Date.Value).Date + CDate(Fields!Time.Value).TimeOfDay)');
+    assert.equal(tr('DateTimeValue({Orders.Date}, {Orders.Time})').expression, '=CDate(Fields!Date.Value).Date.Add(CDate(Fields!Time.Value).TimeOfDay)');
+    // Built from numbers: never CDate of a number, nor Date + Date (neither compiles in VB).
+    assert.equal(tr('DateTimeValue(Year({Orders.Date}), Month({Orders.Date}), 1)').expression, '=DateSerial(Year(Fields!Date.Value), Month(Fields!Date.Value), 1)');
+    assert.equal(tr('DateValue(2024, 1, 31)').expression, '=DateSerial(2024, 1, 31)');
+    assert.equal(tr('DateTime(2024, 1, 31, 10, 30, 0)').expression, '=DateSerial(2024, 1, 31).Add(TimeSerial(10, 30, 0).TimeOfDay)');
+    assert.equal(tr('CDate(45000)').expression, '=DateTime.FromOADate(CDbl(45000))');
+    assert.equal(tr('TimeValue(10, 30, 0)').expression, '=TimeSerial(10, 30, 0)');
+    assert.equal(tr('DateTimeValue({Orders.Date}, Time({Orders.Time}))').expression, '=CDate(Fields!Date.Value).Date.Add(CDate(Fields!Time.Value).TimeOfDay)');
     assert.equal(tr('CDateTime({Orders.Text})').expression, '=CDate(Fields!Text.Value)');
     assert.equal(tr('Ceiling({Orders.Amount}, 5)').expression, '=(Math.Ceiling(Fields!Amount.Value / 5) * 5)');
     assert.equal(tr('HasValue({?Start})').expression, '=(Not IsNothing(Parameters!Start.Value))');
