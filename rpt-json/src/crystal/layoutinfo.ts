@@ -6,7 +6,7 @@
 import type { CfbDocument } from '../cfb/types.ts';
 import { buildMetadata } from '../json.ts';
 import { classifyAreas } from './areas.ts';
-import type { FormulaRef, ReportDefinition, ReportObject, SectionInfo } from './model.ts';
+import { textRecords, type FormulaRef, type ReportDefinition, type ReportObject, type SectionInfo } from './model.ts';
 
 /** Object names Crystal generates (kept: they say nothing about the report). */
 const GENERIC_NAME = /^((Text|Field|Line|Box|Graph|Chart|Subreport|Picture|Drawing|CrossTab|Map|OLAP)\d*|(Page|Report|Group)(Header|Footer)\d*(Area\d*)?(Section\d*)?|Detail(Area\d*)?(Section\d*)?|TSection\d+|Section\d+)$/i;
@@ -77,7 +77,15 @@ export function layoutSummary(doc: CfbDocument, find: string[]): string {
     if (o.subreport) parts.push(`-> Subdocument ${o.subreport.index}`);
     if (o.chart) parts.push(`chart family=${o.chart.family} type=${o.chart.graphType} values=${o.chart.values.length} category=${o.chart.onChangeOf ? 'yes' : 'no'} series=${o.chart.series ? 'yes' : 'no'}`);
     if (o.suppressed) parts.push('SUPPRESSED');
-    return `    ${parts.join(' ')}${conditions(definition, o.conditions)}`;
+    const line = `    ${parts.join(' ')}${conditions(definition, o.conditions)}`;
+    if (o.kind !== 'text' || !o.text || !matched(o.text)) return line;
+    // A searched text, fully: alignment, font size, its shape (letters x, digits 9, spaces and breaks kept) and records.
+    const shape = (o.runs ?? [{ text: o.text }]).map((r) => ('text' in r ? r.text : '{field}')).join('')
+      .replace(/[A-Za-z]/g, 'x').replace(/\d/g, '9').replace(/[^\x20-\x7e]/g, (c) => `<${c.charCodeAt(0).toString(16)}>`);
+    return [line,
+      `      align=${o.align ?? '-'} paragraphs=${(o.paragraphAligns ?? []).map((a) => a ?? '-').join(',')} size=${o.style?.size ?? '?'}pt`,
+      `      shape=|${shape}|`,
+      `      records ${(textRecords.get(o) ?? []).join(' ')}`].join('\n');
   };
   const sectionLines = (definition: ReportDefinition, label: string, sections: SectionInfo[]) => {
     for (const s of sections) {

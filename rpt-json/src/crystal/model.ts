@@ -462,6 +462,9 @@ export interface DataSourceInfo {
   links: TableLink[];
 }
 
+/** Each text object's records in brief (type, size, the bytes of those holding no text), for the layout tool. */
+export const textRecords = new WeakMap<ReportObject, string[]>();
+
 const children = (node: RecordNode): RecordNode[] => node.parts.filter((p): p is RecordNode => !(p instanceof Uint8Array));
 const ownBytes = (node: RecordNode): Uint8Array =>
   Buffer.concat(node.parts.filter((p): p is Uint8Array => p instanceof Uint8Array));
@@ -836,6 +839,14 @@ function buildLayout(records: RecordNode[]): AreaInfo[] {
       continue;
     }
     if (!object) continue;
+    if (object.kind === 'text') {
+      // The text object's records as the layout tool shows them: type and size, and the bytes of those that hold no text.
+      const bytes = ownBytes(record);
+      const plain = record.type === TEXT_PARAGRAPH || !ownStrings(record).length && record.type !== TEXT_CONTENT && record.type !== TEXT_EMBEDDED_FIELD;
+      const list = textRecords.get(object) ?? [];
+      list.push(`${record.type.toString(16).padStart(4, '0')}/${bytes.length}${plain && bytes.length ? `:${Array.from(bytes.subarray(0, 40), (x) => x.toString(16).padStart(2, '0')).join('')}` : ''}${children(record).length ? `[${children(record).map((c) => c.type.toString(16)).join(',')}]` : ''}`);
+      textRecords.set(object, list);
+    }
     switch (record.type) {
       case OBJECT_POSITION:
         if (!object.position) object.position = position(record);
