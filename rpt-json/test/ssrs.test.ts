@@ -1608,6 +1608,18 @@ describe('subreports in the report footer', () => {
     assert.ok(/<Hidden>=\(Not \(IsNothing\(First\(Fields!Label\.Value, "DataSet_M_Subdocument_1"\)\)\)\) AndAlso \(/.test(rdl), rdl.slice(rdl.indexOf('<Textbox Name="Heading">'), rdl.indexOf('<Textbox Name="Heading">') + 1500));
   });
 
+  it('keeps a subreport to its frame, its wider content cut off at the frame as Crystal does', () => {
+    const wide: ReportDefinition = { ...panel, layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 300, objects: [{ kind: 'text', name: 'Wide', text: 'Wide', position: { x: 500, y: 0 }, size: { width: 10000, height: 220 } }] }] },
+      ...panel.layout.slice(1),
+    ] };
+    const { rdl } = convertToRdl(main([sub('Framed', 1, 150)]), source, { reportName: 'M', subreports: new Map([[1, { name: 'M_Subdocument_1', links: [], definition: wide, dataSource: source }]]) });
+    const items = descendants(parseXml(rdl));
+    const num = (name: string, prop: string) => parseFloat(child(items.find((e) => e.attributes.Name === name)!, prop)!.children.join(''));
+    assert.equal(num('Framed', 'Width'), 2.778, 'the frame keeps its Crystal width');
+    assert.ok(num('Wide', 'Left') + num('Wide', 'Width') <= 2.7781, 'the content is cut off at the frame');
+  });
+
   it('hides a subreport by its own suppress formula', () => {
     const formulas = [{ name: 'Object_Visibility', index: 0, kind: 'conditionalFormat' as const, text: 'if {T.Flag} <> 1 then true', referencedFields: ['T.Flag'] }];
     const { rdl } = convertToRdl(main([sub('Chart1', 3, 150, { conditions: { suppress: { name: 'Object_Visibility', index: 0 } } })], formulas), source, { reportName: 'M', subreports });
@@ -1787,7 +1799,52 @@ describe('a rule under headings above the section\'s bottom', () => {
     ] };
     const { rdl } = convertToRdl(definition, source, { reportName: 'R', subreport: true });
     const heights = [...rdl.matchAll(/<TablixRow>\s*<Height>([0-9.]+)in<\/Height>/g)].map((m) => m[1]);
-    assert.deepEqual(heights.slice(0, 2), ['0.313', '0.083'], heights.join(', '));
+    assert.deepEqual(heights.slice(0, 2), ['0.313', '0.104'], heights.join(', '));
+  });
+  it('also below the title\'s rule: title row, heading row ending at its rule, then the space below it', () => {
+    const source: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'A', type: 'string' }, { name: 'B', type: 'string' }] }] };
+    const definition: ReportDefinition = { ...emptyDefinition(), groups: ['T.A'], layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', objects: [] }] },
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF', objects: [] }] },
+      { name: 'GroupHeaderArea1', sections: [{ name: 'GH', height: 1135, objects: [
+        { kind: 'text', name: 'Title', text: 'Title', position: { x: 0, y: 0 }, size: { width: 2900, height: 249 } },
+        { kind: 'text', name: 'HeadA', text: 'A', position: { x: 0, y: 598 }, size: { width: 1400, height: 225 } },
+        { kind: 'text', name: 'HeadB', text: 'B', position: { x: 1500, y: 387 }, size: { width: 1400, height: 660 } },
+        { kind: 'line', name: 'TitleRule', position: { x: 11, y: 255 }, size: { width: 2880, height: 0 }, border: { sides: [0, 0, 1, 0], width: 60 } },
+        { kind: 'line', name: 'HeadRule', position: { x: 11, y: 1075 }, size: { width: 2880, height: 0 }, border: { sides: [0, 0, 1, 0], width: 60 } },
+      ] }] },
+      { name: 'GroupFooterArea1', sections: [{ name: 'GF', objects: [] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 285, objects: [
+        { kind: 'field', name: 'A1', field: 'T.A', position: { x: 0, y: 0 }, size: { width: 1400, height: 210 } },
+        { kind: 'field', name: 'B1', field: 'T.B', position: { x: 1500, y: 0 }, size: { width: 1400, height: 210 } },
+      ] }] },
+    ] };
+    const { rdl } = convertToRdl(definition, source, { reportName: 'R', subreport: true });
+    const heights = [...rdl.matchAll(/<TablixRow>\s*<Height>([0-9.]+)in<\/Height>/g)].map((m) => m[1]);
+    assert.deepEqual(heights.slice(0, 3), ['0.177', '0.569', '0.042'], heights.join(', '));
+  });
+});
+
+describe('a layout a little wider than the page', () => {
+  it('trims what reaches past the printable width, so SSRS adds no blank page across', () => {
+    const source: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'A', type: 'string' }, { name: 'B', type: 'string' }] }] };
+    // 11in landscape page, 0.2in margins: 10.6in printable; the table and a line reach 10.635in.
+    const definition: ReportDefinition = { ...emptyDefinition(), page: { orientation: 'landscape', paperSize: 1 }, margins: { left: 288, right: 288, top: 288, bottom: 288 }, layout: [
+      { name: 'PageHeaderArea1', sections: [{ name: 'PH', height: 300, objects: [{ kind: 'line', name: 'Rule', position: { x: 0, y: 200 }, size: { width: 15314, height: 0 }, border: { sides: [0, 0, 1, 0] } }] }] },
+      { name: 'PageFooterArea1', sections: [{ name: 'PF', objects: [] }] },
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', objects: [] }] },
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF', objects: [] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 200, objects: [
+        { kind: 'field', name: 'A1', field: 'T.A', position: { x: 0, y: 0 }, size: { width: 7000, height: 180 } },
+        { kind: 'field', name: 'B1', field: 'T.B', position: { x: 7200, y: 0 }, size: { width: 8114, height: 180 } },
+      ] }] },
+    ] };
+    const { rdl } = convertToRdl(definition, source, { reportName: 'R' });
+    const body = parseXml(rdl);
+    const widthAfterBody = /<\/Body>\s*<Width>([0-9.]+)in<\/Width>/.exec(rdl)![1];
+    assert.equal(widthAfterBody, '10.6');
+    const rights = descendants(body).filter((e) => ['Tablix', 'Line'].includes(e.name)).map((e) => parseFloat(child(e, 'Left')!.children.join('')) + parseFloat(child(e, 'Width')!.children.join('')));
+    assert.ok(rights.every((r) => r <= 10.6001), rights.join(', '));
   });
 });
 
