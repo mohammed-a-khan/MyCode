@@ -1823,6 +1823,17 @@ describe('formulas without data, page breaks by formula and the default font', (
     assert.equal(widths.length, 4, 'one column per field');
     assert.ok(Math.min(...widths) > 0.3, `no sliver of a column: ${widths}`);
   });
+  it('shows a group\'s name written as GroupName ({Table.Field})', () => {
+    const src: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Kind', type: 'string' }, { name: 'Amount', type: 'number' }] }] };
+    const def: ReportDefinition = { ...emptyDefinition(), groups: ['T.Kind'], layout: [
+      { name: 'GroupHeaderArea1', sections: [{ name: 'GH1', height: 240, objects: [{ kind: 'field', name: 'Heading', field: 'GroupName ({T.Kind})', position: { x: 0, y: 0 }, size: { width: 2000, height: 240 } }] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 210, objects: [{ kind: 'field', name: 'Cell', field: 'T.Amount', position: { x: 0, y: 0 }, size: { width: 1200, height: 210 } }] }] },
+      { name: 'GroupFooterArea1', sections: [{ name: 'GF1', height: 0, objects: [] }] },
+    ] };
+    const { rdl } = convertToRdl(def, src, { reportName: 'R' });
+    const box = rdl.slice(rdl.indexOf('<Textbox Name="Heading">'), rdl.indexOf('</Textbox>', rdl.indexOf('<Textbox Name="Heading">')));
+    assert.ok(box.includes('<Value>=Fields!Kind.Value</Value>'), box.slice(0, 400));
+  });
   it('takes the font most of the text uses as the report default', () => {
     const { rdl } = convertToRdl(report([]), source, { reportName: 'R' });
     assert.ok(rdl.includes('<df:DefaultFontFamily>Times New Roman</df:DefaultFontFamily>'));
