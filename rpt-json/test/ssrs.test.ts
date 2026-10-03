@@ -1864,6 +1864,8 @@ describe('formulas without data, page breaks by formula and the default font', (
     assert.ok(!fieldsRow.includes('<ColSpan>') && !fieldsRow.includes('Name="Message"'), 'the fields keep their own cells');
     assert.ok(rows.some((r) => r.includes('Name="Message"')), 'the message has a row');
     assert.ok(rdl.includes('<Hidden>=Not (IsNothing(Fields!A.Value))</Hidden>'), 'shown on its condition');
+    const widths = [...rdl.slice(rdl.indexOf('<TablixColumns>'), rdl.indexOf('</TablixColumns>')).matchAll(/<Width>([\d.]+)in<\/Width>/g)].map((m) => Number(m[1]));
+    assert.equal(widths.length, 4, 'the message\'s row cuts no column of its own');
   });
   it('draws a total\'s rule as wide as the total, with gaps between neighbouring totals', () => {
     const src: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [
