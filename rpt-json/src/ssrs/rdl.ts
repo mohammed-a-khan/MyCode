@@ -1461,6 +1461,28 @@ class RdlBuilder {
     };
   }
 
+  /**
+   * A section whose last object is a line across the table drawn some way above its bottom (a rule under the
+   * column headings): the row ends at the line (its bottom border) and an empty row keeps the space Crystal leaves
+   * below it, so the next row's text does not touch the line.
+   */
+  private splitBelowRule(columns: Column[], section: SectionInfo): { upper: SectionInfo; lower: SectionInfo } | null {
+    if (!section.height) return null;
+    const tableWidth = inchesToTwips(columns.reduce((sum, c) => sum + c.width, 0));
+    const rules = section.objects.filter((o) => o.kind === 'line' && !this.runOn.has(o) && !(o.size?.height) && (o.size?.width ?? 0) >= tableWidth * 0.8);
+    const rule = rules.map((o) => ({ o, y: o.position?.y ?? 0 })).filter((r) => r.y > section.height! / 2).sort((a, b) => b.y - a.y)[0];
+    if (!rule) return null;
+    const gap = section.height - rule.y - (rule.o.border?.width ?? 20) / 2;
+    if (gap < 40) return null;
+    // Nothing else may reach below the line, nor any line run down the table from this section.
+    if (section.objects.some((o) => o !== rule.o && ((o.position?.y ?? 0) + (o.size?.height ?? 0) > rule.y + 30 || this.runOn.has(o)))) return null;
+    const { conditions, ...base } = section;
+    return {
+      upper: { ...section, height: rule.y },
+      lower: { ...base, conditions: conditions?.backColor ? { backColor: conditions.backColor } : undefined, name: `${section.name}_Below`, height: gap, objects: [] },
+    };
+  }
+
   /** Whether a section fits a plain table row: one line of fields/text, at most one per column. */
   private isTabular(columns: Column[], section: SectionInfo): boolean {
     const cellObjects = section.objects.filter((o) => o.kind === 'field' || o.kind === 'text');
@@ -1485,12 +1507,14 @@ class RdlBuilder {
 
   private tableRow(columns: Column[], section: SectionInfo, rowName: string, area: string, minHeight = MIN_ROW_HEIGHT, outerOnly = false, splitDone = false): { row: XmlElement; height: number; hidden?: string; more?: { row: XmlElement; height: number }[] } {
     // Split once, at the first rule (the one under the heading's title); a rule lower down closes the headings.
-    const split = splitDone ? null : this.splitAtRule(columns, section);
+    const atRule = splitDone ? null : this.splitAtRule(columns, section);
+    const split = atRule ?? (splitDone ? null : this.splitBelowRule(columns, section));
     if (split) {
       // A line across the middle of the section (a rule under a heading): two rows, the upper ending at the line
       // (its bottom border), the lower starting there; the lines running down from it are the lower row's cell
       // borders, drawn as in the rows below it.
-      const upper = this.tableRow(columns, split.upper, rowName, area, minHeight, true, true);
+      // Above a title's rule the row is the title's alone; a row ending at a rule below it is laid out as usual.
+      const upper = this.tableRow(columns, split.upper, rowName, area, minHeight, !!atRule, true);
       const lower = this.tableRow(columns, split.lower, `${rowName}_Lower`, area, minHeight, false, true);
       return { row: upper.row, height: upper.height + lower.height, hidden: upper.hidden, more: [{ row: lower.row, height: lower.height }] };
     }
