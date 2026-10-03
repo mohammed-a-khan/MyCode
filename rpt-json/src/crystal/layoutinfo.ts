@@ -18,7 +18,11 @@ const FORMULA_WORDS = new Set(('if then else and or not in to step do while for 
   'currencyvar datevar datetimevar timevar pagenumber totalpagecount count sum average maximum minimum distinctcount ' +
   'isnull totext cstr cdbl tonumber len length trim left right mid instr instrrev replace split uppercase lowercase ' +
   'onfirstrecord onlastrecord previous next round truncate abs chr crred crblack crgreen crblue crnocolor defaultattribute ' +
-  'currentfieldvalue date year month day today currentdate function exit nothing').split(' '));
+  'currentfieldvalue date year month day today currentdate function exit nothing ' +
+  'datetime datetimevalue datevalue cdate cdatetime ctime time timevalue dateserial timeserial dateadd datediff datepart dayofweek weekday ' +
+  'hour minute second currentdatetime currenttime hasvalue isdate istime isdatetime tonumber cdbl ccur int fix ceiling floor ' +
+  'monthname weekdayname dtstodate maximum minimum lastfullmonth lastfullweek monthtodate yeartodate calendar1stqtr ' +
+  'aged0to30days aged31to60days aged61to90days over90days lastyearmtd lastyearytd next30days last7days').split(' '));
 
 export function layoutSummary(doc: CfbDocument, find: string[]): string {
   const reports = (buildMetadata(doc).reports ?? []).filter((r) => r.definition);
@@ -59,6 +63,9 @@ export function layoutSummary(doc: CfbDocument, find: string[]): string {
     .trim();
 
   const lines: string[] = [];
+  const selections = (definition: ReportDefinition) => Object.entries(definition.selectionFormulas ?? {})
+    .filter(([, text]) => text)
+    .map(([kind, text]) => `  ${kind} selection: {${shownFormula(text!)}}`);
   const formulaOf = (definition: ReportDefinition, ref: FormulaRef) =>
     definition.formulaTexts?.[ref.index] ?? definition.formulas.find((f) => f.index === ref.index)?.text ?? '';
   const conditions = (definition: ReportDefinition, c: Record<string, FormulaRef> | undefined) =>
@@ -140,7 +147,10 @@ export function layoutSummary(doc: CfbDocument, find: string[]): string {
     const sorts = report.definition!.sorts ?? report.definition!.sortFields.map((field) => ({ field, descending: false, bySummary: false }));
     if (sorts.length) lines.push(`  sorts: ${sorts.map((s) => `${shownField(s.field)}${s.descending ? ' desc' : ' asc'}${s.bySummary ? ' (by summary)' : ''}`).join(', ')}`);
     if (report.definition!.groups.length) lines.push(`  groups: ${report.definition!.groups.map((g) => shownField(g)).join(', ')}`);
+    lines.push(...selections(report.definition!));
   }
+  // The main report's record and group selection (what decides which rows are shown).
+  if (main?.definition && lines.length) lines.push('', '== main report selection', ...selections(main.definition));
   if (!lines.length) return `No report or subreport contains ${find.map((f) => `"${f}"`).join(' or ')}.\n`;
   return `${lines.join('\n').trim()}\n\n(Positions and sizes in twips; names and text are replaced by S1, N1, F1, ...; [text] is a text you searched for.)\n`;
 }
