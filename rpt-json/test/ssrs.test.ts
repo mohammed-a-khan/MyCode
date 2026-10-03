@@ -1750,6 +1750,10 @@ describe('formulas without data, page breaks by formula and the default font', (
     }
   });
 
+  it('left-aligns justified text (SSRS aligns only General, Left, Center or Right)', () => {
+    const { rdl } = convertToRdl(report([{ kind: 'text', name: 'Justified', text: 'Some text', align: 'justify', position: { x: 0, y: 0 }, size: { width: 2000, height: 200 } }]), source, { reportName: 'R' });
+    assert.ok(!rdl.includes('Justify') && rdl.includes('<TextAlign>Left</TextAlign>'));
+  });
   it('takes the font most of the text uses as the report default', () => {
     const { rdl } = convertToRdl(report([]), source, { reportName: 'R' });
     assert.ok(rdl.includes('<df:DefaultFontFamily>Times New Roman</df:DefaultFontFamily>'));
@@ -1823,6 +1827,30 @@ describe('a rule under headings above the section\'s bottom', () => {
     const heights = [...rdl.matchAll(/<TablixRow>\s*<Height>([0-9.]+)in<\/Height>/g)].map((m) => m[1]);
     assert.deepEqual(heights.slice(0, 3), ['0.198', '0.569', '0.031'], heights.join(', '));
   });
+  it('splits at the heading rule even where a heading\'s frame reaches past it', () => {
+    const source: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'A', type: 'string' }, { name: 'B', type: 'string' }] }] };
+    const definition: ReportDefinition = { ...emptyDefinition(), groups: ['T.A'], layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', objects: [] }] },
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF', objects: [] }] },
+      { name: 'GroupHeaderArea1', sections: [{ name: 'GH', height: 940, objects: [
+        { kind: 'text', name: 'Title', text: 'Title', position: { x: 0, y: 0 }, size: { width: 2900, height: 288 } },
+        { kind: 'text', name: 'HeadA', text: 'A', position: { x: 0, y: 510 }, size: { width: 1400, height: 240 } },
+        { kind: 'text', name: 'HeadB', text: 'B', position: { x: 1500, y: 390 }, size: { width: 1400, height: 525 } },
+        { kind: 'line', name: 'TitleRule', position: { x: 0, y: 290 }, size: { width: 2900, height: 0 }, border: { sides: [0, 0, 1, 0], width: 60 } },
+        { kind: 'line', name: 'HeadRule', position: { x: 0, y: 880 }, size: { width: 2900, height: 0 }, border: { sides: [0, 0, 1, 0], width: 60 } },
+      ] }] },
+      { name: 'GroupFooterArea1', sections: [{ name: 'GF', objects: [] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 250, objects: [
+        { kind: 'field', name: 'A1', field: 'T.A', position: { x: 0, y: 0 }, size: { width: 1400, height: 210 } },
+        { kind: 'field', name: 'B1', field: 'T.B', position: { x: 1500, y: 0 }, size: { width: 1400, height: 210 } },
+      ] }] },
+    ] };
+    const { rdl } = convertToRdl(definition, source, { reportName: 'R', subreport: true });
+    const heights = [...rdl.matchAll(/<TablixRow>\s*<Height>([0-9.]+)in<\/Height>/g)].map((m) => m[1]);
+    // Title row to the middle of its rule, heading row likewise, then the space below the heading rule.
+    assert.deepEqual(heights.slice(0, 3), ['0.222', '0.41', '0.031'], heights.join(', '));
+  });
+
   it('keeps the next row clear of a thick rule drawn at the very bottom of its section', () => {
     const source: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'A', type: 'string' }, { name: 'B', type: 'string' }] }] };
     const definition: ReportDefinition = { ...emptyDefinition(), groups: ['T.A'], layout: [
