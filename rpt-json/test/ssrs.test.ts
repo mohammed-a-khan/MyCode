@@ -1834,6 +1834,19 @@ describe('formulas without data, page breaks by formula and the default font', (
     const box = rdl.slice(rdl.indexOf('<Textbox Name="Heading">'), rdl.indexOf('</Textbox>', rdl.indexOf('<Textbox Name="Heading">')));
     assert.ok(box.includes('<Value>=Fields!Kind.Value</Value>'), box.slice(0, 400));
   });
+  it('shows a group\'s name written "Group #1" and sorts a descending group in reverse', () => {
+    const src: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Kind', type: 'string' }, { name: 'Amount', type: 'number' }] }] };
+    const def: ReportDefinition = { ...emptyDefinition(), groups: ['T.Kind'], groupSorts: [{ field: 'T.Kind', order: 1 }], layout: [
+      { name: 'GroupHeaderArea1', sections: [{ name: 'GH1', height: 240, objects: [{ kind: 'field', name: 'Heading', field: 'Group #1', position: { x: 0, y: 0 }, size: { width: 2000, height: 240 } }] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 210, objects: [{ kind: 'field', name: 'Cell', field: 'T.Amount', position: { x: 0, y: 0 }, size: { width: 1200, height: 210 } }] }] },
+      { name: 'GroupFooterArea1', sections: [{ name: 'GF1', height: 0, objects: [] }] },
+    ] };
+    const { rdl } = convertToRdl(def, src, { reportName: 'R' });
+    const box = rdl.slice(rdl.indexOf('<Textbox Name="Heading">'), rdl.indexOf('</Textbox>', rdl.indexOf('<Textbox Name="Heading">')));
+    assert.ok(box.includes('<Value>=Fields!Kind.Value</Value>'), 'the group\'s value');
+    const group = rdl.slice(rdl.indexOf('<Group Name="Group1_Kind">'));
+    assert.ok(/<SortExpression>\s*<Value>=Fields!Kind\.Value<\/Value>\s*<Direction>Descending<\/Direction>/.test(group), 'sorted descending');
+  });
   it('takes the font most of the text uses as the report default', () => {
     const { rdl } = convertToRdl(report([]), source, { reportName: 'R' });
     assert.ok(rdl.includes('<df:DefaultFontFamily>Times New Roman</df:DefaultFontFamily>'));

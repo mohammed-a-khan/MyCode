@@ -11,7 +11,7 @@ import { allGroupRecords, groupRecords, textRecords, type FormulaRef, type Repor
 /** Object names Crystal generates (kept: they say nothing about the report). */
 const GENERIC_NAME = /^((Text|Field|Line|Box|Graph|Chart|Subreport|Picture|Drawing|CrossTab|Map|OLAP)\d*|(Page|Report|Group)(Header|Footer)\d*(Area\d*)?(Section\d*)?|Detail(Area\d*)?(Section\d*)?|TSection\d+|Section\d+)$/i;
 /** Crystal's own field names (kept). */
-const SPECIAL_FIELD = /^(Page Number|Total Page Count|Page N of M|Record Number|Group Number|Print Date|Print Time|Data Date|Report Title|Group #\d+ Name)$/i;
+const SPECIAL_FIELD = /^(Page Number|Total Page Count|Page N of M|Record Number|Group Number|Print Date|Print Time|Data Date|Report Title|Group #\d+( Name)?)$/i;
 /** Words of Crystal's formula language (kept); any other word is a name and is hidden. */
 const FORMULA_WORDS = new Set(('if then else and or not in to step do while for select case default true false ' +
   'whileprintingrecords whilereadingrecords beforereadingrecords shared global local stringvar numbervar booleanvar ' +
