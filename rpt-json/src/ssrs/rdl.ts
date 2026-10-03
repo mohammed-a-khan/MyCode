@@ -1396,9 +1396,17 @@ class RdlBuilder {
 
   // ---- table (tablix) -------------------------------------------------------------------
 
-  private columnsFor(objects: ReportObject[]): Column[] {
-    const cellObjects = objects.filter((o) => o.kind === 'field' || o.kind === 'text');
-    const xs = [...new Set(cellObjects.map((o) => o.position?.x ?? 0))].sort((a, b) => a - b);
+  private columnsFor(sections: SectionInfo[]): Column[] {
+    const sectionOf = new Map(sections.flatMap((s) => s.objects.map((o) => [o, s] as const)));
+    const cellObjects = sections.flatMap((s) => s.objects).filter((o) => o.kind === 'field' || o.kind === 'text');
+    // An object laid across two or more others on its line (a message shown in place of a row's values) spans their columns:
+    // its own edge would cut a sliver of a column out of the one beside it.
+    const left = (o: ReportObject) => o.position?.x ?? 0;
+    const top = (o: ReportObject) => o.position?.y ?? 0;
+    const sameLine = (a: ReportObject, b: ReportObject) => sectionOf.get(a) === sectionOf.get(b) && top(a) < top(b) + (b.size?.height ?? 0) && top(b) < top(a) + (a.size?.height ?? 0);
+    const spansOthers = (o: ReportObject) => cellObjects.filter((q) => q !== o && sameLine(o, q) && left(q) > left(o) + 144 && left(q) < left(o) + (o.size?.width ?? 0)).length >= 2;
+    const edges = cellObjects.filter((o) => !spansOthers(o));
+    const xs = [...new Set((edges.length ? edges : cellObjects).map(left))].sort((a, b) => a - b);
     const merged: number[] = [];
     for (const x of xs) if (merged.length === 0 || x - merged[merged.length - 1] > 144) merged.push(x);
     return merged.map((x, i) => {
@@ -1739,8 +1747,8 @@ class RdlBuilder {
   private buildTablix(areas: Classified, top: number): { tablix: XmlElement | null; height: number; width: number; left: number } {
     const detailObjects = areas.detail.flatMap((s) => s.objects);
     const layoutSource = detailObjects.some((o) => o.kind === 'field' || o.kind === 'text')
-      ? detailObjects
-      : [...areas.groupHeaders.values()].flat().flatMap((s) => s.objects);
+      ? areas.detail
+      : [...areas.groupHeaders.values()].flat();
     let columns = this.columnsFor(layoutSource);
     const anyContent = [...areas.groupHeaders.values(), ...areas.groupFooters.values(), areas.detail].flat().some((s) => s.objects.length > 0);
     if (columns.length === 0 && anyContent) {
@@ -2846,7 +2854,7 @@ class RdlBuilder {
     this.prepare();
 
     const areas = this.classify(def.layout);
-    const detailXs = new Set(this.columnsFor(areas.detail.flatMap((s) => s.objects)).map((c) => c.x));
+    const detailXs = new Set(this.columnsFor(areas.detail).map((c) => c.x));
     // Page-header text objects aligned with detail columns are column headings: they go into the table.
     for (const section of areas.pageHeader) {
       const keep: ReportObject[] = [];
