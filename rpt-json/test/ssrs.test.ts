@@ -1847,6 +1847,39 @@ describe('formulas without data, page breaks by formula and the default font', (
     const group = rdl.slice(rdl.indexOf('<Group Name="Group1_Kind">'));
     assert.ok(/<SortExpression>\s*<Value>=Fields!Kind\.Value<\/Value>\s*<Direction>Descending<\/Direction>/.test(group), 'sorted descending');
   });
+  it('gives a message shown only on a condition, laid across a row\'s fields, a row of its own', () => {
+    const src: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [
+      { name: 'A', type: 'string' }, { name: 'B', type: 'string' }, { name: 'C', type: 'string' }, { name: 'D', type: 'string' },
+    ] }] };
+    const field = (name: string, ref: string, x: number, width: number) => ({ kind: 'field', name, field: ref, position: { x, y: 0 }, size: { width, height: 210 } });
+    const def: ReportDefinition = { ...emptyDefinition(),
+      formulas: [{ name: 'Object_Visibility', index: 1, kind: 'conditionalFormat', text: 'not isnull({T.A})', referencedFields: ['T.A'] }],
+      layout: [{ name: 'DetailArea1', sections: [{ name: 'D', height: 264, objects: [
+        field('First', 'T.A', 165, 1080), field('Second', 'T.B', 1245, 1005), field('Third', 'T.C', 2535, 450), field('Fourth', 'T.D', 3120, 3225),
+        { kind: 'text', name: 'Message', text: 'None', position: { x: 2355, y: 45 }, size: { width: 4125, height: 219 }, conditions: { suppress: { name: 'Object_Visibility', index: 1 } } },
+      ] }] }] };
+    const { rdl } = convertToRdl(def, src, { reportName: 'R' });
+    const rows = rdl.slice(rdl.indexOf('<TablixRows>'), rdl.indexOf('</TablixRows>')).split('<TablixRow>').slice(1);
+    const fieldsRow = rows.find((r) => r.includes('Name="Fourth"'))!;
+    assert.ok(!fieldsRow.includes('<ColSpan>') && !fieldsRow.includes('Name="Message"'), 'the fields keep their own cells');
+    assert.ok(rows.some((r) => r.includes('Name="Message"')), 'the message has a row');
+    assert.ok(rdl.includes('<Hidden>=Not (IsNothing(Fields!A.Value))</Hidden>'), 'shown on its condition');
+  });
+  it('draws a total\'s rule as wide as the total, with gaps between neighbouring totals', () => {
+    const src: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [
+      { name: 'Kind', type: 'string' }, { name: 'A', type: 'number' }, { name: 'B', type: 'number' },
+    ] }] };
+    const cell = (name: string, ref: string, x: number, width: number, y = 0, border?: [number, number, number, number]) => ({ kind: 'field', name, field: ref, position: { x, y }, size: { width, height: 180 }, ...(border ? { border: { sides: border } } : {}) });
+    const def: ReportDefinition = { ...emptyDefinition(), groups: ['T.Kind'], layout: [
+      { name: 'GroupHeaderArea1', sections: [{ name: 'GH1', height: 0, objects: [] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 210, objects: [cell('A1', 'T.A', 11145, 1290), cell('B1', 'T.B', 12540, 1095)] }] },
+      { name: 'GroupFooterArea1', sections: [{ name: 'GF1', height: 287, objects: [cell('SumA', 'Sum of T.A', 11145, 1290, 105, [0, 0, 1, 0]), cell('SumB', 'Sum of T.B', 12540, 1095, 105, [0, 0, 1, 0])] }] },
+    ] };
+    const { rdl } = convertToRdl(def, src, { reportName: 'R' });
+    const box = (name: string) => rdl.slice(rdl.indexOf(`<Textbox Name="${name}">`), rdl.indexOf('</Textbox>', rdl.indexOf(`<Textbox Name="${name}">`)));
+    assert.ok(box('SumA').includes('<Width>0.896in</Width>'), 'the first total keeps its width, short of the next column');
+    assert.ok(rdl.includes('<Rectangle Name="SumA_Area">'));
+  });
   it('takes the font most of the text uses as the report default', () => {
     const { rdl } = convertToRdl(report([]), source, { reportName: 'R' });
     assert.ok(rdl.includes('<df:DefaultFontFamily>Times New Roman</df:DefaultFontFamily>'));

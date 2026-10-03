@@ -133,6 +133,11 @@ export function layoutSummary(doc: CfbDocument, find: string[]): string {
     const sorts = main.definition.sorts ?? [];
     if (sorts.length) lines.push(`  sorts: ${sorts.map((s) => `${shownField(s.field)}${s.descending ? ' desc' : ' asc'}${s.bySummary ? ' (by summary)' : ''}`).join(', ')}`);
     (allGroupRecords.get(main.definition) ?? []).forEach((g, i) => lines.push(`  group record ${i + 1}: ${g}`));
+    // Every formula: its kind, name (Crystal's own "Group #n ..." names shown) and text, masked like the rest.
+    for (const f of main.definition.formulas) {
+      const name = /^Group #\d+/.test(f.name) ? f.name : hide(f.name, 'F');
+      lines.push(`  formula ${f.kind ?? '?'} ${name}: {${shownFormula(f.text ?? '')}}`);
+    }
     return `${lines.join('\n')}\n\n(Positions and sizes in twips; names and text are replaced by S1, N1, F1, ...; <tN> is N characters of text.)\n`;
   }
   // "#339" asks for Subdocument 339 by number.

@@ -1709,6 +1709,20 @@ class RdlBuilder {
           // Its place down the section (a heading set lower in its row), as far as the row's height allows.
           top: section.height ? Math.min(Math.max(obj.position.y, 0), Math.max(section.height - obj.size.height, 0), 288) : 0,
         } : undefined;
+        // A field drawing its own border (a total's rule) narrower than its column: Crystal's line is as wide as the
+        // field, with gaps between neighbouring totals; the cell keeps it at its own place and width.
+        const ownBorder = obj?.border?.sides.some((side) => side > 0) && !ruled.left && !ruled.right && !lines.top && !lines.bottom;
+        if (ownBorder && obj?.position && obj.size && padding && obj.size.width < inchesToTwips(columns[i].width) - 60) {
+          const box = {
+            top: twipsToInches(padding.top), left: twipsToInches(padding.left),
+            width: Math.min(twipsToInches(obj.size.width), columns[i].width - twipsToInches(padding.left)),
+            height: twipsToInches(obj.size.height),
+          };
+          return el('TablixCell', el('CellContents', el('Rectangle', { Name: this.itemNames.make(`${name}_Area`) },
+            el('ReportItems', this.textbox(name, value, cellObj, format, 'row', box)),
+            el('KeepTogether', 'true'),
+            el('Style', el('Border', el('Style', 'None'))))));
+        }
         return el('TablixCell', el('CellContents', this.textbox(name, value, this.ruledBorderObject(cellObj, ruled), format, 'row', undefined, undefined, ruled, padding)));
       })));
     return { row, height, hidden };
@@ -2345,11 +2359,13 @@ class RdlBuilder {
       .filter((s): s is SectionInfo => s !== null)
       .filter((s) => !s.suppressed || s.conditions?.suppress)
       .map((s) => this.clipSpanning(s));
-    const levels = (map: Map<number, SectionInfo[]>) => new Map([...map].map(([level, sections]) => [level, shown(sections)]));
+    // Table sections: an object shown only on a condition and laid across a row's other fields gets a row of its own.
+    const tableShown = (sections: SectionInfo[]) => shown(sections).flatMap(splitConditionalSpans);
+    const levels = (map: Map<number, SectionInfo[]>) => new Map([...map].map(([level, sections]) => [level, tableShown(sections)]));
     return {
       pageHeader: shown(areas.pageHeader), pageFooter: shown(areas.pageFooter),
       reportHeader: shown(areas.reportHeader), reportFooter: shown(areas.reportFooter),
-      detail: shown(areas.detail),
+      detail: tableShown(areas.detail),
       groupHeaders: levels(areas.groupHeaders), groupFooters: levels(areas.groupFooters),
       columnHeadings: [],
     };
@@ -3270,6 +3286,35 @@ function paddedCentred(obj: ReportObject): boolean {
   const lineHeight = (obj.style?.size ?? 10) * 20 * 1.2;
   const runs = (text.trim().match(/\S {3,}(?=\S)/g) ?? []).length;
   return obj.size.height >= lineHeight * 1.8 && runs > 0 && (/^ {2,}\S/.test(text) || runs >= 2);
+}
+
+/**
+ * A text or field shown only on a condition (a "no activity" message) and laid across two or more of its line's
+ * other fields: in a table it would join their cells into one, where SSRS slides the items beside a hidden one
+ * into its place. It gets a row of its own just after the section's, shown on the same condition. A section with
+ * a suppress condition of its own is left as it is.
+ */
+function splitConditionalSpans(section: SectionInfo): SectionInfo[] {
+  if (section.conditions?.suppress) return [section];
+  const cells = section.objects.filter((o) => o.kind === 'field' || o.kind === 'text');
+  const left = (o: ReportObject) => o.position?.x ?? 0;
+  const top = (o: ReportObject) => o.position?.y ?? 0;
+  const sameLine = (a: ReportObject, b: ReportObject) => top(a) < top(b) + (b.size?.height ?? 0) && top(b) < top(a) + (a.size?.height ?? 0);
+  const spanning = cells.filter((o) => o.conditions?.suppress && !o.suppressed
+    && cells.filter((q) => q !== o && sameLine(o, q) && left(q) > left(o) + 144 && left(q) < left(o) + (o.size?.width ?? 0)).length >= 2);
+  if (!spanning.length || spanning.length === cells.length) return [section];
+  return [
+    { ...section, objects: section.objects.filter((o) => !spanning.includes(o)) },
+    ...spanning.map((o, i) => {
+      const { suppress, ...rest } = o.conditions!;
+      return {
+        name: `${section.name}_Shown${i + 1}`,
+        height: o.size?.height ?? MIN_ROW_HEIGHT * 1440,
+        conditions: { suppress: suppress! },
+        objects: [{ ...o, position: { x: left(o), y: 0 }, conditions: Object.keys(rest).length ? rest : undefined }],
+      };
+    }),
+  ];
 }
 
 /** Crystal's default tab stops, in twips (every quarter inch from the text's left edge). */
