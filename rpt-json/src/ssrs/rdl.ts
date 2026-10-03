@@ -1488,11 +1488,16 @@ class RdlBuilder {
       if (!thick) return null;
       gap = 44;
     }
-    // Nothing else may reach below the line, nor any line run down the table from this section.
-    if (section.objects.some((o) => o !== rule.o && ((o.position?.y ?? 0) + (o.size?.height ?? 0) > rule.y + 30 || this.runOn.has(o)))) return null;
+    // Nothing else may start below the line, nor any line run down the table from this section. A heading whose
+    // frame merely reaches past the line (its text ends well above it) is cut at the line.
+    if (section.objects.some((o) => o !== rule.o && ((o.position?.y ?? 0) > rule.y - 10 || this.runOn.has(o)))) return null;
     const { conditions, ...base } = section;
+    const cutAt = (o: ReportObject) => {
+      const top = o.position?.y ?? 0;
+      return o.size && top + o.size.height > rule.y ? { ...o, size: { ...o.size, height: Math.max(rule.y - top, 0) } } : o;
+    };
     return {
-      upper: { ...section, height: upperHeight, objects: section.objects.map((o) => (o === rule.o ? { ...o, position: { x: o.position?.x ?? 0, y: upperHeight } } : o)) },
+      upper: { ...section, height: upperHeight, objects: section.objects.map((o) => (o === rule.o ? { ...o, position: { x: o.position?.x ?? 0, y: upperHeight } } : cutAt(o))) },
       lower: { ...base, conditions: conditions?.backColor ? { backColor: conditions.backColor } : undefined, name: `${section.name}_Below`, height: gap, objects: [] },
     };
   }
@@ -3588,7 +3593,8 @@ export function chartStyle(family: number | undefined, graphType: number | undef
   }
 }
 
-const TEXT_ALIGN: Record<NonNullable<ReportObject['align']>, string> = { left: 'Left', center: 'Center', right: 'Right', justify: 'Justify' };
+/** SSRS aligns text General, Left, Center or Right only: Crystal's justified text is left-aligned (its last line is). */
+const TEXT_ALIGN: Record<NonNullable<ReportObject['align']>, string> = { left: 'Left', center: 'Center', right: 'Right', justify: 'Left' };
 
 /** A literal in a .NET format string. */
 const literalText = (text: string) => (text ? `'${text.replace(/'/g, "\\'")}'` : '');
