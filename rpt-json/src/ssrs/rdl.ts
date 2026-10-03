@@ -1401,7 +1401,9 @@ class RdlBuilder {
 
   // ---- table (tablix) -------------------------------------------------------------------
 
-  private columnsFor(sections: SectionInfo[]): Column[] {
+  private columnsFor(all: SectionInfo[]): Column[] {
+    const own = all.filter((s) => !messageSections.has(s));
+    const sections = own.length ? own : all;
     const sectionOf = new Map(sections.flatMap((s) => s.objects.map((o) => [o, s] as const)));
     const cellObjects = sections.flatMap((s) => s.objects).filter((o) => o.kind === 'field' || o.kind === 'text');
     // An object laid across two or more others on its line (a message shown in place of a row's values) spans their columns:
@@ -1713,9 +1715,14 @@ class RdlBuilder {
         // field, with gaps between neighbouring totals; the cell keeps it at its own place and width.
         const ownBorder = obj?.border?.sides.some((side) => side > 0) && !ruled.left && !ruled.right && !lines.top && !lines.bottom;
         if (ownBorder && obj?.position && obj.size && padding && obj.size.width < inchesToTwips(columns[i].width) - 60) {
+          // Text set to the right ends where the column's other values end (the same right padding); text to the
+          // left starts where theirs start.
+          const columnWidth = inchesToTwips(columns[i].width);
+          const right = leftAligned ? padding.left + obj.size.width : columnWidth - (padding.right ?? 0);
+          const boxLeft = Math.max(right - obj.size.width, 0);
           const box = {
-            top: twipsToInches(padding.top), left: twipsToInches(padding.left),
-            width: Math.min(twipsToInches(obj.size.width), columns[i].width - twipsToInches(padding.left)),
+            top: twipsToInches(padding.top ?? 0), left: twipsToInches(boxLeft),
+            width: twipsToInches(Math.min(obj.size.width, columnWidth - boxLeft)),
             height: twipsToInches(obj.size.height),
           };
           return el('TablixCell', el('CellContents', el('Rectangle', { Name: this.itemNames.make(`${name}_Area`) },
@@ -3313,15 +3320,19 @@ function splitConditionalSpans(section: SectionInfo): SectionInfo[] {
     { ...section, objects: section.objects.filter((o) => !spanning.includes(o)) },
     ...spanning.map((o, i) => {
       const { suppress, ...rest } = o.conditions!;
-      return {
+      return messageSection({
         name: `${section.name}_Shown${i + 1}`,
         height: o.size?.height ?? MIN_ROW_HEIGHT * 1440,
         conditions: { suppress: suppress! },
         objects: [{ ...o, position: { x: left(o), y: 0 }, conditions: Object.keys(rest).length ? rest : undefined }],
-      };
+      });
     }),
   ];
 }
+
+/** Rows made by splitConditionalSpans: their message spans the columns, so it does not decide where they are. */
+const messageSections = new WeakSet<SectionInfo>();
+const messageSection = (section: SectionInfo) => (messageSections.add(section), section);
 
 /** Crystal's default tab stops, in twips (every quarter inch from the text's left edge). */
 const TAB_STOP = 360;
