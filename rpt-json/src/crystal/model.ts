@@ -464,6 +464,32 @@ export interface DataSourceInfo {
 
 /** Each text object's records in brief (type, size, the bytes of those holding no text), for the layout tool. */
 export const textRecords = new WeakMap<ReportObject, string[]>();
+/** Each report group's records in brief (see briefRecords), for the layout tool. */
+export const groupRecords = new WeakMap<object, string[]>();
+
+/**
+ * A record and those inside it, one "type/size:hex" entry each, with any run of three or more printable characters
+ * (one byte each, or two with a zero byte) shown as <tN> instead of its text.
+ */
+function briefRecords(node: RecordNode): string {
+  const hex = (bytes: Uint8Array) => {
+    let out = '';
+    for (let i = 0; i < bytes.length;) {
+      let n = 0;
+      while (i + n < bytes.length && bytes[i + n] >= 0x20 && bytes[i + n] < 0x7f) n++;
+      let w = 0;
+      while (i + w + 1 < bytes.length && bytes[i + w] >= 0x20 && bytes[i + w] < 0x7f && bytes[i + w + 1] === 0) w += 2;
+      if (w >= 6) { out += `<t${w / 2}>`; i += w; continue; }
+      if (n >= 3) { out += `<t${n}>`; i += n; continue; }
+      out += bytes[i].toString(16).padStart(2, '0');
+      i++;
+    }
+    return out;
+  };
+  const own = ownBytes(node);
+  const inner = children(node).map(briefRecords);
+  return `${node.type.toString(16).padStart(4, '0')}/${own.length}:${hex(own)}${inner.length ? `[${inner.join(' ')}]` : ''}`;
+}
 
 const children = (node: RecordNode): RecordNode[] => node.parts.filter((p): p is RecordNode => !(p instanceof Uint8Array));
 const ownBytes = (node: RecordNode): Uint8Array =>
@@ -1093,6 +1119,8 @@ export function buildReportDefinition(records: RecordNode[]): ReportDefinition {
     const tail = bytes.subarray(field.length);
     report.sorts.push({ field: field.text, descending: tail[3] === 1, bySummary: tail[0] === 2 });
   }
+  // Each report group's records in brief, for the layout tool (text masked).
+  groupRecords.set(report, findAll(records, GROUP).filter(isReportGroup).map((node) => briefRecords(node)));
   report.groupOptions = [];
   for (const node of findAll(records, GROUP).filter(isReportGroup)) {
     const bytes = ownBytes(node);

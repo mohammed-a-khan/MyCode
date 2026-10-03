@@ -6,7 +6,7 @@
 import type { CfbDocument } from '../cfb/types.ts';
 import { buildMetadata } from '../json.ts';
 import { classifyAreas } from './areas.ts';
-import { textRecords, type FormulaRef, type ReportDefinition, type ReportObject, type SectionInfo } from './model.ts';
+import { groupRecords, textRecords, type FormulaRef, type ReportDefinition, type ReportObject, type SectionInfo } from './model.ts';
 
 /** Object names Crystal generates (kept: they say nothing about the report). */
 const GENERIC_NAME = /^((Text|Field|Line|Box|Graph|Chart|Subreport|Picture|Drawing|CrossTab|Map|OLAP)\d*|(Page|Report|Group)(Header|Footer)\d*(Area\d*)?(Section\d*)?|Detail(Area\d*)?(Section\d*)?|TSection\d+|Section\d+)$/i;
@@ -65,9 +65,13 @@ export function layoutSummary(doc: CfbDocument, find: string[]): string {
     .trim();
 
   const lines: string[] = [];
-  const selections = (definition: ReportDefinition) => Object.entries(definition.selectionFormulas ?? {})
-    .filter(([, text]) => text)
-    .map(([kind, text]) => `  ${kind} selection: {${shownFormula(text!)}}`);
+  const selections = (definition: ReportDefinition) => [
+    ...Object.entries(definition.selectionFormulas ?? {})
+      .filter(([, text]) => text)
+      .map(([kind, text]) => `  ${kind} selection: {${shownFormula(text!)}}`),
+    // Each group: its field, then its records (sort order, named groups and their conditions; text masked).
+    ...definition.groups.map((g, i) => `  group ${i + 1} {${shownField(g)}}: ${groupRecords.get(definition)?.[i] ?? '?'}`),
+  ];
   const formulaOf = (definition: ReportDefinition, ref: FormulaRef) =>
     definition.formulaTexts?.[ref.index] ?? definition.formulas.find((f) => f.index === ref.index)?.text ?? '';
   const conditions = (definition: ReportDefinition, c: Record<string, FormulaRef> | undefined) =>
@@ -154,8 +158,12 @@ export function layoutSummary(doc: CfbDocument, find: string[]): string {
     const params = report.definition!.parameters.map((p) => `?${hide(p.name, 'P')}${p.linkedField ? ` <- {${shownField(p.linkedField)}}` : ''}`);
     if (params.length) lines.push(`  parameters: ${params.join(', ')}`);
   }
-  // The main report's record and group selection (what decides which rows are shown).
-  if (main?.definition && lines.length) lines.push('', '== main report selection', ...selections(main.definition));
+  // The main report's record and group selection and its groups (what decides which rows are shown, and how).
+  if (main?.definition && lines.length) {
+    lines.push('', '== main report selection and groups', ...selections(main.definition));
+    const sorts = main.definition.sorts ?? [];
+    if (sorts.length) lines.push(`  sorts: ${sorts.map((s) => `${shownField(s.field)}${s.descending ? ' desc' : ' asc'}${s.bySummary ? ' (by summary)' : ''}`).join(', ')}`);
+  }
   if (!lines.length) return `No report or subreport contains ${find.map((f) => `"${f}"`).join(' or ')}.\n`;
   return `${lines.join('\n').trim()}\n\n(Positions and sizes in twips; names and text are replaced by S1, N1, F1, ...; [text] is a text you searched for.)\n`;
 }
