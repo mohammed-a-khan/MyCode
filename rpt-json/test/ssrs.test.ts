@@ -35,6 +35,21 @@ function assertBalancedXml(xml: string): void {
 }
 
 describe('formula translation', () => {
+  it('translates Crystal date-time, rounding and text functions SSRS has no name for', () => {
+    assert.equal(tr('DateTimeValue({Orders.Text})').expression, '=CDate(Fields!Text.Value)');
+    assert.equal(tr('DateTimeValue({Orders.Date}, {Orders.Time})').expression, '=(CDate(Fields!Date.Value).Date + CDate(Fields!Time.Value).TimeOfDay)');
+    assert.equal(tr('CDateTime({Orders.Text})').expression, '=CDate(Fields!Text.Value)');
+    assert.equal(tr('Ceiling({Orders.Amount}, 5)').expression, '=(Math.Ceiling(Fields!Amount.Value / 5) * 5)');
+    assert.equal(tr('HasValue({?Start})').expression, '=(Not IsNothing(Parameters!Start.Value))');
+    const words = tr('ToWords({Orders.Amount})');
+    assert.equal(words.expression, '=Code.CrToWords(Fields!Amount.Value)');
+    assert.deepEqual(words.helpers, ['CrToWords']);
+  });
+  it('never leaves a function SSRS does not know in an expression (the report would not upload)', () => {
+    const t = tr('Median({Orders.Amount})');
+    assert.equal(t.expression, '=Nothing');
+    assert.ok(t.issues.some((i) => /Median\(\) which has no SSRS equivalent/.test(i)));
+  });
   it('translates fields, parameters, formulas and operators', () => {
     assert.equal(tr('{Orders.Amount} * 1.1 + {@Tax}').expression, '=((Fields!Amount.Value * 1.1) + (Fields!Tax.Value))');
     assert.equal(tr('{Orders.Date} >= {?Start Date} and not IsNull({Orders.Date})').expression,

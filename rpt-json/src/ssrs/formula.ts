@@ -762,11 +762,13 @@ export const SAME_ARGS: Record<string, string> = {
 const AGGREGATES: Record<string, string> = {
   sum: 'Sum', count: 'Count', average: 'Avg', maximum: 'Max', minimum: 'Min',
   distinctcount: 'CountDistinct', stddev: 'StDev', pthstddev: 'StDevP', variance: 'Var', popvariance: 'VarP',
+  populationstddev: 'StDevP', populationvariance: 'VarP',
 };
 
 /** Crystal special fields and keywords used as bare names. */
 export const NAMES: Record<string, string> = {
   true: 'True', false: 'False', null: 'Nothing',
+  pi: 'Math.PI', timer: 'Timer', rnd: 'Rnd()',
   currentdate: 'Today()', today: 'Today()', currentdatetime: 'Now()', currenttime: 'TimeOfDay', printdate: 'Globals!ExecutionTime',
   printtime: 'Globals!ExecutionTime', datadate: 'Globals!ExecutionTime', datatime: 'Globals!ExecutionTime',
   pagenumber: 'Globals!PageNumber', totalpagecount: 'Globals!TotalPages', reporttitle: 'Globals!ReportName',
@@ -859,6 +861,92 @@ export const CODE_HELPERS: Record<string, string> = {
     '        parts.Add(CStr(items(i)))',
     '    Next',
     '    Return String.Join(CStr(delimiter), parts.ToArray())',
+    'End Function',
+  ].join('\n'),
+  // Crystal's Even/Odd: rounds away from zero to the nearest even/odd whole number.
+  CrEven: [
+    'Public Function CrEven(ByVal x As Double) As Double',
+    '    Dim n As Double = Math.Ceiling(Math.Abs(x))',
+    '    If n Mod 2 <> 0 Then n += 1',
+    '    Return If(x < 0, -n, n)',
+    'End Function',
+  ].join('\n'),
+  CrOdd: [
+    'Public Function CrOdd(ByVal x As Double) As Double',
+    '    Dim n As Double = Math.Ceiling(Math.Abs(x))',
+    '    If n Mod 2 = 0 Then n += 1',
+    '    Return If(x < 0, -n, n)',
+    'End Function',
+  ].join('\n'),
+  // Crystal's ToWords: a number in words, with its cents as "and nn / 100"; decimals sets how many places.
+  CrToWords: [
+    'Public Function CrToWords(ByVal value As Object, Optional ByVal decimals As Integer = 2) As String',
+    '    If value Is Nothing Then Return ""',
+    '    Dim x As Decimal = Math.Round(Math.Abs(CDec(value)), decimals, MidpointRounding.AwayFromZero)',
+    '    Dim whole As Long = CLng(Math.Floor(x))',
+    '    Dim words As String = CrWords(whole)',
+    '    If CDec(value) < 0 Then words = "minus " & words',
+    '    If decimals > 0 Then words &= " and " & CLng((x - whole) * CDec(10 ^ decimals)).ToString().PadLeft(decimals, "0"c) & " / " & CLng(10 ^ decimals).ToString()',
+    '    Return words',
+    'End Function',
+    'Private Function CrWords(ByVal n As Long) As String',
+    '    Dim ones() As String = {"zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen"}',
+    '    Dim tens() As String = {"", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"}',
+    '    If n < 20 Then Return ones(CInt(n))',
+    '    If n < 100 Then Return tens(CInt(n \\ 10)) & If(n Mod 10 > 0, "-" & ones(CInt(n Mod 10)), "")',
+    '    If n < 1000 Then Return ones(CInt(n \\ 100)) & " hundred" & If(n Mod 100 > 0, " " & CrWords(n Mod 100), "")',
+    '    Dim units() As Long = {1000000000000L, 1000000000L, 1000000L, 1000L}',
+    '    Dim names() As String = {"trillion", "billion", "million", "thousand"}',
+    '    For i As Integer = 0 To units.Length - 1',
+    '        If n >= units(i) Then Return CrWords(n \\ units(i)) & " " & names(i) & If(n Mod units(i) > 0, " " & CrWords(n Mod units(i)), "")',
+    '    Next',
+    '    Return ""',
+    'End Function',
+  ].join('\n'),
+  // Crystal's Picture: each x in the pattern takes the next character of the text; other characters are kept,
+  // and characters left over are added at the end.
+  CrPicture: [
+    'Public Function CrPicture(ByVal text As Object, ByVal pattern As Object) As String',
+    '    Dim s As String = CStr(text)',
+    '    Dim result As New System.Text.StringBuilder()',
+    '    Dim i As Integer = 0',
+    '    For Each c As Char In CStr(pattern)',
+    '        If Char.ToLower(c) = "x"c Then',
+    '            If i < s.Length Then result.Append(s(i))',
+    '            i += 1',
+    '        Else',
+    '            result.Append(c)',
+    '        End If',
+    '    Next',
+    '    If i < s.Length Then result.Append(s.Substring(i))',
+    '    Return result.ToString()',
+    'End Function',
+  ].join('\n'),
+  CrRoman: [
+    'Public Function CrRoman(ByVal value As Object) As String',
+    '    Dim n As Integer = CInt(value)',
+    '    Dim values() As Integer = {1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1}',
+    '    Dim symbols() As String = {"M", "CM", "D", "CD", "C", "XC", "L", "XL", "X", "IX", "V", "IV", "I"}',
+    '    Dim result As String = ""',
+    '    For i As Integer = 0 To values.Length - 1',
+    '        While n >= values(i)',
+    '            result &= symbols(i)',
+    '            n -= values(i)',
+    '        End While',
+    '    Next',
+    '    Return result',
+    'End Function',
+  ].join('\n'),
+  // Crystal's ExtractString: the text between the first start marker and the next end marker ("" if missing).
+  CrExtractString: [
+    'Public Function CrExtractString(ByVal text As Object, ByVal startText As Object, ByVal endText As Object) As String',
+    '    Dim s As String = CStr(text)',
+    '    Dim a As Integer = s.IndexOf(CStr(startText))',
+    '    If a < 0 Then Return ""',
+    '    a += CStr(startText).Length',
+    '    Dim b As Integer = s.IndexOf(CStr(endText), a)',
+    '    If b < 0 Then Return ""',
+    '    Return s.Substring(a, b - a)',
     'End Function',
   ].join('\n'),
   CrAdd: [
@@ -1258,7 +1346,7 @@ export class Emitter {
       case 'field':
         return !node.ref.startsWith('@') && !node.ref.startsWith('?') && /^(date|dateTime)$/.test(this.ctx.fieldType?.(node.ref) ?? '');
       case 'call':
-        return ['cdate', 'date', 'datetime', 'cdatetime', 'dateserial', 'dateadd', 'datevalue', 'minimum', 'maximum'].includes(node.name.toLowerCase()) && (node.name.toLowerCase() !== 'minimum' && node.name.toLowerCase() !== 'maximum' || this.isDate(node.args[0]));
+        return ['cdate', 'date', 'datetime', 'cdatetime', 'datetimevalue', 'dtstodate', 'dateserial', 'dateadd', 'datevalue', 'minimum', 'maximum'].includes(node.name.toLowerCase()) && (node.name.toLowerCase() !== 'minimum' && node.name.toLowerCase() !== 'maximum' || this.isDate(node.args[0]));
       case 'index':
         return node.base.t === 'name' && ['datevar', 'datetimevar'].includes(this.variables.get(node.base.name.toLowerCase())?.vtype ?? '');
       case 'binary':
@@ -1401,13 +1489,17 @@ export class Emitter {
         const v = a();
         return v.length === 3 ? `DateSerial(${v.join(', ')})` : `CDate(${v[0]})`;
       }
-      case 'datetime': {
+      case 'datetime':
+      case 'datetimevalue':
+      case 'cdatetime':
+      case 'dtstodate': {
         const v = a();
         if (v.length === 6) return `(DateSerial(${v.slice(0, 3).join(', ')}) + TimeSerial(${v.slice(3).join(', ')}))`;
         if (v.length === 2) return `(CDate(${v[0]}).Date + CDate(${v[1]}).TimeOfDay)`;
         return `CDate(${v[0]})`;
       }
       case 'time':
+      case 'ctime':
         return a().length === 3 ? `TimeSerial(${a().join(', ')})` : `CDate(${a()[0]}).TimeOfDay`;
       case 'roundup': {
         const [x, n] = a();
@@ -1450,6 +1542,7 @@ export class Emitter {
       case 'previousisnull':
         return `IsNothing(Previous(${a()[0]}))`;
       case 'next':
+      case 'nextvalue':
       case 'nextisnull': {
         const ref = args[0]?.t === 'field' ? args[0].ref : undefined;
         const next = ref ? this.ctx.nextValue?.(ref) : undefined;
@@ -1457,8 +1550,51 @@ export class Emitter {
           this.note(`uses ${name}() on something other than a database field; SSRS has no Next(), so it needs manual conversion`);
           return 'Nothing';
         }
-        return key === 'next' ? next : `IsNothing(${next})`;
+        return key === 'nextisnull' ? `IsNothing(${next})` : next;
       }
+      case 'previousvalue':
+        return `Previous(${a()[0]})`;
+      case 'hasvalue':
+        return `(Not IsNothing(${a()[0]}))`;
+      case 'istime':
+      case 'isdatetime':
+        return `IsDate(${a()[0]})`;
+      case 'dtstotimestring':
+        return `Format(CDate(${a()[0]}), "HH:mm:ss")`;
+      case 'dtstoseconds':
+        return `CDate(${a()[0]}).TimeOfDay.TotalSeconds`;
+      case 'shiftdatetime':
+        this.note('uses ShiftDateTime; SSRS shows the date-time as stored (no time zone shift)');
+        return a()[0] ?? 'Nothing';
+      case 'makearray':
+        // A Crystal array (1-based; slot 0 unused).
+        return `New Object() {Nothing${a().map((v) => `, ${v}`).join('')}}`;
+      case 'ceiling':
+      case 'floor': {
+        const [x, m] = a();
+        const fn = key === 'ceiling' ? 'Math.Ceiling' : 'Math.Floor';
+        return m === undefined ? `${fn}(${x})` : `(${fn}(${x} / ${m}) * ${m})`;
+      }
+      case 'mround': {
+        const [x, m] = a();
+        return `(Math.Round(${x} / ${m}, MidpointRounding.AwayFromZero) * ${m})`;
+      }
+      case 'even':
+      case 'odd':
+      case 'towords':
+      case 'picture':
+      case 'roman':
+      case 'extractstring': {
+        const helper = { even: 'CrEven', odd: 'CrOdd', towords: 'CrToWords', picture: 'CrPicture', roman: 'CrRoman', extractstring: 'CrExtractString' }[key]!;
+        this.helpers.add(helper);
+        return `${this.inCode ? '' : 'Code.'}${helper}(${a().join(', ')})`;
+      }
+      case 'pi':
+        return 'Math.PI';
+      case 'rnd':
+        return 'Rnd()';
+      case 'timer':
+        return 'Timer';
       case 'onfirstrecord':
         return '(RowNumber(Nothing) = 1)';
       case 'onlastrecord':
@@ -1477,8 +1613,10 @@ export class Emitter {
     if (vb) return `${vb}(${a().join(', ')})`;
     const custom = this.ctx.customFunction?.(name);
     if (custom) return `${this.inCode ? '' : 'Code.'}${custom}(${a().join(', ')})`;
-    this.note(`uses function ${name}() which has no mapping yet`);
-    return `${name}(${a().join(', ')})`;
+    // Left as it is, the function would not compile in SSRS (the report would not upload): nothing is shown
+    // in its place until it is converted by hand.
+    this.note(`uses function ${name}() which has no SSRS equivalent; Nothing was used, convert it manually`);
+    return 'Nothing';
   }
 }
 
@@ -1779,7 +1917,7 @@ export function translateToSql(source: string, ctx: SqlContext): string | undefi
         return dot > 0 && DATE_TYPES.includes(ctx.columnType?.(node.ref.slice(0, dot), node.ref.slice(dot + 1)) ?? '');
       }
       case 'call':
-        return ['date', 'cdate', 'datetime'].includes(node.name.toLowerCase());
+        return ['date', 'cdate', 'datetime', 'cdatetime', 'datetimevalue'].includes(node.name.toLowerCase());
       case 'binary':
         return (node.op === '+' || node.op === '-') && isDate(node.left) !== isDate(node.right);
       default:
