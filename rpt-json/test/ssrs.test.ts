@@ -458,7 +458,8 @@ describe('layout conversion', () => {
     // A name column, then one column per formula, spread to the title's width.
     assert.equal(widths.length, 5, `columns ${widths.join(', ')}`);
     assert.ok(Math.abs(widths[0] - (5040 + 144 - 53) / 1440) < 0.01, `name column ${widths[0]}`);
-    assert.ok(widths.slice(1).every((w) => w > 1.5), `columns ${widths.join(', ')}`);
+    // (the last ends where its fields end)
+    assert.ok(widths.slice(1, -1).every((w) => w > 1.5) && widths[widths.length - 1] >= 0.8, `columns ${widths.join(', ')}`);
     assert.ok(!/PaddingLeft>=/.test(rdl), 'no longer moved within their own boxes');
     assert.ok(review.some((r) => /4 columns are placed by X position formulas/.test(r.message)));
     assert.match(checkRdlWidths(rdl), /nothing reaches past the page or what holds it/);
