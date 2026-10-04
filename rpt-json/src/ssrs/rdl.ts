@@ -3782,7 +3782,9 @@ function fitInside(items: XmlElement[]): XmlElement[] {
       children: item.children.map((c) => {
         if (typeof c !== 'object' || c === null || (c as XmlElement).name !== 'ReportItems') return c;
         const inner = (c as XmlElement).children.filter((x): x is XmlElement => typeof x === 'object' && x !== null);
-        return { ...(c as XmlElement), children: fitInside(width > 0 ? fitWidth(inner, width) : inner) };
+        // Only what rounding put past it: a rectangle holding something much wider (a subreport's table wider than
+        // its place) is widened by SSRS, as Crystal shows it.
+        return { ...(c as XmlElement), children: fitInside(width > 0 ? inner.map((i) => (itemRight(i) - width <= 0.015 ? fitWidth([i], width)[0] : i)) : inner) };
       }),
     };
   });
@@ -3876,11 +3878,16 @@ function fitWidth(items: XmlElement[], limit: number): XmlElement[] {
         // Widths are written to a thousandth of an inch: what they add up to once written must fit too.
         const written = (w: number) => Math.round(w * 1000) / 1000;
         let left = columns.reduce((sum, c) => sum + written(widths.get(c)!), 0) - (newWidth - 0.001);
-        for (let i = columns.length - 1; i >= 0 && left > 0.0005; i--) {
-          const width = widths.get(columns[i])!;
-          const take = Math.min(Math.ceil(left * 1000) / 1000, Math.max(written(width) - 0.05, 0));
-          widths.set(columns[i], written(width) - take);
-          left -= take;
+        // The columns before the last give up a quarter of an inch at most between them: more would squeeze the
+        // table's own columns to nothing (a table much wider than its place is left as it is, as SSRS widens that).
+        const lastTake = Math.max(written(widths.get(columns[columns.length - 1])!) - 0.05, 0);
+        if (columns.length && left - lastTake <= 0.25) {
+          for (let i = columns.length - 1; i >= 0 && left > 0.0005; i--) {
+            const width = widths.get(columns[i])!;
+            const take = Math.min(Math.ceil(left * 1000) / 1000, Math.max(written(width) - 0.05, 0));
+            widths.set(columns[i], written(width) - take);
+            left -= take;
+          }
         }
         return { ...e, children: e.children.map((c) => {
           if (typeof c !== 'object' || c === null || !widths.has(c as XmlElement)) return c;
