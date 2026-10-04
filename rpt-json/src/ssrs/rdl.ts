@@ -3774,11 +3774,23 @@ function fitWidth(items: XmlElement[], limit: number): XmlElement[] {
     const fix = (e: XmlElement): XmlElement => {
       if (e.name === 'TablixColumns' && !lastColumnDone) {
         lastColumnDone = true;
+        // The cut comes off the last column, and off the ones before it where the last is too narrow to take it all
+        // (a table reaching out to a rule across the page ends in a narrow empty column): a table left wider than the
+        // page would print its overflow on a page of its own after every page.
         const columns = e.children.filter((c): c is XmlElement => typeof c === 'object' && c !== null);
-        const last = columns[columns.length - 1];
-        const lastWidth = last ? itemNumber(last, 'Width') : 0;
-        if (!last || lastWidth - cut < 0.05) return e;
-        return { ...e, children: e.children.map((c) => (c === last ? { ...last, children: last.children.map((x) => (typeof x === 'object' && x !== null && (x as XmlElement).name === 'Width' ? el('Width', inches(lastWidth - cut)) : x)) } : c)) };
+        const widths = new Map(columns.map((c) => [c, itemNumber(c, 'Width')]));
+        let left = cut;
+        for (let i = columns.length - 1; i >= 0 && left > 0.0005; i--) {
+          const width = widths.get(columns[i])!;
+          const take = Math.min(left, Math.max(width - 0.05, 0));
+          widths.set(columns[i], width - take);
+          left -= take;
+        }
+        return { ...e, children: e.children.map((c) => {
+          if (typeof c !== 'object' || c === null || !widths.has(c as XmlElement)) return c;
+          const column = c as XmlElement;
+          return { ...column, children: column.children.map((x) => (typeof x === 'object' && x !== null && (x as XmlElement).name === 'Width' ? el('Width', inches(widths.get(column)!)) : x)) };
+        }) };
       }
       if (e.name === 'TablixBody') return { ...e, children: e.children.map((c) => (typeof c === 'object' && c !== null ? fix(c as XmlElement) : c)) };
       if (e.name === 'ReportItems') return { ...e, children: fitWidth(e.children.filter((c): c is XmlElement => typeof c === 'object' && c !== null), newWidth) };
