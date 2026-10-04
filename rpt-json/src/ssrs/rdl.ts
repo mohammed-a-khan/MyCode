@@ -1809,28 +1809,31 @@ class RdlBuilder {
         }
         if (partLines.length) {
           const columnWidth = twipsToInches(columnEnd - columnLeft);
+          // The text is placed as in the column's other rows (so a heading lines up with the values under it); a line
+          // under it moves with it, by as far as the text is from its place in Crystal.
+          const cellWidth = columnEnd - columnLeft;
+          let moved = 0;
+          if (obj?.position && obj.size && padding) {
+            const ownLeft = obj.position.x - columnLeft;
+            const ownRight = ownLeft + obj.size.width;
+            const textLeft = padding.left;
+            const textRight = cellWidth - padding.right;
+            moved = obj.align === 'center' ? (textLeft + textRight - ownLeft - ownRight) / 2
+              : obj.align === 'right' || (!leftAligned && obj.align !== 'left') ? textRight - ownRight
+                : textLeft - ownLeft;
+          }
+          const under = (line: ReportObject) => !!obj?.position && !!obj.size
+            && (line.position?.x ?? 0) < obj.position.x + obj.size.width && (line.position?.x ?? 0) + (line.size?.width ?? 0) > obj.position.x;
           const items = partLines.map((line) => {
-            const x = Math.min(Math.max(line.position?.x ?? 0, columnLeft), columnEnd - 60);
-            const right = Math.max(Math.min((line.position?.x ?? 0) + (line.size?.width ?? 0), columnEnd), x + 60);
+            const shift = under(line) ? moved : 0;
+            const width = Math.min(line.size?.width ?? 0, cellWidth);
+            const x = Math.min(Math.max((line.position?.x ?? 0) + shift, columnLeft), columnEnd - Math.max(width, 60));
+            const right = Math.max(Math.min(x + width, columnEnd), x + 60);
             const box = { top: Math.min(twipsToInches(line.position?.y ?? 0), height), left: twipsToInches(x - columnLeft), width: twipsToInches(right - x), height: 0 };
             return this.reportItem({ ...line, size: { width: right - x, height: 0 } }, 'row', area, box);
           });
-          // The text at its own place across the cell, as the lines are: centred text keeps its centre (as wide as
-          // the cell allows either side of it), text set left or right keeps that edge.
-          let textBox = { top: 0, left: 0, width: columnWidth, height };
-          let textPadding: typeof padding | { left: number; right: number; top: number } = padding;
-          if (obj?.position && obj.size && !ruled.left && !ruled.right) {
-            const left = Math.min(Math.max(obj.position.x - columnLeft, 0), columnEnd - columnLeft);
-            const right = Math.min(Math.max(obj.position.x + obj.size.width - columnLeft, left + 60), columnEnd - columnLeft);
-            const cellWidth = columnEnd - columnLeft;
-            const [boxLeft, boxRight] = obj.align === 'center'
-              ? (() => { const centre = (left + right) / 2; const half = Math.min(centre, cellWidth - centre); return [centre - half, centre + half]; })()
-              : obj.align === 'right' ? [0, right] : [left, cellWidth];
-            textBox = { top: 0, left: twipsToInches(boxLeft), width: twipsToInches(Math.max(boxRight - boxLeft, 60)), height };
-            textPadding = { left: 0, right: 0, top: padding?.top ?? 0 };
-          }
           const text = obj || ruled.top || ruled.bottom || ruled.left || ruled.right || background
-            ? this.textbox(name, value, this.ruledBorderObject(cellObj, ruled), format, 'row', textBox, undefined, ruled, textPadding)
+            ? this.textbox(name, value, this.ruledBorderObject(cellObj, ruled), format, 'row', { top: 0, left: 0, width: columnWidth, height }, undefined, ruled, padding)
             : null;
           return el('TablixCell', el('CellContents', el('Rectangle', { Name: this.itemNames.make(`${name}_Area`) },
             el('ReportItems', ...(text ? [text] : []), ...items.filter((item): item is XmlElement => !!item)),
