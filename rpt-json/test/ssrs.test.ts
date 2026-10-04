@@ -323,8 +323,8 @@ describe('layout conversion', () => {
     const total = '\\(\\(RTrim\\(Fields!Region.Value\\) = "Total"\\)';
     assert.match(rdl, new RegExp(`<FontWeight>=IIf\\(IsNothing\\(IIf${total}, "Bold", "Regular"\\)\\), "Normal", IIf\\(InStr\\(CStr\\(`));
     assert.match(rdl, new RegExp(`<BottomBorder>\\s*<Color>Black</Color>\\s*<Style>=IIf\\(IsNothing\\(IIf${total}, "Solid", "None"\\)\\), "None", `));
-    // The X position formula gives the place across the section: the text moves by as far as it is from the field's own.
-    assert.match(rdl, new RegExp(`<PaddingLeft>=CStr\\(CInt\\(Math.Max\\(0, 0 \\+ IIf\\(IsNothing\\(IIf${total}, 120, 300\\)\\), 0, CDbl\\(IIf${total}, 120, 300\\)\\) - 120\\)\\) / 20\\)\\) &amp; "pt"</PaddingLeft>`));
+    // The X position formula moves the text by its offset, in twips, from the field's place in its cell.
+    assert.match(rdl, new RegExp(`<PaddingLeft>=CStr\\(CInt\\(Math.Max\\(0, 0 \\+ IIf\\(IsNothing\\(IIf${total}, 120, 300\\)\\), 0, CDbl\\(IIf${total}, 120, 300\\)\\)\\)\\) / 20\\)\\) &amp; "pt"</PaddingLeft>`));
     assert.ok(!review.some((r) => /not converted/.test(JSON.stringify(r))), 'the formulas are converted');
     // The rule under one heading only stays under that heading, not along the whole row.
     const amountHead = rdl.slice(rdl.indexOf('<Textbox Name="HeadB">'), rdl.indexOf('</Textbox>', rdl.indexOf('<Textbox Name="HeadB">')));

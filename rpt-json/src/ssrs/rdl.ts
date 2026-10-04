@@ -827,7 +827,7 @@ class RdlBuilder {
     return out;
   }
 
-  private textbox(name: string, value: string, obj: ReportObject | undefined, format: string | undefined, scope: Scope, box?: Box, hidden?: string, lines: { top?: boolean; bottom?: boolean; left?: boolean; right?: boolean } = {}, padding?: { left: number; right: number; top?: number }): XmlElement {
+  private textbox(name: string, value: string, obj: ReportObject | undefined, format: string | undefined, scope: Scope, box?: Box, hidden?: string, lines: { top?: boolean; bottom?: boolean; left?: boolean; right?: boolean } = {}, padding?: { left: number; right: number; top?: number; exact?: { left: number; right: number } }): XmlElement {
     const item = obj ? `${obj.kind} object "${obj.name}"` : name;
     const conditions = obj?.conditions ?? {};
     const hyperlink = conditions.hyperlink ? this.conditionExpression(conditions.hyperlink, false, item, scope) : undefined;
@@ -841,15 +841,15 @@ class RdlBuilder {
     }
     const formulaOf = (ref: FormulaRef | undefined) => (ref ? this.conditionExpression(ref, false, item, scope)?.slice(1) : undefined);
     const lineFormulas = { top: formulaOf(conditions.topLine), bottom: formulaOf(conditions.bottomLine), left: formulaOf(conditions.leftLine), right: formulaOf(conditions.rightLine) };
-    // The X position and width formulas give the object's place across the section and its width, in twips
-    // (DefaultAttribute keeps its own): the text moves within its box by as far as they differ from the object's own
-    // (its left edge with X, its right edge with X and the width), in whole points (a size written with a decimal
-    // comma on some servers would not be one).
+    // Formulas moving the object across (X position) and changing its width, in twips from its own place and size
+    // (DefaultAttribute leaves them): the text moves within its box by as much (its left edge with X, its right edge
+    // with X and the width), from where the object is in its cell (not the capped padding), in whole points (a size
+    // written with a decimal comma on some servers would not be one).
     const deltaX = formulaOf(conditions.deltaX);
     const deltaWidth = formulaOf(conditions.deltaWidth);
-    const shift = (formula: string | undefined, own: number) => (formula ? `IIf(IsNothing(${formula}), 0, CDbl(${formula}) - ${own})` : '0');
-    const ownX = obj?.position?.x ?? 0;
-    const ownWidth = obj?.size?.width ?? 0;
+    const shift = (formula: string | undefined) => (formula ? `IIf(IsNothing(${formula}), 0, CDbl(${formula}))` : '0');
+    const placeLeft = padding?.exact?.left ?? padding?.left ?? 0;
+    const placeRight = padding?.exact?.right ?? padding?.right ?? 0;
     const border = backColor ? { ...(obj?.border ?? { sides: [0, 0, 0, 0] as [number, number, number, number] }), background: backColor } : obj?.border;
     const framed = !!obj?.border && obj.border.sides.every((side) => side > 0);
     // A rule drawn above a field placed at its own position (a total under its column): Crystal keeps the text a
@@ -882,10 +882,10 @@ class RdlBuilder {
       el('Style', ...this.borderStyle(border, lines, lineFormulas),
         // Crystal keeps a text object's text a little inside its own border.
         el('PaddingLeft', deltaX
-          ? `=CStr(CInt(Math.Max(0, ${(padding?.left ?? 0) + (framed ? 80 : 0)} + ${shift(deltaX, ownX)}) / 20)) & "pt"`
+          ? `=CStr(CInt(Math.Max(0, ${placeLeft + (framed ? 80 : 0)} + ${shift(deltaX)}) / 20)) & "pt"`
           : `${((padding?.left ?? 0) / 20 + (framed ? 4 : 0)).toFixed(1)}pt`),
         el('PaddingRight', deltaX || deltaWidth
-          ? `=CStr(CInt(Math.Max(0, ${(padding?.right ?? 0) + (framed ? 80 : 0)} - ${shift(deltaX, ownX)}${deltaWidth ? ` - ${shift(deltaWidth, ownWidth)}` : ''}) / 20)) & "pt"`
+          ? `=CStr(CInt(Math.Max(0, ${placeRight + (framed ? 80 : 0)} - ${shift(deltaX)}${deltaWidth ? ` - ${shift(deltaWidth)}` : ''}) / 20)) & "pt"`
           : `${((padding?.right ?? 0) / 20 + (framed ? 4 : 0)).toFixed(1)}pt`),
         el('PaddingTop', `${((padding?.top ?? 0) / 20 + (framed ? 1 : ruleAbove ? 2 : 0)).toFixed(1).replace(/\.0$/, '')}pt`), el('PaddingBottom', '0pt')));
   }
@@ -1780,6 +1780,8 @@ class RdlBuilder {
           right: leftAligned ? 0 : Math.min(Math.max(columnRight - (obj.position.x + obj.size.width), 0), 288),
           // Its place down the section (a heading set lower in its row), as far as the row's height allows.
           top: section.height ? Math.min(Math.max(obj.position.y, 0), Math.max(section.height - obj.size.height, 0), 288) : 0,
+          // Its whole distance from the column's edges, which formulas moving or widening it start from.
+          exact: { left: Math.max(obj.position.x - columns[i].x, 0), right: leftAligned ? 0 : Math.max(columnRight - (obj.position.x + obj.size.width), 0) },
         } : undefined;
         // A field drawing its own border (a total's rule): Crystal's line is as wide as the field, with gaps between
         // neighbouring totals, at the field's own height in the row; the cell keeps it at its own place and size.
@@ -1816,7 +1818,7 @@ class RdlBuilder {
           // The text at its own place across the cell, as the lines are: centred text keeps its centre (as wide as
           // the cell allows either side of it), text set left or right keeps that edge.
           let textBox = { top: 0, left: 0, width: columnWidth, height };
-          let textPadding = padding;
+          let textPadding: typeof padding | { left: number; right: number; top: number } = padding;
           if (obj?.position && obj.size && !ruled.left && !ruled.right) {
             const left = Math.min(Math.max(obj.position.x - columnLeft, 0), columnEnd - columnLeft);
             const right = Math.min(Math.max(obj.position.x + obj.size.width - columnLeft, left + 60), columnEnd - columnLeft);
