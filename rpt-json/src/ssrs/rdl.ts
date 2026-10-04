@@ -841,12 +841,15 @@ class RdlBuilder {
     }
     const formulaOf = (ref: FormulaRef | undefined) => (ref ? this.conditionExpression(ref, false, item, scope)?.slice(1) : undefined);
     const lineFormulas = { top: formulaOf(conditions.topLine), bottom: formulaOf(conditions.bottomLine), left: formulaOf(conditions.leftLine), right: formulaOf(conditions.rightLine) };
-    // Formulas moving the object across (X position) and changing its width, in twips from its own place and size:
-    // the text moves within its box by as much (its left edge with X, its right edge with X and the width), in whole
-    // points (a size written with a decimal comma on some servers would not be one).
+    // The X position and width formulas give the object's place across the section and its width, in twips
+    // (DefaultAttribute keeps its own): the text moves within its box by as far as they differ from the object's own
+    // (its left edge with X, its right edge with X and the width), in whole points (a size written with a decimal
+    // comma on some servers would not be one).
     const deltaX = formulaOf(conditions.deltaX);
     const deltaWidth = formulaOf(conditions.deltaWidth);
-    const twips = (formula: string | undefined) => (formula ? `CDbl(IIf(IsNothing(${formula}), 0, ${formula}))` : '0');
+    const shift = (formula: string | undefined, own: number) => (formula ? `IIf(IsNothing(${formula}), 0, CDbl(${formula}) - ${own})` : '0');
+    const ownX = obj?.position?.x ?? 0;
+    const ownWidth = obj?.size?.width ?? 0;
     const border = backColor ? { ...(obj?.border ?? { sides: [0, 0, 0, 0] as [number, number, number, number] }), background: backColor } : obj?.border;
     const framed = !!obj?.border && obj.border.sides.every((side) => side > 0);
     // A rule drawn above a field placed at its own position (a total under its column): Crystal keeps the text a
@@ -879,10 +882,10 @@ class RdlBuilder {
       el('Style', ...this.borderStyle(border, lines, lineFormulas),
         // Crystal keeps a text object's text a little inside its own border.
         el('PaddingLeft', deltaX
-          ? `=CStr(CInt(Math.Max(0, ${(padding?.left ?? 0) + (framed ? 80 : 0)} + ${twips(deltaX)}) / 20)) & "pt"`
+          ? `=CStr(CInt(Math.Max(0, ${(padding?.left ?? 0) + (framed ? 80 : 0)} + ${shift(deltaX, ownX)}) / 20)) & "pt"`
           : `${((padding?.left ?? 0) / 20 + (framed ? 4 : 0)).toFixed(1)}pt`),
         el('PaddingRight', deltaX || deltaWidth
-          ? `=CStr(CInt(Math.Max(0, ${(padding?.right ?? 0) + (framed ? 80 : 0)} - ${twips(deltaX)}${deltaWidth ? ` - ${twips(deltaWidth)}` : ''}) / 20)) & "pt"`
+          ? `=CStr(CInt(Math.Max(0, ${(padding?.right ?? 0) + (framed ? 80 : 0)} - ${shift(deltaX, ownX)}${deltaWidth ? ` - ${shift(deltaWidth, ownWidth)}` : ''}) / 20)) & "pt"`
           : `${((padding?.right ?? 0) / 20 + (framed ? 4 : 0)).toFixed(1)}pt`),
         el('PaddingTop', `${((padding?.top ?? 0) / 20 + (framed ? 1 : ruleAbove ? 2 : 0)).toFixed(1).replace(/\.0$/, '')}pt`), el('PaddingBottom', '0pt')));
   }
@@ -1752,7 +1755,10 @@ class RdlBuilder {
           const right = x + (line.size?.width ?? 0);
           // A line of unknown (or no) width is taken as running along the whole row.
           const whole = !line.size?.width || line.size.width >= inchesToTwips(tableWidth) * 0.8;
-          const overlap = whole ? columnEnd - columnLeft : Math.min(right, columnEnd) - Math.max(x, columnLeft);
+          // A line running on past the table's edge belongs to the first or last column.
+          const from = i === 0 ? Math.min(columnLeft, x) : columnLeft;
+          const to = i === columns.length - 1 ? Math.max(columnEnd, right) : columnEnd;
+          const overlap = whole ? columnEnd - columnLeft : Math.min(right, to) - Math.max(x, from);
           if (overlap <= 60) continue;
           if (whole || overlap >= columnEnd - columnLeft - 60 || line.size?.height) {
             if (section.height && (line.position?.y ?? 0) > section.height / 2) lines.bottom = true;
@@ -1802,13 +1808,27 @@ class RdlBuilder {
         if (partLines.length) {
           const columnWidth = twipsToInches(columnEnd - columnLeft);
           const items = partLines.map((line) => {
-            const x = Math.max(line.position?.x ?? 0, columnLeft);
-            const right = Math.min((line.position?.x ?? 0) + (line.size?.width ?? 0), columnEnd);
+            const x = Math.min(Math.max(line.position?.x ?? 0, columnLeft), columnEnd - 60);
+            const right = Math.max(Math.min((line.position?.x ?? 0) + (line.size?.width ?? 0), columnEnd), x + 60);
             const box = { top: Math.min(twipsToInches(line.position?.y ?? 0), height), left: twipsToInches(x - columnLeft), width: twipsToInches(right - x), height: 0 };
             return this.reportItem({ ...line, size: { width: right - x, height: 0 } }, 'row', area, box);
           });
+          // The text at its own place across the cell, as the lines are: centred text keeps its centre (as wide as
+          // the cell allows either side of it), text set left or right keeps that edge.
+          let textBox = { top: 0, left: 0, width: columnWidth, height };
+          let textPadding = padding;
+          if (obj?.position && obj.size && !ruled.left && !ruled.right) {
+            const left = Math.min(Math.max(obj.position.x - columnLeft, 0), columnEnd - columnLeft);
+            const right = Math.min(Math.max(obj.position.x + obj.size.width - columnLeft, left + 60), columnEnd - columnLeft);
+            const cellWidth = columnEnd - columnLeft;
+            const [boxLeft, boxRight] = obj.align === 'center'
+              ? (() => { const centre = (left + right) / 2; const half = Math.min(centre, cellWidth - centre); return [centre - half, centre + half]; })()
+              : obj.align === 'right' ? [0, right] : [left, cellWidth];
+            textBox = { top: 0, left: twipsToInches(boxLeft), width: twipsToInches(Math.max(boxRight - boxLeft, 60)), height };
+            textPadding = { left: 0, right: 0, top: padding?.top ?? 0 };
+          }
           const text = obj || ruled.top || ruled.bottom || ruled.left || ruled.right || background
-            ? this.textbox(name, value, this.ruledBorderObject(cellObj, ruled), format, 'row', { top: 0, left: 0, width: columnWidth, height }, undefined, ruled, padding)
+            ? this.textbox(name, value, this.ruledBorderObject(cellObj, ruled), format, 'row', textBox, undefined, ruled, textPadding)
             : null;
           return el('TablixCell', el('CellContents', el('Rectangle', { Name: this.itemNames.make(`${name}_Area`) },
             el('ReportItems', ...(text ? [text] : []), ...items.filter((item): item is XmlElement => !!item)),
