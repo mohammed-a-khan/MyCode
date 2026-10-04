@@ -274,6 +274,16 @@ interface Classified {
   columnHeadings: ReportObject[];
 }
 
+/** Whether every bracket in a text closes in order. */
+function balanced(text: string): boolean {
+  let depth = 0;
+  for (const c of text) {
+    if (c === '(') depth++;
+    else if (c === ')' && --depth < 0) return false;
+  }
+  return depth === 0;
+}
+
 /**
  * Columns placed by formulas (Crystal "dynamic columns"): fields designed one on top of another, each moved across by
  * its X position formula to a place read from the data. SSRS cannot place an item by an expression, so each set of
@@ -281,9 +291,17 @@ interface Classified {
  * side in their design order after the fixed fields beside them. Returns the layout and how many columns were laid out.
  */
 export function spreadFormulaColumns(definition: ReportDefinition): { definition: ReportDefinition; columns: number } {
-  const text = (ref: { index: number } | undefined) => (ref
-    ? (definition.formulaTexts?.[ref.index] ?? definition.formulas.find((f) => f.index === ref.index)?.text ?? '').replace(/\s+/g, ' ').trim().toLowerCase()
-    : '');
+  // The same formula written a little differently (spacing, brackets, case, a table name before the field) is the
+  // same column.
+  const text = (ref: { index: number } | undefined) => {
+    if (!ref) return '';
+    let t = (definition.formulaTexts?.[ref.index] ?? definition.formulas.find((f) => f.index === ref.index)?.text ?? '')
+      .toLowerCase().replace(/\{[^}.]*\.([^}]*)\}/g, '{$1}').replace(/\s+/g, '');
+    while (/^\(.*\)$/.test(t) && balanced(t.slice(1, -1))) t = t.slice(1, -1);
+    // Above all, the fields it reads its place from.
+    const read = [...new Set([...t.matchAll(/\{([^}]*)\}/g)].map((m) => m[1]))].sort();
+    return read.length ? read.join('|') : t;
+  };
   const placed = (o: ReportObject) => (o.kind === 'field' || o.kind === 'text') && !!o.position && !!o.size;
   const moving = (o: ReportObject) => placed(o) && !!text(o.conditions?.deltaX);
   const sections = definition.layout.flatMap((area) => area.sections);
