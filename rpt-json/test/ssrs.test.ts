@@ -377,11 +377,13 @@ describe('layout conversion', () => {
     assertBalancedXml(rdl);
     const amount = rdl.slice(rdl.indexOf('<Textbox Name="Amt">'), rdl.indexOf('</Textbox>', rdl.indexOf('<Textbox Name="Amt">')));
     assert.ok(!/BottomBorder/.test(amount), 'not the whole cell\'s border');
-    // Moved by the X position formula (a computed place): drawn in pieces across the cell, each shown where it falls
+    // Moved by the X position formula (a computed place): drawn in pieces across the cell, each drawn where it falls
     // within the moved line.
     const pieces = rdl.match(/<Line Name="Amt_Below(_\d+)?">/g) ?? [];
     assert.equal(pieces.length, Math.ceil(5576 / 72));
-    assert.match(rdl, /<Line Name="Amt_Below_2">\s*<Top>0.139in<\/Top>\s*<Left>0.05in<\/Left>\s*<Height>0in<\/Height>\s*<Width>0.05in<\/Width>\s*<Visibility>\s*<Hidden>=Not \(\(0 \+ IIf\(IsNothing\([^<]*\) &lt;= 108 AndAlso 108 &lt;= \(2000 \+ [^<]*\)\)<\/Hidden>/);
+    assert.match(rdl, /<Line Name="Amt_Below_2">\s*<Top>0.139in<\/Top>\s*<Left>0.05in<\/Left>\s*<Height>0in<\/Height>\s*<Width>0.05in<\/Width>\s*<Style>\s*<Border>\s*<Color>Black<\/Color>\s*<Style>=IIf\(\(\(0 \+ IIf\(IsNothing\([^<]*\) &lt;= 108 AndAlso 108 &lt;= \(2000 \+ [^<]*\)\), IIf\(IsNothing\([^<]*, "None"\)<\/Style>/);
+    // Never hidden (SSRS would slide the pieces beside a hidden one across into its place).
+    assert.ok(!/<Line Name="Amt_Below[^"]*">\s*<Top>[^<]*<\/Top>\s*<Left>[^<]*<\/Left>\s*<Height>[^<]*<\/Height>\s*<Width>[^<]*<\/Width>\s*<Visibility>/.test(rdl));
   });
 
   it('converts cross-tabs to matrices, charts to charts and running totals to RunningValue', () => {
