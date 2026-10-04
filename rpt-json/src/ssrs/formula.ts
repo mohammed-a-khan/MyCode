@@ -777,6 +777,9 @@ export const NAMES: Record<string, string> = {
   crmaroon: '"Maroon"', crnavy: '"Navy"', crolive: '"Olive"', crpurple: '"Purple"', crteal: '"Teal"', crgray: '"Gray"',
   crsilver: '"Silver"', crlime: '"Lime"', craqua: '"Aqua"', crfuchsia: '"Fuchsia"', nocolor: '"Transparent"', crnocolor: '"Transparent"',
   crnone: 'Nothing',
+  // Font style and line style values of formatting formulas, as SSRS names them.
+  crregular: '"Regular"', crbold: '"Bold"', critalic: '"Italic"', crbolditalic: '"BoldItalic"',
+  crnoline: '"None"', crsingleline: '"Solid"', crdoubleline: '"Double"', crdashedline: '"Dashed"', crdottedline: '"Dotted"',
   onfirstrecord: '(RowNumber(Nothing) = 1)', onlastrecord: '(RowNumber(Nothing) = CountRows("DataSet1"))',
   inrepeatedgroupheader: 'False', drilldowngrouplevel: '0',
   crsunday: 'FirstDayOfWeek.Sunday', crmonday: 'FirstDayOfWeek.Monday', crtuesday: 'FirstDayOfWeek.Tuesday',

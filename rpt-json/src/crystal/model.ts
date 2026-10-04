@@ -658,6 +658,13 @@ const CONDITION_ALIASES: Record<string, string> = {
   object_visibility: 'suppress',
   tool_tip_text: 'toolTip',
   hyperlink_text: 'hyperlink',
+  font_style: 'fontStyle',
+  top_line_style: 'topLine',
+  bottom_line_style: 'bottomLine',
+  left_line_style: 'leftLine',
+  right_line_style: 'rightLine',
+  deltax_value_formula: 'deltaX',
+  deltawidth_value_formula: 'deltaWidth',
 };
 
 function namedConditions(node: RecordNode): Record<string, FormulaRef> | undefined {

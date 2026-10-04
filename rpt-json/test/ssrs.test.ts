@@ -294,6 +294,43 @@ describe('layout conversion', () => {
     assert.match(rdl, /<Width>1in<\/Width>/, 'object widths are used for columns');
   });
 
+  it('converts font style, line style, X position and width formatting formulas', () => {
+    const definition: ReportDefinition = {
+      ...emptyDefinition(),
+      formulas: [
+        { name: 'Font_Style', index: 1, kind: 'conditionalFormat', text: 'if {Orders.Region} = "Total" then crBold else crRegular', referencedFields: [] },
+        { name: 'Bottom_Line_Style', index: 2, kind: 'conditionalFormat', text: 'if {Orders.Region} = "Total" then crSingleLine else crNoLine', referencedFields: [] },
+        { name: 'DeltaX_Value_Formula', index: 3, kind: 'conditionalFormat', text: 'if {Orders.Region} = "Total" then 0 else 180', referencedFields: [] },
+        { name: 'DeltaWidth_Value_Formula', index: 4, kind: 'conditionalFormat', text: 'DefaultAttribute', referencedFields: [] },
+      ],
+      groups: ['Orders.Region'],
+      layout: [
+        { name: 'GroupHeaderArea1', sections: [{ name: 'GH', height: 400, objects: [
+          { kind: 'text', name: 'HeadA', text: 'Name', position: { x: 300, y: 0 }, size: { width: 900, height: 221 }, align: 'center' },
+          { kind: 'text', name: 'HeadB', text: 'Amount', position: { x: 2880, y: 0 }, size: { width: 1440, height: 221 }, align: 'right' },
+          { kind: 'line', name: 'UnderA', position: { x: 300, y: 260 }, size: { width: 900, height: 0 }, border: { sides: [0, 0, 1, 0], color: '#000000', width: 20 } },
+        ] }] },
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 250, objects: [
+          { kind: 'field', name: 'Name', field: 'Orders.Customer', position: { x: 0, y: 0 }, size: { width: 2880, height: 221 },
+            conditions: { fontStyle: { name: 'Font_Style', index: 1 }, deltaX: { name: 'DeltaX_Value_Formula', index: 3 }, deltaWidth: { name: 'DeltaWidth_Value_Formula', index: 4 } } },
+          { kind: 'field', name: 'Amt', field: 'Orders.Amount', position: { x: 2880, y: 0 }, size: { width: 1440, height: 221 }, align: 'right',
+            conditions: { bottomLine: { name: 'Bottom_Line_Style', index: 2 } } },
+        ] }] },
+      ],
+    };
+    const { rdl, review } = convertToRdl(definition, source, { reportName: 'Styled' });
+    assertBalancedXml(rdl);
+    const total = '\\(\\(RTrim\\(Fields!Region.Value\\) = "Total"\\)';
+    assert.match(rdl, new RegExp(`<FontWeight>=IIf\\(IsNothing\\(IIf${total}, "Bold", "Regular"\\)\\), "Normal", IIf\\(InStr\\(CStr\\(`));
+    assert.match(rdl, new RegExp(`<BottomBorder>\\s*<Color>Black</Color>\\s*<Style>=IIf\\(IsNothing\\(IIf${total}, "Solid", "None"\\)\\), "None", `));
+    assert.match(rdl, new RegExp(`<PaddingLeft>=CStr\\(CInt\\(Math.Max\\(0, 0 \\+ CDbl\\(IIf\\(IsNothing\\(IIf${total}, 0, 180\\)\\)`));
+    assert.ok(!review.some((r) => /not converted/.test(JSON.stringify(r))), 'the formulas are converted');
+    // The rule under one heading only stays under that heading, not along the whole row.
+    const amountHead = rdl.slice(rdl.indexOf('<Textbox Name="HeadB">'), rdl.indexOf('</Textbox>', rdl.indexOf('<Textbox Name="HeadB">')));
+    assert.doesNotMatch(amountHead, /BottomBorder/);
+    assert.match(rdl, /<Rectangle Name="HeadA_Area">[\s\S]*?<Line Name="UnderA">/);
+  });
+
   it('converts cross-tabs to matrices, charts to charts and running totals to RunningValue', () => {
     const definition: ReportDefinition = {
       ...emptyDefinition(),
