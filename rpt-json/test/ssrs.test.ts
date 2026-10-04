@@ -386,6 +386,28 @@ describe('layout conversion', () => {
     assert.ok(!/<Line Name="Amt_Below[^"]*">\s*<Top>[^<]*<\/Top>\s*<Left>[^<]*<\/Left>\s*<Height>[^<]*<\/Height>\s*<Width>[^<]*<\/Width>\s*<Visibility>/.test(rdl));
   });
 
+  it('keeps a table reaching out to a rule within the printable page', () => {
+    const definition: ReportDefinition = {
+      ...emptyDefinition(),
+      groups: ['Orders.Region'],
+      page: { orientation: 'landscape', paperSize: 1 },
+      margins: { left: 360, right: 360, top: 360, bottom: 360 },
+      layout: [
+        { name: 'GroupHeaderArea1', sections: [{ name: 'GH', height: 220, objects: [
+          { kind: 'line', name: 'Rule', position: { x: 0, y: 0 }, size: { width: 15400, height: 0 }, border: { sides: [0, 0, 1, 0], color: '#000000', width: 60 } },
+        ] }] },
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 220, objects: [
+          { kind: 'field', name: 'Name', field: 'Orders.Customer', position: { x: 600, y: 0 }, size: { width: 6000, height: 200 } },
+          { kind: 'field', name: 'Amt', field: 'Orders.Amount', position: { x: 6700, y: 0 }, size: { width: 8500, height: 200 } },
+        ] }] },
+      ],
+    };
+    const { rdl } = convertToRdl(definition, source, { reportName: 'Edge' });
+    const columns = (rdl.slice(rdl.indexOf('<TablixColumns>'), rdl.indexOf('</TablixColumns>')).match(/<Width>[^<]*/g) ?? []).map((w) => parseFloat(w.slice(7)));
+    // Wider than the page, SSRS would print the overflow on a page of its own after every page.
+    assert.ok(columns.reduce((a, b) => a + b, 0) <= 10.5 + 0.005, `columns ${columns.join(', ')}`);
+  });
+
   it('converts cross-tabs to matrices, charts to charts and running totals to RunningValue', () => {
     const definition: ReportDefinition = {
       ...emptyDefinition(),
