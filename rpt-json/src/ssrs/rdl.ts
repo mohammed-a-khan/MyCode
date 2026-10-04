@@ -1846,7 +1846,9 @@ class RdlBuilder {
             const sides = obj!.border?.sides ?? [0, 0, 0, 0];
             const own = BORDER_STYLES[key === 'topLine' ? sides[2] : sides[3]] ?? 'None';
             // Formulas moving or widening the field move its line too. A line's place cannot be an expression, so the line
-            // is drawn in short pieces across the cell, each shown where it falls within the line the formulas give.
+            // is drawn in short pieces across the cell, each drawn where it falls within the line the formulas give. The
+            // pieces outside it are drawn with no line rather than hidden: SSRS moves what is beside a hidden item in a
+            // rectangle across into its place, so the pieces left would slide to the start of the cell.
             const dx = obj!.conditions?.deltaX;
             const dw = obj!.conditions?.deltaWidth;
             const dxValue = dx ? this.conditionExpression(dx, false, `${obj!.kind} object "${obj!.name}"`, 'row')?.slice(1) : undefined;
@@ -1855,14 +1857,14 @@ class RdlBuilder {
             const moving = !!(dxValue || dwValue);
             // Where the text is: moved with it, unless formulas moving the field place the text from the field's own place.
             const ownLeft = obj!.position!.x - columnLeft + (moving ? 0 : moved);
-            const pieces: { x: number; right: number; hidden?: string }[] = [];
+            const pieces: { x: number; right: number; within?: string }[] = [];
             if (moving) {
               const start = `(${ownLeft} + ${offset(dxValue)})`;
               const end = `(${ownLeft + obj!.size!.width} + ${offset(dxValue)}${dwValue ? ` + ${offset(dwValue)}` : ''})`;
               for (let x = 0; x < cellWidth; x += RULE_PIECE) {
                 const right = Math.min(x + RULE_PIECE, cellWidth);
                 const middle = Math.round((x + right) / 2);
-                pieces.push({ x, right, hidden: `=Not (${start} <= ${middle} AndAlso ${middle} <= ${end})` });
+                pieces.push({ x, right, within: `(${start} <= ${middle} AndAlso ${middle} <= ${end})` });
               }
             } else {
               const x = Math.min(Math.max(ownLeft, 0), cellWidth - 60);
@@ -1872,10 +1874,11 @@ class RdlBuilder {
               items.push(el('Line', { Name: this.itemNames.make(`${name}_${key === 'topLine' ? 'Above' : 'Below'}`) },
                 el('Top', inches(Math.min(twipsToInches(y), height))), el('Left', inches(twipsToInches(piece.x))),
                 el('Height', '0in'), el('Width', inches(twipsToInches(piece.right - piece.x))),
-                piece.hidden ? el('Visibility', el('Hidden', piece.hidden)) : null,
                 el('Style', el('Border',
                   el('Color', obj!.border?.color ?? 'Black'),
-                  el('Style', `=IIf(IsNothing(${style.slice(1)}), "${own}", ${style.slice(1)})`),
+                  el('Style', piece.within
+                    ? `=IIf(${piece.within}, IIf(IsNothing(${style.slice(1)}), "${own}", ${style.slice(1)}), "None")`
+                    : `=IIf(IsNothing(${style.slice(1)}), "${own}", ${style.slice(1)})`),
                   el('Width', `${Math.max(0.25, (obj!.border?.width ?? 20) / 20).toFixed(2)}pt`)))));
             }
           }
