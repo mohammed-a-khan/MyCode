@@ -769,19 +769,34 @@ class RdlBuilder {
     if (obj?.conditions?.fontColor) {
       colorValue = this.conditionExpression(obj.conditions.fontColor, true, `${obj.kind} object "${obj.name}"`, scope) ?? colorValue;
     }
+    // A font style formula (crBold, crItalic, crBoldItalic, crRegular) sets both weight and slant; DefaultAttribute
+    // keeps the object's own.
+    const fontStyle = obj?.conditions?.fontStyle ? this.conditionExpression(obj.conditions.fontStyle, false, `${obj.kind} object "${obj.name}"`, scope)?.slice(1) : undefined;
+    const styled = (word: string, on: string, off: string, own: boolean) => fontStyle
+      ? `=IIf(IsNothing(${fontStyle}), "${own ? on : off}", IIf(InStr(CStr(${fontStyle}), "${word}") > 0, "${on}", "${off}"))`
+      : own ? on : undefined;
+    const italic = styled('Italic', 'Italic', 'Normal', !!style?.italic);
+    const bold = styled('Bold', 'Bold', 'Normal', !!style?.bold);
     return el('Style',
-      style?.italic ? el('FontStyle', 'Italic') : null,
+      italic ? el('FontStyle', italic) : null,
       obj?.font ? el('FontFamily', obj.font) : null,
       style?.size ? el('FontSize', `${style.size}pt`) : null,
-      style?.bold ? el('FontWeight', 'Bold') : null,
+      bold ? el('FontWeight', bold) : null,
       format ? el('Format', format) : null,
       style?.underline ? el('TextDecoration', 'Underline') : null,
       colorValue ? el('Color', colorValue) : null);
   }
 
   /** Border and background elements for an item's Style. */
-  private borderStyle(border: BorderInfo | undefined, extra: { top?: boolean; bottom?: boolean; left?: boolean; right?: boolean } = {}): XmlElement[] {
-    const side = (name: string, style: number) => {
+  private borderStyle(border: BorderInfo | undefined, extra: { top?: boolean; bottom?: boolean; left?: boolean; right?: boolean } = {}, formulas: { top?: string; bottom?: string; left?: string; right?: string } = {}): XmlElement[] {
+    const side = (name: string, style: number, formula?: string) => {
+      if (formula) {
+        // A line style formula decides the side's line; DefaultAttribute keeps the object's own.
+        return el(name,
+          el('Color', border?.color ?? 'Black'),
+          el('Style', `=IIf(IsNothing(${formula}), "${BORDER_STYLES[style] ?? 'None'}", ${formula})`),
+          el('Width', `${Math.max(0.25, ((border?.width ?? 20) / 20)).toFixed(2)}pt`));
+      }
       const lineStyle = BORDER_STYLES[style];
       if (!lineStyle) return null;
       return el(name,
@@ -795,14 +810,15 @@ class RdlBuilder {
     const bottom = extra.bottom && !sideBottom ? 1 : sideBottom;
     const left = extra.left && !sideLeft ? 1 : sideLeft;
     const right = extra.right && !sideRight ? 1 : sideRight;
-    const same = left === right && right === top && top === bottom;
+    const conditional = !!(formulas.top || formulas.bottom || formulas.left || formulas.right);
+    const same = left === right && right === top && top === bottom && !conditional;
     const out: XmlElement[] = [];
     if (same && left > 0) out.push(side('Border', left)!);
     else {
       out.push(el('Border', el('Style', 'None')));
       if (!same) {
-        for (const [name, style] of [['TopBorder', top], ['BottomBorder', bottom], ['LeftBorder', left], ['RightBorder', right]] as const) {
-          const e = side(name, style);
+        for (const [name, style, formula] of [['TopBorder', top, formulas.top], ['BottomBorder', bottom, formulas.bottom], ['LeftBorder', left, formulas.left], ['RightBorder', right, formulas.right]] as const) {
+          const e = side(name, style, formula);
           if (e) out.push(e);
         }
       }
@@ -821,8 +837,16 @@ class RdlBuilder {
     // A suppress formula decides on its own (as in Crystal); without one, the Suppress box does.
     const suppress = conditions.suppress ? this.conditionExpression(conditions.suppress, false, item, scope) : obj?.suppressed ? '=True' : undefined;
     for (const key of Object.keys(conditions)) {
-      if (!['fontColor', 'hyperlink', 'toolTip', 'backColor', 'suppress'].includes(key)) this.note(item, `formatting formula ${conditions[key].name} is not converted; set it on the text box manually`);
+      if (!['fontColor', 'hyperlink', 'toolTip', 'backColor', 'suppress', 'fontStyle', 'topLine', 'bottomLine', 'leftLine', 'rightLine', 'deltaX', 'deltaWidth'].includes(key)) this.note(item, `formatting formula ${conditions[key].name} is not converted; set it on the text box manually`);
     }
+    const formulaOf = (ref: FormulaRef | undefined) => (ref ? this.conditionExpression(ref, false, item, scope)?.slice(1) : undefined);
+    const lineFormulas = { top: formulaOf(conditions.topLine), bottom: formulaOf(conditions.bottomLine), left: formulaOf(conditions.leftLine), right: formulaOf(conditions.rightLine) };
+    // Formulas moving the object across (X position) and changing its width, in twips from its own place and size:
+    // the text moves within its box by as much (its left edge with X, its right edge with X and the width), in whole
+    // points (a size written with a decimal comma on some servers would not be one).
+    const deltaX = formulaOf(conditions.deltaX);
+    const deltaWidth = formulaOf(conditions.deltaWidth);
+    const twips = (formula: string | undefined) => (formula ? `CDbl(IIf(IsNothing(${formula}), 0, ${formula}))` : '0');
     const border = backColor ? { ...(obj?.border ?? { sides: [0, 0, 0, 0] as [number, number, number, number] }), background: backColor } : obj?.border;
     const framed = !!obj?.border && obj.border.sides.every((side) => side > 0);
     // A rule drawn above a field placed at its own position (a total under its column): Crystal keeps the text a
@@ -852,9 +876,14 @@ class RdlBuilder {
       box ? el('Width', inches(box.width)) : null,
       hidden || suppress ? el('Visibility', el('Hidden', hidden && suppress ? `=(${hidden.slice(1)}) OrElse (${suppress.slice(1)})` : (hidden ?? suppress)!)) : null,
       // Crystal draws text right up to the object's edges: SSRS's default 2pt padding would make it wrap sooner.
-      el('Style', ...this.borderStyle(border, lines),
+      el('Style', ...this.borderStyle(border, lines, lineFormulas),
         // Crystal keeps a text object's text a little inside its own border.
-        el('PaddingLeft', `${((padding?.left ?? 0) / 20 + (framed ? 4 : 0)).toFixed(1)}pt`), el('PaddingRight', `${((padding?.right ?? 0) / 20 + (framed ? 4 : 0)).toFixed(1)}pt`),
+        el('PaddingLeft', deltaX
+          ? `=CStr(CInt(Math.Max(0, ${(padding?.left ?? 0) + (framed ? 80 : 0)} + ${twips(deltaX)}) / 20)) & "pt"`
+          : `${((padding?.left ?? 0) / 20 + (framed ? 4 : 0)).toFixed(1)}pt`),
+        el('PaddingRight', deltaX || deltaWidth
+          ? `=CStr(CInt(Math.Max(0, ${(padding?.right ?? 0) + (framed ? 80 : 0)} - ${twips(deltaX)}${deltaWidth ? ` - ${twips(deltaWidth)}` : ''}) / 20)) & "pt"`
+          : `${((padding?.right ?? 0) / 20 + (framed ? 4 : 0)).toFixed(1)}pt`),
         el('PaddingTop', `${((padding?.top ?? 0) / 20 + (framed ? 1 : ruleAbove ? 2 : 0)).toFixed(1).replace(/\.0$/, '')}pt`), el('PaddingBottom', '0pt')));
   }
 
@@ -1698,13 +1727,10 @@ class RdlBuilder {
     const rules = this.columnRules(columns);
     const cells: (ReportObject | undefined)[] = columns.map(() => undefined);
     let rowHeight = 0;
-    const lines = { top: false, bottom: false, width: 0 };
+    const rowLines: ReportObject[] = [];
     for (const obj of section.objects) {
       if (obj.kind === 'line') {
-        const y = obj.position?.y ?? 0;
-        if (section.height && y > section.height / 2) lines.bottom = true;
-        else lines.top = true;
-        lines.width = Math.max(lines.width, obj.border?.width ?? 20);
+        rowLines.push(obj);
         continue;
       }
       cells[this.columnIndex(columns, obj.position?.x ?? 0)] = obj;
@@ -1715,6 +1741,25 @@ class RdlBuilder {
     const row = el('TablixRow',
       el('Height', inches(height)),
       el('TablixCells', ...cells.map((obj, i) => {
+        // The lines along the row over this column: one across the column is the cell's top or bottom border; one
+        // shorter than the column (a rule under a heading only) is drawn at its own place and width.
+        const columnLeft = columns[i].x;
+        const columnEnd = columnLeft + inchesToTwips(columns[i].width);
+        const lines = { top: false, bottom: false, width: 0 };
+        const partLines: ReportObject[] = [];
+        for (const line of rowLines) {
+          const x = line.position?.x ?? 0;
+          const right = x + (line.size?.width ?? 0);
+          // A line of unknown (or no) width is taken as running along the whole row.
+          const whole = !line.size?.width || line.size.width >= inchesToTwips(tableWidth) * 0.8;
+          const overlap = whole ? columnEnd - columnLeft : Math.min(right, columnEnd) - Math.max(x, columnLeft);
+          if (overlap <= 60) continue;
+          if (whole || overlap >= columnEnd - columnLeft - 60 || line.size?.height) {
+            if (section.height && (line.position?.y ?? 0) > section.height / 2) lines.bottom = true;
+            else lines.top = true;
+            lines.width = Math.max(lines.width, line.border?.width ?? 20);
+          } else partLines.push(line);
+        }
         const { value, format } = obj ? this.objectValue(obj, 'row') : { value: '', format: undefined };
         const name = this.itemNames.make(obj?.name || `${rowName}_${i + 1}`);
         const cellObj = background ? { ...(obj ?? { kind: 'text', name }), border: { ...(obj?.border ?? { sides: [0, 0, 0, 0] as [number, number, number, number] }), background } } : obj;
@@ -1751,6 +1796,22 @@ class RdlBuilder {
           };
           return el('TablixCell', el('CellContents', el('Rectangle', { Name: this.itemNames.make(`${name}_Area`) },
             el('ReportItems', this.textbox(name, value, cellObj, format, 'row', box)),
+            el('KeepTogether', 'true'),
+            el('Style', el('Border', el('Style', 'None'))))));
+        }
+        if (partLines.length) {
+          const columnWidth = twipsToInches(columnEnd - columnLeft);
+          const items = partLines.map((line) => {
+            const x = Math.max(line.position?.x ?? 0, columnLeft);
+            const right = Math.min((line.position?.x ?? 0) + (line.size?.width ?? 0), columnEnd);
+            const box = { top: Math.min(twipsToInches(line.position?.y ?? 0), height), left: twipsToInches(x - columnLeft), width: twipsToInches(right - x), height: 0 };
+            return this.reportItem({ ...line, size: { width: right - x, height: 0 } }, 'row', area, box);
+          });
+          const text = obj || ruled.top || ruled.bottom || ruled.left || ruled.right || background
+            ? this.textbox(name, value, this.ruledBorderObject(cellObj, ruled), format, 'row', { top: 0, left: 0, width: columnWidth, height }, undefined, ruled, padding)
+            : null;
+          return el('TablixCell', el('CellContents', el('Rectangle', { Name: this.itemNames.make(`${name}_Area`) },
+            el('ReportItems', ...(text ? [text] : []), ...items.filter((item): item is XmlElement => !!item)),
             el('KeepTogether', 'true'),
             el('Style', el('Border', el('Style', 'None'))))));
         }
