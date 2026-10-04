@@ -360,12 +360,15 @@ describe('layout conversion', () => {
   it('draws a line style formula under a field narrower than its column as a line as wide as the field', () => {
     const definition: ReportDefinition = {
       ...emptyDefinition(),
-      formulas: [{ name: 'Bottom_Line_Style', index: 1, kind: 'conditionalFormat', text: 'if {Orders.Region} = "Total" then crSingleLine else crNoLine', referencedFields: [] }],
+      formulas: [
+        { name: 'Bottom_Line_Style', index: 1, kind: 'conditionalFormat', text: 'if {Orders.Region} = "Total" then crSingleLine else crNoLine', referencedFields: [] },
+        { name: 'DeltaX_Value_Formula', index: 2, kind: 'conditionalFormat', text: 'if {Orders.Region} = "Total" then 1440 else 0', referencedFields: [] },
+      ],
       layout: [
         { name: 'DetailArea1', sections: [{ name: 'D', height: 220, objects: [
           { kind: 'field', name: 'Name', field: 'Orders.Customer', position: { x: 0, y: 0 }, size: { width: 7000, height: 200 } },
           { kind: 'field', name: 'Amt', field: 'Orders.Amount', position: { x: 7751, y: 0 }, size: { width: 2000, height: 200 }, align: 'right',
-            conditions: { bottomLine: { name: 'Bottom_Line_Style', index: 1 } } },
+            conditions: { bottomLine: { name: 'Bottom_Line_Style', index: 1 }, deltaX: { name: 'DeltaX_Value_Formula', index: 2 } } },
           { kind: 'field', name: 'Tag', field: 'Orders.Region', position: { x: 13327, y: 0 }, size: { width: 650, height: 200 } },
         ] }] },
       ],
@@ -374,7 +377,9 @@ describe('layout conversion', () => {
     assertBalancedXml(rdl);
     const amount = rdl.slice(rdl.indexOf('<Textbox Name="Amt">'), rdl.indexOf('</Textbox>', rdl.indexOf('<Textbox Name="Amt">')));
     assert.ok(!/BottomBorder/.test(amount), 'not the whole cell\'s border');
-    assert.match(rdl, /<Line Name="Amt_Below">\s*<Top>0.139in<\/Top>\s*<Left>[^<]*<\/Left>\s*<Height>0in<\/Height>\s*<Width>1.389in<\/Width>[\s\S]*?<Style>=IIf\(IsNothing\(/);
+    assert.match(rdl, /<Line Name="Amt_Below">\s*<Top>0.139in<\/Top>\s*<Left>0in<\/Left>\s*<Height>0in<\/Height>\s*<Width>1.389in<\/Width>[\s\S]*?<Style>=IIf\(IsNothing\(/);
+    // Moved by the X position formula: a line at each place it gives, shown where it gives it (here an inch along).
+    assert.match(rdl, /<Line Name="Amt_Below_\d">\s*<Top>0.139in<\/Top>\s*<Left>1in<\/Left>\s*<Height>0in<\/Height>\s*<Width>1.389in<\/Width>\s*<Visibility>\s*<Hidden>=Not \([^<]*\) = 1440\)<\/Hidden>/);
   });
 
   it('converts cross-tabs to matrices, charts to charts and running totals to RunningValue', () => {
