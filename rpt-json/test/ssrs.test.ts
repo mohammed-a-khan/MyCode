@@ -1900,6 +1900,26 @@ describe('formulas without data, page breaks by formula and the default font', (
     assert.ok(/"First kind"|Fields!F_FlagName\.Value/.test(box) && rdl.includes('"First kind"') && rdl.includes('"Second kind"'), box.slice(0, 500));
     assert.ok(rdl.includes('<GroupExpression>=Fields!Flag.Value</GroupExpression>'), 'still grouped by the field');
   });
+  it('keeps a heading or label wider than its column on one line, across the empty columns beside it', () => {
+    const src: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [
+      { name: 'Kind', type: 'string' }, { name: 'A', type: 'string' }, { name: 'B', type: 'string' }, { name: 'C', type: 'number' },
+    ] }] };
+    const cell = (name: string, ref: string, x: number, width: number, y = 0, border?: [number, number, number, number]) => ({ kind: 'field', name, field: ref, position: { x, y }, size: { width, height: 210 }, ...(border ? { border: { sides: border } } : {}) });
+    const def: ReportDefinition = { ...emptyDefinition(), groups: ['T.Kind'], layout: [
+      { name: 'GroupHeaderArea1', sections: [{ name: 'GH1', height: 240, objects: [cell('Heading', 'Group #1 Name', 0, 2640)] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 264, objects: [cell('A1', 'T.A', 165, 1080), cell('B1', 'T.B', 1245, 1005), cell('B2', 'T.B', 2535, 450), cell('B3', 'T.A', 3120, 3225), cell('C1', 'T.C', 9045, 1215)] }] },
+      { name: 'GroupFooterArea1', sections: [{ name: 'GF1', height: 287, objects: [
+        { kind: 'text', name: 'Label', text: 'Sum of all:', position: { x: 1680, y: 105 }, size: { width: 1140, height: 182 } },
+        cell('SumC', 'Sum of T.C', 9045, 1215, 105, [0, 0, 1, 0]),
+      ] }] },
+    ] };
+    const { rdl } = convertToRdl(def, src, { reportName: 'R' });
+    const box = (name: string) => rdl.slice(rdl.indexOf(`<Textbox Name="${name}">`), rdl.indexOf('</Textbox>', rdl.indexOf(`<Textbox Name="${name}">`)));
+    const width = (name: string) => Number(/<Width>([\d.]+)in<\/Width>/.exec(box(name))![1]);
+    assert.ok(width('Heading') > 1.6, `the heading runs across the columns beside it: ${width('Heading')}`);
+    assert.ok(width('Label') >= 0.79, `the label keeps its width across the column edge: ${width('Label')}`);
+    assert.ok(box('SumC').includes('<PaddingTop>2pt</PaddingTop>'), 'the total sits a little below its rule');
+  });
   it('takes the font most of the text uses as the report default', () => {
     const { rdl } = convertToRdl(report([]), source, { reportName: 'R' });
     assert.ok(rdl.includes('<df:DefaultFontFamily>Times New Roman</df:DefaultFontFamily>'));
