@@ -335,6 +335,28 @@ describe('layout conversion', () => {
     assert.match(rdl, /<Line Name="UnderA">\s*<Top>[^<]*<\/Top>\s*<Left>0.608in<\/Left>/);
   });
 
+  it('widens a table to a thick rule across the page and keeps the whole rule on the page', () => {
+    const definition: ReportDefinition = {
+      ...emptyDefinition(),
+      groups: ['Orders.Region'],
+      layout: [
+        { name: 'GroupHeaderArea1', sections: [{ name: 'GH', height: 220, objects: [
+          { kind: 'line', name: 'Rule', position: { x: 0, y: 0 }, size: { width: 14400, height: 0 }, border: { sides: [0, 0, 1, 0], color: '#000000', width: 60 } },
+        ] }] },
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 220, objects: [
+          { kind: 'field', name: 'Name', field: 'Orders.Customer', position: { x: 588, y: 0 }, size: { width: 7000, height: 200 } },
+          { kind: 'field', name: 'Amt', field: 'Orders.Amount', position: { x: 7751, y: 0 }, size: { width: 3000, height: 200 }, align: 'right' },
+        ] }] },
+      ],
+    };
+    const { rdl } = convertToRdl(definition, source, { reportName: 'Ruled' });
+    assertBalancedXml(rdl);
+    const columns = rdl.slice(rdl.indexOf('<TablixColumns>'), rdl.indexOf('</TablixColumns>')).match(/<Width>[^<]*/g)?.map((w) => w.slice(7));
+    // An empty column either side takes the table out to the rule's ends (0in to 10in).
+    assert.deepEqual(columns, ['0.408in', '4.974in', '2.083in', '2.534in']);
+    assert.match(rdl, /<Tablix Name="Table">[\s\S]*?<Top>0.024in<\/Top>\s*<Left>0in<\/Left>/, 'the table starts half the rule lower');
+  });
+
   it('converts cross-tabs to matrices, charts to charts and running totals to RunningValue', () => {
     const definition: ReportDefinition = {
       ...emptyDefinition(),

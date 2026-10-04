@@ -1724,6 +1724,7 @@ class RdlBuilder {
         for (let i = first; i < last; i++) cells.push(el('TablixCell'));
       }
       const row = el('TablixRow', el('Height', inches(height)), el('TablixCells', ...cells));
+      this.noteTopRule(row, section, tableWidth);
       return { row, height, hidden };
     }
 
@@ -1842,7 +1843,20 @@ class RdlBuilder {
         }
         return el('TablixCell', el('CellContents', this.textbox(name, value, this.ruledBorderObject(cellObj, ruled), format, 'row', undefined, undefined, ruled, padding)));
       })));
+    this.noteTopRule(row, section, tableWidth);
     return { row, height, hidden };
+  }
+
+  /** Rows whose top border is a line along the row, with the line's width (twips). */
+  private readonly topRules = new WeakMap<XmlElement, number>();
+
+  private noteTopRule(row: XmlElement, section: SectionInfo, tableWidth: number): void {
+    const widths = section.objects
+      .filter((o) => o.kind === 'line' && !this.runOn.has(o) && !(o.size?.height)
+        && (!o.size?.width || o.size.width >= inchesToTwips(tableWidth) * 0.8)
+        && (!section.height || (o.position?.y ?? 0) <= section.height / 2))
+      .map((o) => o.border?.width ?? 20);
+    if (widths.length) this.topRules.set(row, Math.max(...widths));
   }
 
   /** Crystal Top N with an "Others" group: ranks groups in SQL (direct table access only). */
@@ -1916,6 +1930,25 @@ class RdlBuilder {
         columns[best - 1] = { ...columns[best - 1], width: columns[best - 1].width - shift };
         columns[best] = { ...columns[best], x, width: columns[best].width + shift };
       }
+    }
+
+    // A line along the rows reaching past the outer columns (a rule across the page, under a table set in from its
+    // edges): the table reaches out to its ends, with an empty column on either side, so the row's border is as wide.
+    {
+      const tableLeft = columns[0].x;
+      const last = columns[columns.length - 1];
+      const tableRight = last.x + inchesToTwips(last.width);
+      const rowLines = [...areas.groupHeaders.values(), ...areas.groupFooters.values(), areas.detail].flat().flatMap((s) => s.objects)
+        .filter((o) => o.kind === 'line' && !this.runOn.has(o) && !(o.size?.height) && (o.size?.width ?? 0) >= (tableRight - tableLeft) * 0.8);
+      const lineLeft = Math.min(...rowLines.map((o) => o.position?.x ?? 0));
+      const lineRight = Math.max(...rowLines.map((o) => (o.position?.x ?? 0) + (o.size?.width ?? 0)));
+      // Only where nothing else of the table would fall in the new column (it holds the line alone).
+      const others = [...areas.groupHeaders.values(), ...areas.groupFooters.values(), areas.detail].flat().flatMap((s) => s.objects)
+        .filter((o) => o.kind !== 'line');
+      const clearLeft = others.every((o) => (o.position?.x ?? 0) >= tableLeft - 144);
+      const clearRight = others.every((o) => (o.position?.x ?? 0) + (o.size?.width ?? 0) <= tableRight + 144);
+      if (rowLines.length && clearLeft && tableLeft - lineLeft > 144) columns = [{ x: lineLeft, width: twipsToInches(tableLeft - lineLeft) }, ...columns];
+      if (rowLines.length && clearRight && lineRight - tableRight > 144) columns = [...columns, { x: tableRight, width: twipsToInches(lineRight - tableRight) }];
     }
 
     const rows: XmlElement[] = [];
@@ -2028,6 +2061,11 @@ class RdlBuilder {
 
     const left = twipsToInches(columns[0].x);
     const width = columns.reduce((sum, c) => sum + c.width, 0);
+    // A cell's border is drawn across its edge: a line along the top of the first row would lose its upper half
+    // above the table. The table starts half the line lower, as Crystal draws the whole line below its top.
+    const firstRule = rows.length ? this.topRules.get(rows[0]) : undefined;
+    const ruleOffset = firstRule ? Math.round(twipsToInches((firstRule + 10) / 2) * 1000) / 1000 : 0;
+    top += ruleOffset;
     const tablix = el('Tablix', { Name: this.itemNames.make('Table') },
       el('TablixBody',
         el('TablixColumns', ...columns.map((c) => el('TablixColumn', el('Width', inches(c.width))))),
@@ -2044,7 +2082,7 @@ class RdlBuilder {
       el('Style', el('Border', el('Style', 'None')), this.frameFooters.has(1) && this.isConstantGroup(this.groupFields[0])
         ? el('BottomBorder', el('Color', 'Black'), el('Style', 'Solid'), el('Width', `${((this.tableRuleWidth + 10) / 20).toFixed(2)}pt`))
         : null));
-    return { tablix, height, width, left };
+    return { tablix, height: height + ruleOffset, width, left };
   }
 
   private groupSelectionFilter(): XmlElement | null {
