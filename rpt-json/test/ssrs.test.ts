@@ -435,14 +435,18 @@ describe('layout conversion', () => {
     const n = [1, 2, 3, 4];
     const fields = [{ name: 'Customer', type: 'string' as const }, { name: 'Region', type: 'string' as const }, ...n.flatMap((i) => [{ name: `Pos${i}`, type: 'number' as const }, { name: `V${i}`, type: 'number' as const }])];
     const dynSource: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields }] };
-    const formulas = n.map((i) => ({ name: 'DeltaX_Value_Formula', index: i, kind: 'conditionalFormat' as const, text: `{T.Pos${i}} * 1440`, referencedFields: [] }));
+    // The headings' formulas are written a little differently from the values' (still the same column).
+    const formulas = n.flatMap((i) => [
+      { name: 'DeltaX_Value_Formula', index: i, kind: 'conditionalFormat' as const, text: `{T.Pos${i}} * 1440`, referencedFields: [] },
+      { name: 'DeltaX_Value_Formula', index: 10 + i, kind: 'conditionalFormat' as const, text: `({T.Pos${i}}*1440)`, referencedFields: [] },
+    ]);
     // Every column designed in the same place, moved to its own by its formula.
     const at = (name: string, i: number, y: number) => ({ kind: 'field' as const, name, field: `T.V${i}`, position: { x: 30, y }, size: { width: 1155, height: 210 }, align: 'right' as const, conditions: { deltaX: { name: 'DeltaX_Value_Formula', index: i } } });
     const definition: ReportDefinition = { ...emptyDefinition(), formulas, groups: ['T.Region'], layout: [
       { name: 'GroupHeaderArea1', sections: [{ name: 'GH', height: 900, objects: [
         { kind: 'text', name: 'Title', text: 'Detail', position: { x: 0, y: 0 }, size: { width: 15000, height: 288 }, align: 'center' },
         { kind: 'text', name: 'NameHead', text: 'Name', position: { x: 53, y: 405 }, size: { width: 4987, height: 200 }, align: 'center' },
-        ...n.map((i) => ({ ...at(`Head${i}`, i, 405), field: `T.Pos${i}`, align: 'center' as const })),
+        ...n.map((i) => ({ ...at(`Head${i}`, i, 405), field: `T.Pos${i}`, align: 'center' as const, conditions: { deltaX: { name: 'DeltaX_Value_Formula', index: 10 + i } } })),
       ] }] },
       { name: 'DetailArea1', sections: [{ name: 'D', height: 220, objects: [
         { kind: 'field', name: 'Name1', field: 'T.Customer', position: { x: 53, y: 0 }, size: { width: 4987, height: 210 } },
