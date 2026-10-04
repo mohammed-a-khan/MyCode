@@ -330,6 +330,9 @@ describe('layout conversion', () => {
     const amountHead = rdl.slice(rdl.indexOf('<Textbox Name="HeadB">'), rdl.indexOf('</Textbox>', rdl.indexOf('<Textbox Name="HeadB">')));
     assert.ok(!/BottomBorder/.test(amountHead));
     assert.match(rdl, /<Rectangle Name="HeadA_Area">[\s\S]*?<Line Name="UnderA">/);
+    // The heading is placed as the values under it are (centred in its column), its rule moving with it.
+    assert.match(rdl, /<Textbox Name="HeadA">[\s\S]*?<Left>0in<\/Left>\s*<Height>[^<]*<\/Height>\s*<Width>1.917in<\/Width>/);
+    assert.match(rdl, /<Line Name="UnderA">\s*<Top>[^<]*<\/Top>\s*<Left>0.608in<\/Left>/);
   });
 
   it('converts cross-tabs to matrices, charts to charts and running totals to RunningValue', () => {
