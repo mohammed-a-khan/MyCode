@@ -1881,6 +1881,8 @@ describe('formulas without data, page breaks by formula and the default font', (
     const box = (name: string) => rdl.slice(rdl.indexOf(`<Textbox Name="${name}">`), rdl.indexOf('</Textbox>', rdl.indexOf(`<Textbox Name="${name}">`)));
     assert.ok(box('SumA').includes('<Width>0.896in</Width>'), 'the first total keeps its width, short of the next column');
     assert.ok(rdl.includes('<Rectangle Name="SumA_Area">'));
+    // The last total fills its column's width, but is set lower in its row: its rule is at its own height too.
+    assert.ok(box('SumB').includes('<Top>0.073in</Top>') && box('SumA').includes('<Top>0.073in</Top>'), 'both rules at the totals\' height');
   });
   it('heads a group named by a formula with the formula\'s value', () => {
     const src: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Flag', type: 'string' }, { name: 'Amount', type: 'number' }] }] };
