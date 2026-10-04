@@ -215,6 +215,12 @@ describe('real .rpt samples to RDL', { skip: !samplesDir && 'set RPT_SAMPLES_DIR
       for (const report of reports) {
         assert.ok(report.rdl.length > 0, `${report.fileName} was generated`);
         assertBalancedXml(report.rdl);
+        // Nothing past the printable page, nor a thousandth past a cell (SSRS would add a page after every page).
+        const widths = checkRdlWidths(report.rdl);
+        assert.ok(!/past the printable page|body wider/.test(widths), `${report.fileName}: ${widths}`);
+        for (const m of widths.matchAll(/contents reach ([\d.]+)in in a ([\d.]+)in column/g)) {
+          assert.ok(parseFloat(m[1]) - parseFloat(m[2]) > 0.015, `${report.fileName}: ${m[0]}`);
+        }
       }
     });
   }

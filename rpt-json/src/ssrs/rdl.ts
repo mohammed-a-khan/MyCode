@@ -3774,6 +3774,7 @@ function thickHalf(line: ReportObject): number {
  */
 function fitInside(items: XmlElement[]): XmlElement[] {
   return items.map((item) => {
+    if (item.name === 'Tablix') return fitCells(item);
     if (item.name !== 'Rectangle') return item;
     const width = itemNumber(item, 'Width');
     return {
@@ -3787,6 +3788,72 @@ function fitInside(items: XmlElement[]): XmlElement[] {
   });
 }
 
+/**
+ * Keeps what a table's cells hold within their columns as written (a cell's items each placed to a thousandth of an
+ * inch can end a thousandth past it): SSRS widens the column to them, and a table fitted to the page then prints its
+ * overflow on a page of its own after every page.
+ */
+function fitCells(tablix: XmlElement): XmlElement {
+  const elements = (e: XmlElement, name?: string) => e.children.filter((c): c is XmlElement => typeof c === 'object' && c !== null && (!name || (c as XmlElement).name === name));
+  const body = elements(tablix, 'TablixBody')[0];
+  if (!body) return tablix;
+  const columns = elements(elements(body, 'TablixColumns')[0] ?? body, 'TablixColumn').map((c) => itemNumber(c, 'Width'));
+  const fitCell = (cell: XmlElement, width: number): XmlElement => ({
+    ...cell,
+    children: cell.children.map((c) => {
+      if (typeof c !== 'object' || c === null || (c as XmlElement).name !== 'CellContents') return c;
+      const contents = c as XmlElement;
+      return {
+        ...contents,
+        children: contents.children.map((x) => {
+          if (typeof x !== 'object' || x === null) return x;
+          const content = x as XmlElement;
+          if (content.name === 'Tablix') return fitCells(content);
+          if (content.name !== 'Rectangle') return content;
+          return {
+            ...content,
+            children: content.children.map((r) => (typeof r === 'object' && r !== null && (r as XmlElement).name === 'ReportItems'
+              // Only what rounding put past it: an item much wider (a cross-tab in a cell) widens its column on purpose.
+              ? { ...(r as XmlElement), children: fitInside(elements(r as XmlElement).map((i) => (itemRight(i) - width <= 0.015 ? fitWidth([i], width)[0] : i))) }
+              : r)),
+          };
+        }),
+      };
+    }),
+  });
+  const rows = (e: XmlElement): XmlElement => ({
+    ...e,
+    children: e.children.map((c) => {
+      if (typeof c !== 'object' || c === null) return c;
+      const row = c as XmlElement;
+      if (row.name !== 'TablixRow') return row;
+      let column = 0;
+      return {
+        ...row,
+        children: row.children.map((x) => {
+          if (typeof x !== 'object' || x === null || (x as XmlElement).name !== 'TablixCells') return x;
+          return {
+            ...(x as XmlElement),
+            children: (x as XmlElement).children.map((cellNode) => {
+              if (typeof cellNode !== 'object' || cellNode === null) return cellNode;
+              const cell = cellNode as XmlElement;
+              const contents = elements(cell, 'CellContents')[0];
+              const span = Math.max(parseInt(String(contents ? elements(contents, 'ColSpan')[0]?.children[0] ?? '1' : '1'), 10) || 1, 1);
+              const width = columns.slice(column, column + span).reduce((a, b) => a + b, 0);
+              // A cell spanning columns is followed by an empty cell for each further column it spans.
+              column += 1;
+              return contents ? fitCell(cell, Math.round(width * 1000) / 1000) : cell;
+            }),
+          };
+        }),
+      };
+    }),
+  });
+  return { ...tablix, children: tablix.children.map((c) => (typeof c === 'object' && c !== null && (c as XmlElement).name === 'TablixBody'
+    ? { ...(c as XmlElement), children: (c as XmlElement).children.map((r) => (typeof r === 'object' && r !== null && (r as XmlElement).name === 'TablixRows' ? rows(r as XmlElement) : r)) }
+    : c)) };
+}
+
 function fitWidth(items: XmlElement[], limit: number): XmlElement[] {
   return items.map((item) => {
     const left = itemNumber(item, 'Left');
@@ -3795,6 +3862,8 @@ function fitWidth(items: XmlElement[], limit: number): XmlElement[] {
     if (over <= 0.0005) return item;
     const newWidth = Math.max(limit - left, 0.01);
     const cut = width - newWidth;
+    // At the very edge, the item moves in by what it cannot give up.
+    const newLeft = left + newWidth > limit ? Math.max(limit - newWidth, 0) : left;
     let lastColumnDone = false;
     const fix = (e: XmlElement): XmlElement => {
       if (e.name === 'TablixColumns' && !lastColumnDone) {
@@ -3822,6 +3891,7 @@ function fitWidth(items: XmlElement[], limit: number): XmlElement[] {
       if (e.name === 'TablixBody') return { ...e, children: e.children.map((c) => (typeof c === 'object' && c !== null ? fix(c as XmlElement) : c)) };
       if (e.name === 'ReportItems') return { ...e, children: fitWidth(e.children.filter((c): c is XmlElement => typeof c === 'object' && c !== null), newWidth) };
       if (e.name === 'Width') return el('Width', inches(newWidth));
+      if (e.name === 'Left' && newLeft !== left) return el('Left', inches(newLeft));
       return e;
     };
     return { ...item, children: item.children.map((c) => (typeof c === 'object' && c !== null ? fix(c as XmlElement) : c)) };
