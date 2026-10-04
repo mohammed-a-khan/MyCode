@@ -431,6 +431,35 @@ describe('layout conversion', () => {
     assert.ok(widths.slice(1).every((w) => w > 0.8), `columns ${widths.join(', ')}`);
   });
 
+  it('lays out columns placed by X position formulas side by side', () => {
+    const n = [1, 2, 3, 4];
+    const fields = [{ name: 'Customer', type: 'string' as const }, { name: 'Region', type: 'string' as const }, ...n.flatMap((i) => [{ name: `Pos${i}`, type: 'number' as const }, { name: `V${i}`, type: 'number' as const }])];
+    const dynSource: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields }] };
+    const formulas = n.map((i) => ({ name: 'DeltaX_Value_Formula', index: i, kind: 'conditionalFormat' as const, text: `{T.Pos${i}} * 1440`, referencedFields: [] }));
+    // Every column designed in the same place, moved to its own by its formula.
+    const at = (name: string, i: number, y: number) => ({ kind: 'field' as const, name, field: `T.V${i}`, position: { x: 30, y }, size: { width: 1155, height: 210 }, align: 'right' as const, conditions: { deltaX: { name: 'DeltaX_Value_Formula', index: i } } });
+    const definition: ReportDefinition = { ...emptyDefinition(), formulas, groups: ['T.Region'], layout: [
+      { name: 'GroupHeaderArea1', sections: [{ name: 'GH', height: 900, objects: [
+        { kind: 'text', name: 'Title', text: 'Detail', position: { x: 0, y: 0 }, size: { width: 15000, height: 288 }, align: 'center' },
+        { kind: 'text', name: 'NameHead', text: 'Name', position: { x: 53, y: 405 }, size: { width: 4987, height: 200 }, align: 'center' },
+        ...n.map((i) => ({ ...at(`Head${i}`, i, 405), field: `T.Pos${i}`, align: 'center' as const })),
+      ] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 220, objects: [
+        { kind: 'field', name: 'Name1', field: 'T.Customer', position: { x: 53, y: 0 }, size: { width: 4987, height: 210 } },
+        ...n.map((i) => at(`Value${i}`, i, 0)),
+      ] }] },
+    ] };
+    const { rdl, review } = convertToRdl(definition, dynSource, { reportName: 'Dyn' });
+    const widths = (rdl.slice(rdl.indexOf('<TablixColumns>'), rdl.indexOf('</TablixColumns>')).match(/<Width>[^<]*/g) ?? []).map((w) => parseFloat(w.slice(7)));
+    // A name column, then one column per formula, spread to the title's width.
+    assert.equal(widths.length, 5, `columns ${widths.join(', ')}`);
+    assert.ok(Math.abs(widths[0] - (5040 + 144 - 53) / 1440) < 0.01, `name column ${widths[0]}`);
+    assert.ok(widths.slice(1).every((w) => w > 1.5), `columns ${widths.join(', ')}`);
+    assert.ok(!/PaddingLeft>=/.test(rdl), 'no longer moved within their own boxes');
+    assert.ok(review.some((r) => /4 columns are placed by X position formulas/.test(r.message)));
+    assert.match(checkRdlWidths(rdl), /nothing reaches past the page or what holds it/);
+  });
+
   it('lists what reaches past the printable page or past what holds it', () => {
     const rdl = `<Report><ReportSections><ReportSection><Body><ReportItems>
       <Rectangle Name="Area"><ReportItems><Textbox Name="Wide"><Left>1in</Left><Width>3in</Width></Textbox></ReportItems><Left>0in</Left><Width>2in</Width></Rectangle>
