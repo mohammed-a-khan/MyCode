@@ -274,6 +274,80 @@ interface Classified {
   columnHeadings: ReportObject[];
 }
 
+/**
+ * Columns placed by formulas (Crystal "dynamic columns"): fields designed one on top of another, each moved across by
+ * its X position formula to a place read from the data. SSRS cannot place an item by an expression, so each set of
+ * fields sharing an X position formula (a column's heading, values and total) becomes a column of its own, side by
+ * side in their design order after the fixed fields beside them. Returns the layout and how many columns were laid out.
+ */
+export function spreadFormulaColumns(definition: ReportDefinition): { definition: ReportDefinition; columns: number } {
+  const text = (ref: { index: number } | undefined) => (ref
+    ? (definition.formulaTexts?.[ref.index] ?? definition.formulas.find((f) => f.index === ref.index)?.text ?? '').replace(/\s+/g, ' ').trim().toLowerCase()
+    : '');
+  const placed = (o: ReportObject) => (o.kind === 'field' || o.kind === 'text') && !!o.position && !!o.size;
+  const moving = (o: ReportObject) => placed(o) && !!text(o.conditions?.deltaX);
+  const sections = definition.layout.flatMap((area) => area.sections);
+  // Stacked: two fields moved by different formulas overlapping (most of the narrower one) in one section.
+  const overlap = (a: ReportObject, b: ReportObject) => {
+    const from = Math.max(a.position!.x, b.position!.x);
+    const to = Math.min(a.position!.x + a.size!.width, b.position!.x + b.size!.width);
+    return to - from > Math.min(a.size!.width, b.size!.width) / 2;
+  };
+  const stacked = sections.some((s) => {
+    const m = s.objects.filter(moving);
+    return m.some((a, i) => m.slice(i + 1).some((b) => text(a.conditions!.deltaX) !== text(b.conditions!.deltaX) && overlap(a, b)));
+  });
+  if (!stacked) return { definition, columns: 0 };
+  // Column order: as designed in the section with the most of them (the headings), then any others as they come.
+  const keysIn = (s: { objects: ReportObject[] }) => [...new Set(s.objects.filter(moving).map((o) => text(o.conditions!.deltaX)))];
+  const richest = sections.reduce((best, s) => (keysIn(s).length > keysIn(best).length ? s : best), sections[0]);
+  const order = [...new Set([...keysIn(richest), ...sections.flatMap(keysIn)])];
+  // They start after the fixed fields beside them (the row's name column).
+  let start = Infinity;
+  let base = 0;
+  for (const s of sections) {
+    const m = s.objects.filter(moving);
+    if (!m.length) continue;
+    const from = Math.min(...m.map((o) => o.position!.x));
+    const to = Math.max(...m.map((o) => o.position!.x + o.size!.width));
+    start = Math.min(start, from);
+    const top = Math.min(...m.map((o) => o.position!.y));
+    const bottom = Math.max(...m.map((o) => o.position!.y + o.size!.height));
+    for (const o of s.objects) {
+      if (!placed(o) || moving(o) || o.suppressed) continue;
+      // On their line, where they start (a title above them is not beside them).
+      const beside = o.position!.y < bottom && o.position!.y + o.size!.height > top;
+      if (beside && o.position!.x < to && o.position!.x + o.size!.width > from && o.position!.x <= from + 288) base = Math.max(base, o.position!.x + o.size!.width + 144);
+    }
+  }
+  base = Math.max(base, start);
+  const widths = order.map((key) => Math.max(...sections.flatMap((s) => s.objects).filter((o) => moving(o) && text(o.conditions!.deltaX) === key).map((o) => o.size!.width)));
+  // Spread over the width the report's other objects reach (a title, the rules), as the formulas spread them.
+  const right = Math.max(...sections.flatMap((s) => s.objects).filter((o) => o.position && o.size).map((o) => o.position!.x + o.size!.width));
+  const total = widths.reduce((a, b) => a + b, 0);
+  const scale = total > 0 && right > base ? (right - base) / total : 1;
+  const xs = new Map<string, { x: number; width: number }>();
+  let x = base;
+  order.forEach((key, i) => {
+    const width = Math.floor(widths[i] * scale);
+    xs.set(key, { x, width });
+    x += width;
+  });
+  const layout = definition.layout.map((area) => ({
+    ...area,
+    sections: area.sections.map((s) => ({
+      ...s,
+      objects: s.objects.map((o) => {
+        if (!moving(o)) return o;
+        const place = xs.get(text(o.conditions!.deltaX))!;
+        const { deltaX: _x, deltaWidth: _w, ...conditions } = o.conditions!;
+        return { ...o, position: { ...o.position!, x: place.x }, size: { ...o.size!, width: place.width }, conditions };
+      }),
+    })),
+  }));
+  return { definition: { ...definition, layout }, columns: order.length };
+}
+
 export function convertToRdl(definition: ReportDefinition, dataSource: DataSourceInfo | undefined, options: RdlOptions): RdlResult {
   return new RdlBuilder(definition, dataSource ?? { connections: [], tables: [], links: [] }, options).build();
 }
@@ -318,7 +392,11 @@ class RdlBuilder {
   private readonly dataSourceName: string;
 
   constructor(definition: ReportDefinition, source: DataSourceInfo, options: RdlOptions) {
-    this.definition = definition;
+    const spread = spreadFormulaColumns(definition);
+    this.definition = spread.definition;
+    if (spread.columns) {
+      this.note('Layout', `${spread.columns} columns are placed by X position formulas (each read from the data); they are laid out side by side in their design order, so their places do not follow the data`);
+    }
     this.source = source;
     this.options = options;
     this.dataset = options.inline?.dataset ?? DATASET;
@@ -3815,8 +3893,9 @@ function fitCells(tablix: XmlElement): XmlElement {
           return {
             ...content,
             children: content.children.map((r) => (typeof r === 'object' && r !== null && (r as XmlElement).name === 'ReportItems'
-              // Only what rounding put past it: an item much wider (a cross-tab in a cell) widens its column on purpose.
-              ? { ...(r as XmlElement), children: fitInside(elements(r as XmlElement).map((i) => (itemRight(i) - width <= 0.015 ? fitWidth([i], width)[0] : i))) }
+              // A table in a cell (a cross-tab) widens its column on purpose: only what rounding put past it is trimmed.
+              // Anything else is kept within the cell (its column may have been narrowed to fit the page).
+              ? { ...(r as XmlElement), children: fitInside(elements(r as XmlElement).map((i) => (i.name !== 'Tablix' || itemRight(i) - width <= 0.015 ? fitWidth([i], width)[0] : i))) }
               : r)),
           };
         }),
