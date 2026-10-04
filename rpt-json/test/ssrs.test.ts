@@ -357,6 +357,26 @@ describe('layout conversion', () => {
     assert.match(rdl, /<Tablix Name="Table">[\s\S]*?<Top>0.024in<\/Top>\s*<Left>0in<\/Left>/, 'the table starts half the rule lower');
   });
 
+  it('draws a line style formula under a field narrower than its column as a line as wide as the field', () => {
+    const definition: ReportDefinition = {
+      ...emptyDefinition(),
+      formulas: [{ name: 'Bottom_Line_Style', index: 1, kind: 'conditionalFormat', text: 'if {Orders.Region} = "Total" then crSingleLine else crNoLine', referencedFields: [] }],
+      layout: [
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 220, objects: [
+          { kind: 'field', name: 'Name', field: 'Orders.Customer', position: { x: 0, y: 0 }, size: { width: 7000, height: 200 } },
+          { kind: 'field', name: 'Amt', field: 'Orders.Amount', position: { x: 7751, y: 0 }, size: { width: 2000, height: 200 }, align: 'right',
+            conditions: { bottomLine: { name: 'Bottom_Line_Style', index: 1 } } },
+          { kind: 'field', name: 'Tag', field: 'Orders.Region', position: { x: 13327, y: 0 }, size: { width: 650, height: 200 } },
+        ] }] },
+      ],
+    };
+    const { rdl } = convertToRdl(definition, source, { reportName: 'Rule' });
+    assertBalancedXml(rdl);
+    const amount = rdl.slice(rdl.indexOf('<Textbox Name="Amt">'), rdl.indexOf('</Textbox>', rdl.indexOf('<Textbox Name="Amt">')));
+    assert.ok(!/BottomBorder/.test(amount), 'not the whole cell\'s border');
+    assert.match(rdl, /<Line Name="Amt_Below">\s*<Top>0.139in<\/Top>\s*<Left>[^<]*<\/Left>\s*<Height>0in<\/Height>\s*<Width>1.389in<\/Width>[\s\S]*?<Style>=IIf\(IsNothing\(/);
+  });
+
   it('converts cross-tabs to matrices, charts to charts and running totals to RunningValue', () => {
     const definition: ReportDefinition = {
       ...emptyDefinition(),

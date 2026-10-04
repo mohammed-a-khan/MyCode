@@ -1808,7 +1808,11 @@ class RdlBuilder {
             el('KeepTogether', 'true'),
             el('Style', el('Border', el('Style', 'None'))))));
         }
-        if (partLines.length) {
+        // A line style formula on a field narrower than its column (a rule under a total): Crystal draws the line under
+        // the field only, so it is a line of its own there rather than the cell's border.
+        const ruleFormulas = obj?.position && obj.size && !fillsCell && !ruled.top && !ruled.bottom
+          ? (['topLine', 'bottomLine'] as const).filter((key) => obj.conditions?.[key]) : [];
+        if (partLines.length || ruleFormulas.length) {
           const columnWidth = twipsToInches(columnEnd - columnLeft);
           // The text is placed as in the column's other rows (so a heading lines up with the values under it); a line
           // under it moves with it, by as far as the text is from its place in Crystal.
@@ -1825,7 +1829,7 @@ class RdlBuilder {
           }
           const under = (line: ReportObject) => !!obj?.position && !!obj.size
             && (line.position?.x ?? 0) < obj.position.x + obj.size.width && (line.position?.x ?? 0) + (line.size?.width ?? 0) > obj.position.x;
-          const items = partLines.map((line) => {
+          const items: (XmlElement | null)[] = partLines.map((line) => {
             const shift = under(line) ? moved : 0;
             const width = Math.min(line.size?.width ?? 0, cellWidth);
             const x = Math.min(Math.max((line.position?.x ?? 0) + shift, columnLeft), columnEnd - Math.max(width, 60));
@@ -1833,8 +1837,30 @@ class RdlBuilder {
             const box = { top: Math.min(twipsToInches(line.position?.y ?? 0), height), left: twipsToInches(x - columnLeft), width: twipsToInches(right - x), height: 0 };
             return this.reportItem({ ...line, size: { width: right - x, height: 0 } }, 'row', area, box);
           });
+          for (const key of ruleFormulas) {
+            const style = this.conditionExpression(obj!.conditions![key]!, false, `${obj!.kind} object "${obj!.name}"`, 'row');
+            if (!style) continue;
+            // Where the text is: moved with it, unless formulas moving the field place the text from the field's own place.
+            const shift = obj!.conditions?.deltaX || obj!.conditions?.deltaWidth ? 0 : moved;
+            const x = Math.min(Math.max(obj!.position!.x - columnLeft + shift, 0), cellWidth - 60);
+            const right = Math.max(Math.min(x + obj!.size!.width, cellWidth), x + 60);
+            const y = key === 'topLine' ? obj!.position!.y : obj!.position!.y + obj!.size!.height;
+            const sides = obj!.border?.sides ?? [0, 0, 0, 0];
+            const own = BORDER_STYLES[key === 'topLine' ? sides[2] : sides[3]] ?? 'None';
+            items.push(el('Line', { Name: this.itemNames.make(`${name}_${key === 'topLine' ? 'Above' : 'Below'}`) },
+              el('Top', inches(Math.min(twipsToInches(y), height))), el('Left', inches(twipsToInches(x))),
+              el('Height', '0in'), el('Width', inches(twipsToInches(right - x))),
+              el('Style', el('Border',
+                el('Color', obj!.border?.color ?? 'Black'),
+                el('Style', `=IIf(IsNothing(${style.slice(1)}), "${own}", ${style.slice(1)})`),
+                el('Width', `${Math.max(0.25, (obj!.border?.width ?? 20) / 20).toFixed(2)}pt`)))));
+          }
+          // The text without the line formulas drawn here.
+          const textObj = ruleFormulas.length && cellObj
+            ? { ...cellObj, conditions: Object.fromEntries(Object.entries(cellObj.conditions ?? {}).filter(([key]) => !(ruleFormulas as readonly string[]).includes(key))) }
+            : cellObj;
           const text = obj || ruled.top || ruled.bottom || ruled.left || ruled.right || background
-            ? this.textbox(name, value, this.ruledBorderObject(cellObj, ruled), format, 'row', { top: 0, left: 0, width: columnWidth, height }, undefined, ruled, padding)
+            ? this.textbox(name, value, this.ruledBorderObject(textObj, ruled), format, 'row', { top: 0, left: 0, width: columnWidth, height }, undefined, ruled, padding)
             : null;
           return el('TablixCell', el('CellContents', el('Rectangle', { Name: this.itemNames.make(`${name}_Area`) },
             el('ReportItems', ...(text ? [text] : []), ...items.filter((item): item is XmlElement => !!item)),
