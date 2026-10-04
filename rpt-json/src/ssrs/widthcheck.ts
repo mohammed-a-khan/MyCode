@@ -64,7 +64,8 @@ export function checkRdlWidths(xml: string): string {
           const inner = walkItems(child(rect, 'ReportItems'), width, `its cell (row ${r + 1}, column ${column + 1})`);
           if (inner > width + tolerance) issues.push(`${name(tablix)} row ${r + 1} column ${column + 1}: contents reach ${fmt(inner)} in a ${fmt(width)} column`);
         }
-        column += Math.max(span, 1);
+        // A cell spanning columns is followed by an empty cell for each further column it spans.
+        column += 1;
       }
     }
     return size(child(tablix, 'Left')) + total;
