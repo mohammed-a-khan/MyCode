@@ -1711,17 +1711,22 @@ class RdlBuilder {
           // Its place down the section (a heading set lower in its row), as far as the row's height allows.
           top: section.height ? Math.min(Math.max(obj.position.y, 0), Math.max(section.height - obj.size.height, 0), 288) : 0,
         } : undefined;
-        // A field drawing its own border (a total's rule) narrower than its column: Crystal's line is as wide as the
-        // field, with gaps between neighbouring totals; the cell keeps it at its own place and width.
+        // A field drawing its own border (a total's rule): Crystal's line is as wide as the field, with gaps between
+        // neighbouring totals, at the field's own height in the row; the cell keeps it at its own place and size.
         const ownBorder = obj?.border?.sides.some((side) => side > 0) && !ruled.left && !ruled.right && !lines.top && !lines.bottom;
-        if (ownBorder && obj?.position && obj.size && padding && obj.size.width < inchesToTwips(columns[i].width) - 60) {
+        // A border is drawn on the box's edges: the field keeps its own box unless it fills its cell (as wide as the
+        // column, from the row's top to its bottom) — set lower in the row, a cell's top border would sit too high.
+        const fillsCell = !!obj?.position && !!obj.size && obj.size.width >= inchesToTwips(columns[i].width) - 60
+          && obj.position.y <= 15 && (!section.height || section.height - (obj.position.y + obj.size.height) <= 30);
+        if (ownBorder && obj?.position && obj.size && padding && !fillsCell) {
           // Text set to the right ends where the column's other values end (the same right padding); text to the
           // left starts where theirs start.
           const columnWidth = inchesToTwips(columns[i].width);
           const right = leftAligned ? padding.left + obj.size.width : columnWidth - (padding.right ?? 0);
           const boxLeft = Math.max(right - obj.size.width, 0);
           const box = {
-            top: twipsToInches(padding.top ?? 0), left: twipsToInches(boxLeft),
+            // Its own height in the row (the text padding is capped; the box is not).
+            top: twipsToInches(Math.max(Math.min(obj.position.y, (section.height ?? obj.position.y + obj.size.height) - obj.size.height), 0)), left: twipsToInches(boxLeft),
             width: twipsToInches(Math.min(obj.size.width, columnWidth - boxLeft)),
             height: twipsToInches(obj.size.height),
           };
