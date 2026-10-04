@@ -344,6 +344,7 @@ export function spreadFormulaColumns(definition: ReportDefinition): { definition
   const right = Math.max(...sections.flatMap((s) => s.objects).filter((o) => o.position && o.size).map((o) => o.position!.x + o.size!.width));
   const total = widths.reduce((a, b) => a + b, 0);
   const scale = total > 0 && right > base ? (right - base) / total : 1;
+  const lefts = new Map(order.map((key) => [key, Math.min(...sections.flatMap((s) => s.objects).filter((o) => moving(o) && text(o.conditions!.deltaX) === key).map((o) => o.position!.x))]));
   const xs = new Map<string, { x: number; width: number }>();
   let x = base;
   order.forEach((key, i) => {
@@ -357,9 +358,14 @@ export function spreadFormulaColumns(definition: ReportDefinition): { definition
       ...s,
       objects: s.objects.map((o) => {
         if (!moving(o)) return o;
-        const place = xs.get(text(o.conditions!.deltaX))!;
+        const key = text(o.conditions!.deltaX);
+        const place = xs.get(key)!;
         const { deltaX: _x, deltaWidth: _w, ...conditions } = o.conditions!;
-        return { ...o, position: { ...o.position!, x: place.x }, size: { ...o.size!, width: place.width }, conditions };
+        // Each keeps its own width and its place in the column (a heading narrower than its values wraps as in Crystal,
+        // totals each keep their own rule with a gap between them).
+        const offset = Math.max(o.position!.x - (lefts.get(key) ?? o.position!.x), 0);
+        const width = Math.min(o.size!.width, place.width);
+        return { ...o, position: { ...o.position!, x: place.x + Math.min(offset, place.width - width) }, size: { ...o.size!, width }, conditions };
       }),
     })),
   }));
