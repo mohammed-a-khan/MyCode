@@ -1861,14 +1861,17 @@ class RdlBuilder {
             if (moving) {
               const start = `(${ownLeft} + ${offset(dxValue)})`;
               const end = `(${ownLeft + obj!.size!.width} + ${offset(dxValue)}${dwValue ? ` + ${offset(dwValue)}` : ''})`;
-              for (let x = 0; x < cellWidth; x += RULE_PIECE) {
-                const right = Math.min(x + RULE_PIECE, cellWidth);
+              // Short of the cell's right edge: a piece reaching past it once rounded would widen the column (and a
+              // table fitted to the page would print its overflow on a page of its own).
+              const inside = cellWidth - 15;
+              for (let x = 0; x < inside; x += RULE_PIECE) {
+                const right = Math.min(x + RULE_PIECE, inside);
                 const middle = Math.round((x + right) / 2);
                 pieces.push({ x, right, within: `(${start} <= ${middle} AndAlso ${middle} <= ${end})` });
               }
             } else {
-              const x = Math.min(Math.max(ownLeft, 0), cellWidth - 60);
-              pieces.push({ x, right: Math.max(Math.min(ownLeft + obj!.size!.width, cellWidth), x + 60) });
+              const x = Math.min(Math.max(ownLeft, 0), cellWidth - 75);
+              pieces.push({ x, right: Math.max(Math.min(ownLeft + obj!.size!.width, cellWidth - 15), x + 60) });
             }
             for (const piece of pieces) {
               items.push(el('Line', { Name: this.itemNames.make(`${name}_${key === 'topLine' ? 'Above' : 'Below'}`) },
@@ -3171,6 +3174,9 @@ class RdlBuilder {
       footer.items = fitWidth(footer.items, printable);
       width = printable;
     }
+    bodyItems.splice(0, bodyItems.length, ...fitInside(bodyItems));
+    header.items = fitInside(header.items);
+    footer.items = fitInside(footer.items);
     if (width > pageWidth - margins.left - margins.right + 0.01 && !this.options.subreport) this.note('Page', `the layout (${inches(width)}) is wider than the printable page; SSRS will add horizontal pages`);
     // A subreport's margins never apply: it prints inside the main report.
     if (!def.margins && !this.options.subreport) this.note('Page', 'the report uses the printer default margins; 0.25in margins were used');
@@ -3221,7 +3227,7 @@ class RdlBuilder {
           el('rd:DataSourceID', reportId(`${this.options.reportName}/${d.name}`))))),
       el('DataSets', this.datasetElement(this.dataSourceName), ...this.extraDataSets),
       el('ReportSections', el('ReportSection',
-        el('Body', el('ReportItems', ...joinBoxes(clearLineOverlaps(bodyItems))), el('Height', inches(Math.max(top, DEFAULT_HEIGHT))), el('Style')),
+        el('Body', el('ReportItems', ...fitInside(joinBoxes(clearLineOverlaps(bodyItems)))), el('Height', inches(Math.max(top, DEFAULT_HEIGHT))), el('Style')),
         el('Width', inches(Math.max(width, 1))),
         el('Page',
           header.items.length ? el('PageHeader', el('Height', inches(header.height)), el('PrintOnFirstPage', 'true'), el('PrintOnLastPage', 'true'), el('ReportItems', ...clearLineOverlaps(header.items)), el('Style')) : null,
@@ -3762,10 +3768,29 @@ function thickHalf(line: ReportObject): number {
   return width >= 40 ? width / 2 : 0;
 }
 
+/**
+ * Keeps what a rectangle holds within its width, at every depth: SSRS widens a rectangle to whatever it holds, and one
+ * pushed past the page's printable width prints the overflow on a page of its own after every page.
+ */
+function fitInside(items: XmlElement[]): XmlElement[] {
+  return items.map((item) => {
+    if (item.name !== 'Rectangle') return item;
+    const width = itemNumber(item, 'Width');
+    return {
+      ...item,
+      children: item.children.map((c) => {
+        if (typeof c !== 'object' || c === null || (c as XmlElement).name !== 'ReportItems') return c;
+        const inner = (c as XmlElement).children.filter((x): x is XmlElement => typeof x === 'object' && x !== null);
+        return { ...(c as XmlElement), children: fitInside(width > 0 ? fitWidth(inner, width) : inner) };
+      }),
+    };
+  });
+}
+
 function fitWidth(items: XmlElement[], limit: number): XmlElement[] {
   return items.map((item) => {
     const left = itemNumber(item, 'Left');
-    const width = itemNumber(item, 'Width');
+    const width = itemRight(item) - left;
     const over = left + width - limit;
     if (over <= 0.0005) return item;
     const newWidth = Math.max(limit - left, 0.01);
@@ -3779,11 +3804,13 @@ function fitWidth(items: XmlElement[], limit: number): XmlElement[] {
         // page would print its overflow on a page of its own after every page.
         const columns = e.children.filter((c): c is XmlElement => typeof c === 'object' && c !== null);
         const widths = new Map(columns.map((c) => [c, itemNumber(c, 'Width')]));
-        let left = cut;
+        // Widths are written to a thousandth of an inch: what they add up to once written must fit too.
+        const written = (w: number) => Math.round(w * 1000) / 1000;
+        let left = columns.reduce((sum, c) => sum + written(widths.get(c)!), 0) - (newWidth - 0.001);
         for (let i = columns.length - 1; i >= 0 && left > 0.0005; i--) {
           const width = widths.get(columns[i])!;
-          const take = Math.min(left, Math.max(width - 0.05, 0));
-          widths.set(columns[i], width - take);
+          const take = Math.min(Math.ceil(left * 1000) / 1000, Math.max(written(width) - 0.05, 0));
+          widths.set(columns[i], written(width) - take);
           left -= take;
         }
         return { ...e, children: e.children.map((c) => {
@@ -3819,6 +3846,13 @@ function itemRight(item: XmlElement): number {
     const child = item.children.find((c): c is XmlElement => typeof c === 'object' && c !== null && (c as XmlElement).name === name);
     return child ? parseFloat(String(child.children[0])) : 0;
   };
+  // A table is as wide as its columns as written (each to a thousandth of an inch), whatever its Width says.
+  if (item.name === 'Tablix') {
+    const body = item.children.find((c): c is XmlElement => typeof c === 'object' && c !== null && (c as XmlElement).name === 'TablixBody');
+    const columns = body?.children.find((c): c is XmlElement => typeof c === 'object' && c !== null && (c as XmlElement).name === 'TablixColumns');
+    const total = (columns?.children ?? []).reduce((sum: number, c) => sum + (typeof c === 'object' && c !== null ? itemNumber(c as XmlElement, 'Width') : 0), 0);
+    if (total) return read('Left') + Math.max(total, read('Width'));
+  }
   return read('Left') + read('Width');
 }
 

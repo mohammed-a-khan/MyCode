@@ -9,6 +9,7 @@ import { convertDocumentsWithTemplate, convertDocumentToSsrs, reviewMarkdown } f
 import { readHouseTemplate, type HouseTemplate } from './ssrs/house.ts';
 import { chartStructure } from './crystal/chartinfo.ts';
 import { layoutSummary } from './crystal/layoutinfo.ts';
+import { checkRdlWidths } from './ssrs/widthcheck.ts';
 import { extractHeaders, formatHeadersCsv, formatHeadersText, type HeaderText } from './crystal/headers.ts';
 import { mkdir, readdir, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
@@ -39,6 +40,8 @@ Usage:
                                             Subdocument N) and of main-report sections showing them, one line per
                                             section and object, with all other names and text hidden
                                             (safe to share when a chart does not convert)
+  rpt-json check-width <input.rdl>          List what in a converted .rdl reaches past the printable page or past
+                                            what holds it (the cause of blank pages after every page)
   rpt-json verify  <input.rpt>              Round-trip rpt -> json -> rpt and compare every stream,
                                             then again with every encrypted stream re-encrypted
 
@@ -239,6 +242,13 @@ async function main(argv: string[]): Promise<number> {
     const raw = await readFile(input);
     const doc = input.toLowerCase().endsWith('.json') ? jsonToDocument(JSON.parse(raw.toString('utf8'))) : readCfb(raw);
     process.stdout.write(chartStructure(doc));
+    return 0;
+  }
+
+  if (command === 'check-width') {
+    const [input] = positionals(args, 'check-width', 1);
+    if (!input) throw new Error('check-width needs an input .rdl file');
+    process.stdout.write(checkRdlWidths((await readFile(input)).toString('utf8')));
     return 0;
   }
 

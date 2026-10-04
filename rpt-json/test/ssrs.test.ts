@@ -1,3 +1,4 @@
+import { checkRdlWidths } from '../src/ssrs/widthcheck.ts';
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -405,7 +406,20 @@ describe('layout conversion', () => {
     const { rdl } = convertToRdl(definition, source, { reportName: 'Edge' });
     const columns = (rdl.slice(rdl.indexOf('<TablixColumns>'), rdl.indexOf('</TablixColumns>')).match(/<Width>[^<]*/g) ?? []).map((w) => parseFloat(w.slice(7)));
     // Wider than the page, SSRS would print the overflow on a page of its own after every page.
-    assert.ok(columns.reduce((a, b) => a + b, 0) <= 10.5 + 0.005, `columns ${columns.join(', ')}`);
+    assert.ok(columns.reduce((a, b) => a + b, 0) <= 10.5 + 1e-9, `columns ${columns.join(', ')}`);
+    assert.match(checkRdlWidths(rdl), /nothing reaches past the page or what holds it/);
+  });
+
+  it('lists what reaches past the printable page or past what holds it', () => {
+    const rdl = `<Report><ReportSections><ReportSection><Body><ReportItems>
+      <Rectangle Name="Area"><ReportItems><Textbox Name="Wide"><Left>1in</Left><Width>3in</Width></Textbox></ReportItems><Left>0in</Left><Width>2in</Width></Rectangle>
+      <Tablix Name="Grid"><TablixBody><TablixColumns><TablixColumn><Width>6in</Width></TablixColumn><TablixColumn><Width>4.6in</Width></TablixColumn></TablixColumns></TablixBody><Left>0in</Left><Width>10.5in</Width></Tablix>
+      </ReportItems></Body><Width>10.5in</Width><Page><PageWidth>11in</PageWidth><LeftMargin>0.25in</LeftMargin><RightMargin>0.25in</RightMargin></Page></ReportSection></ReportSections></Report>`;
+    const report = checkRdlWidths(rdl);
+    assert.match(report, /^page 11.000in, printable 10.500in, body 10.500in/);
+    assert.match(report, /Rectangle "Area" is 2.000in wide but holds items to 4.000in/);
+    assert.match(report, /Tablix "Grid" columns add up to 10.600in, more than its width 10.500in/);
+    assert.match(report, /the body's items reach 10.600in, past the printable page \(10.500in\)/);
   });
 
   it('converts cross-tabs to matrices, charts to charts and running totals to RunningValue', () => {
