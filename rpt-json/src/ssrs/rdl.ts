@@ -205,6 +205,8 @@ const PAPER_SIZES: Record<number, [number, number]> = { 1: [8.5, 11], 5: [8.5, 1
 
 const inches = (value: number) => `${Math.round(value * 1000) / 1000}in`;
 const twipsToInches = (twips: number) => twips / TWIPS_PER_INCH;
+/** The length of the pieces a line moved by formulas is drawn in (0.05in): its ends fall within half of one. */
+const RULE_PIECE = 72;
 const inchesToTwips = (value: number) => value * TWIPS_PER_INCH;
 
 const TYPE_NAMES: Record<string, string> = {
@@ -1843,32 +1845,34 @@ class RdlBuilder {
             const y = key === 'topLine' ? obj!.position!.y : obj!.position!.y + obj!.size!.height;
             const sides = obj!.border?.sides ?? [0, 0, 0, 0];
             const own = BORDER_STYLES[key === 'topLine' ? sides[2] : sides[3]] ?? 'None';
-            // Formulas moving or widening the field move its line too. A line's place cannot be an expression, so there
-            // is a line for each place the formulas give (their numbers), shown where they give it; any other value
-            // keeps the line at the field's own place.
+            // Formulas moving or widening the field move its line too. A line's place cannot be an expression, so the line
+            // is drawn in short pieces across the cell, each shown where it falls within the line the formulas give.
             const dx = obj!.conditions?.deltaX;
             const dw = obj!.conditions?.deltaWidth;
             const dxValue = dx ? this.conditionExpression(dx, false, `${obj!.kind} object "${obj!.name}"`, 'row')?.slice(1) : undefined;
             const dwValue = dw ? this.conditionExpression(dw, false, `${obj!.kind} object "${obj!.name}"`, 'row')?.slice(1) : undefined;
             const offset = (value: string | undefined) => (value ? `IIf(IsNothing(${value}), 0, CDbl(${value}))` : '0');
-            const xs = dxValue ? this.formulaNumbers(dx!) : [0];
-            const ws = dwValue ? this.formulaNumbers(dw!) : [0];
-            const places = xs.length * ws.length <= 16 ? xs.flatMap((x) => ws.map((w) => [x, w] as const)) : [[0, 0] as const];
-            const at = (x: number, w: number) => `(${[dxValue ? `${offset(dxValue)} = ${x}` : '', dwValue ? `${offset(dwValue)} = ${w}` : ''].filter(Boolean).join(' AndAlso ')})`;
             const moving = !!(dxValue || dwValue);
-            const lines = moving
-              ? [...places.map(([x, w]) => ({ x, w, hidden: `=Not ${at(x, w)}` })),
-                { x: 0, w: 0, hidden: `=${places.map(([x, w]) => at(x, w)).join(' OrElse ')}` }]
-              : [{ x: 0, w: 0, hidden: undefined as string | undefined }];
             // Where the text is: moved with it, unless formulas moving the field place the text from the field's own place.
-            const shift = moving ? 0 : moved;
-            for (const line of lines) {
-              const x = Math.min(Math.max(obj!.position!.x - columnLeft + shift + line.x, 0), cellWidth - 60);
-              const right = Math.max(Math.min(obj!.position!.x - columnLeft + shift + line.x + obj!.size!.width + line.w, cellWidth), x + 60);
+            const ownLeft = obj!.position!.x - columnLeft + (moving ? 0 : moved);
+            const pieces: { x: number; right: number; hidden?: string }[] = [];
+            if (moving) {
+              const start = `(${ownLeft} + ${offset(dxValue)})`;
+              const end = `(${ownLeft + obj!.size!.width} + ${offset(dxValue)}${dwValue ? ` + ${offset(dwValue)}` : ''})`;
+              for (let x = 0; x < cellWidth; x += RULE_PIECE) {
+                const right = Math.min(x + RULE_PIECE, cellWidth);
+                const middle = Math.round((x + right) / 2);
+                pieces.push({ x, right, hidden: `=Not (${start} <= ${middle} AndAlso ${middle} <= ${end})` });
+              }
+            } else {
+              const x = Math.min(Math.max(ownLeft, 0), cellWidth - 60);
+              pieces.push({ x, right: Math.max(Math.min(ownLeft + obj!.size!.width, cellWidth), x + 60) });
+            }
+            for (const piece of pieces) {
               items.push(el('Line', { Name: this.itemNames.make(`${name}_${key === 'topLine' ? 'Above' : 'Below'}`) },
-                el('Top', inches(Math.min(twipsToInches(y), height))), el('Left', inches(twipsToInches(x))),
-                el('Height', '0in'), el('Width', inches(twipsToInches(right - x))),
-                line.hidden ? el('Visibility', el('Hidden', line.hidden)) : null,
+                el('Top', inches(Math.min(twipsToInches(y), height))), el('Left', inches(twipsToInches(piece.x))),
+                el('Height', '0in'), el('Width', inches(twipsToInches(piece.right - piece.x))),
+                piece.hidden ? el('Visibility', el('Hidden', piece.hidden)) : null,
                 el('Style', el('Border',
                   el('Color', obj!.border?.color ?? 'Black'),
                   el('Style', `=IIf(IsNothing(${style.slice(1)}), "${own}", ${style.slice(1)})`),
@@ -1891,17 +1895,6 @@ class RdlBuilder {
       })));
     this.noteTopRule(row, section, tableWidth);
     return { row, height, hidden };
-  }
-
-  /**
-   * The numbers a formula's text names (outside fields and strings), either sign after a minus, and 0: the values it
-   * can give, where it picks one.
-   */
-  private formulaNumbers(ref: FormulaRef): number[] {
-    const text = this.definition.formulaTexts?.[ref.index] ?? this.definition.formulas.find((f) => f.index === ref.index)?.text ?? '';
-    const bare = text.replace(/\{[^}]*\}|"[^"]*"|'[^']*'|\/\/[^\n]*/g, ' ');
-    const numbers = [...bare.matchAll(/(?<![\w.])(-?)\s*(\d+(?:\.\d+)?)(?![\w.])/g)].flatMap((m) => (m[1] ? [-Number(m[2]), Number(m[2])] : [Number(m[2])]));
-    return [...new Set([0, ...numbers])];
   }
 
   /** Rows whose top border is a line along the row, with the line's width (twips). */

@@ -362,7 +362,7 @@ describe('layout conversion', () => {
       ...emptyDefinition(),
       formulas: [
         { name: 'Bottom_Line_Style', index: 1, kind: 'conditionalFormat', text: 'if {Orders.Region} = "Total" then crSingleLine else crNoLine', referencedFields: [] },
-        { name: 'DeltaX_Value_Formula', index: 2, kind: 'conditionalFormat', text: 'if {Orders.Region} = "Total" then 1440 else 0', referencedFields: [] },
+        { name: 'DeltaX_Value_Formula', index: 2, kind: 'conditionalFormat', text: '(if IsNull({Orders.Amount}) then 0 else 1) * 1.15 * 1440', referencedFields: [] },
       ],
       layout: [
         { name: 'DetailArea1', sections: [{ name: 'D', height: 220, objects: [
@@ -377,9 +377,11 @@ describe('layout conversion', () => {
     assertBalancedXml(rdl);
     const amount = rdl.slice(rdl.indexOf('<Textbox Name="Amt">'), rdl.indexOf('</Textbox>', rdl.indexOf('<Textbox Name="Amt">')));
     assert.ok(!/BottomBorder/.test(amount), 'not the whole cell\'s border');
-    assert.match(rdl, /<Line Name="Amt_Below">\s*<Top>0.139in<\/Top>\s*<Left>0in<\/Left>\s*<Height>0in<\/Height>\s*<Width>1.389in<\/Width>[\s\S]*?<Style>=IIf\(IsNothing\(/);
-    // Moved by the X position formula: a line at each place it gives, shown where it gives it (here an inch along).
-    assert.match(rdl, /<Line Name="Amt_Below_\d">\s*<Top>0.139in<\/Top>\s*<Left>1in<\/Left>\s*<Height>0in<\/Height>\s*<Width>1.389in<\/Width>\s*<Visibility>\s*<Hidden>=Not \([^<]*\) = 1440\)<\/Hidden>/);
+    // Moved by the X position formula (a computed place): drawn in pieces across the cell, each shown where it falls
+    // within the moved line.
+    const pieces = rdl.match(/<Line Name="Amt_Below(_\d+)?">/g) ?? [];
+    assert.equal(pieces.length, Math.ceil(5576 / 72));
+    assert.match(rdl, /<Line Name="Amt_Below_2">\s*<Top>0.139in<\/Top>\s*<Left>0.05in<\/Left>\s*<Height>0in<\/Height>\s*<Width>0.05in<\/Width>\s*<Visibility>\s*<Hidden>=Not \(\(0 \+ IIf\(IsNothing\([^<]*\) &lt;= 108 AndAlso 108 &lt;= \(2000 \+ [^<]*\)\)<\/Hidden>/);
   });
 
   it('converts cross-tabs to matrices, charts to charts and running totals to RunningValue', () => {
