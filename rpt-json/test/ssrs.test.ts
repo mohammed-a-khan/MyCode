@@ -416,6 +416,21 @@ describe('layout conversion', () => {
     assert.match(checkRdlWidths(rdl), /nothing reaches past the page or what holds it/);
   });
 
+  it('keeps the columns of a subreport table wider than its place', () => {
+    const fields = [{ name: 'Customer', type: 'string' as const }, ...[1, 2, 3, 4, 5, 6, 7].map((i) => ({ name: `V${i}`, type: 'number' as const }))];
+    const subSource: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields }] };
+    const values = [1, 2, 3, 4, 5, 6, 7].map((i) => ({ kind: 'field' as const, name: `V${i}f`, field: `T.V${i}`, position: { x: 5400 + (i - 1) * 1300, y: 0 }, size: { width: 1200, height: 200 }, align: 'right' as const }));
+    const sub: ReportDefinition = { ...emptyDefinition(), layout: [
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 220, objects: [{ kind: 'field', name: 'Nf', field: 'T.Customer', position: { x: 0, y: 0 }, size: { width: 5000, height: 200 } }, ...values] }] }] };
+    const main: ReportDefinition = { ...emptyDefinition(), page: { orientation: 'landscape', paperSize: 5 }, layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 400, objects: [{ kind: 'subreport', name: 'Sub1', subreport: { index: 1, onDemand: false }, position: { x: 0, y: 0 }, size: { width: 3000, height: 400 } }] }] }] };
+    const { rdl } = convertToRdl(main, subSource, { reportName: 'Main', subreports: new Map([[1, { name: 'Sub1', links: [], definition: sub, dataSource: subSource }]]) });
+    const widths = (rdl.slice(rdl.indexOf('<TablixColumns>'), rdl.indexOf('</TablixColumns>')).match(/<Width>[^<]*/g) ?? []).map((w) => parseFloat(w.slice(7)));
+    // Squeezed into the subreport's place, every column after the first would be left 0.05in wide.
+    assert.equal(widths.length, 8);
+    assert.ok(widths.slice(1).every((w) => w > 0.8), `columns ${widths.join(', ')}`);
+  });
+
   it('lists what reaches past the printable page or past what holds it', () => {
     const rdl = `<Report><ReportSections><ReportSection><Body><ReportItems>
       <Rectangle Name="Area"><ReportItems><Textbox Name="Wide"><Left>1in</Left><Width>3in</Width></Textbox></ReportItems><Left>0in</Left><Width>2in</Width></Rectangle>
