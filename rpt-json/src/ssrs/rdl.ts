@@ -825,6 +825,9 @@ class RdlBuilder {
     }
     const border = backColor ? { ...(obj?.border ?? { sides: [0, 0, 0, 0] as [number, number, number, number] }), background: backColor } : obj?.border;
     const framed = !!obj?.border && obj.border.sides.every((side) => side > 0);
+    // A rule drawn above a field placed at its own position (a total under its column): Crystal keeps the text a
+    // little below it.
+    const ruleAbove = !!box && !framed && !!obj?.border && obj.border.sides[2] > 0;
     // Paragraphs aligned each their own way (a plain text, not a formula's value).
     const paragraphs = obj && !value.startsWith('=Fields') ? textParagraphs(obj)?.map((p) => ({
       value: p.lines.length > 1 ? `=${p.lines.map((l) => vbString(l)).join(' & vbCrLf & ')}` : (p.lines[0].startsWith('=') ? `=${vbString(p.lines[0])}` : p.lines[0]),
@@ -852,7 +855,7 @@ class RdlBuilder {
       el('Style', ...this.borderStyle(border, lines),
         // Crystal keeps a text object's text a little inside its own border.
         el('PaddingLeft', `${((padding?.left ?? 0) / 20 + (framed ? 4 : 0)).toFixed(1)}pt`), el('PaddingRight', `${((padding?.right ?? 0) / 20 + (framed ? 4 : 0)).toFixed(1)}pt`),
-        el('PaddingTop', `${((padding?.top ?? 0) / 20 + (framed ? 1 : 0)).toFixed(1).replace(/\.0$/, '')}pt`), el('PaddingBottom', '0pt')));
+        el('PaddingTop', `${((padding?.top ?? 0) / 20 + (framed ? 1 : ruleAbove ? 2 : 0)).toFixed(1).replace(/\.0$/, '')}pt`), el('PaddingBottom', '0pt')));
   }
 
   // ---- free-standing items (page header/footer, report header/footer) -------------------------
@@ -1549,6 +1552,13 @@ class RdlBuilder {
       if (used.has(i)) return false;
       used.add(i);
     }
+    // An object running on over the next column, where nothing else in the row starts (a heading or label wider
+    // than its column): it keeps its width across the columns, so the row is laid out free-form.
+    for (const obj of cellObjects) {
+      const i = this.columnIndex(columns, obj.position?.x ?? 0);
+      const end = (obj.position?.x ?? 0) + (obj.size?.width ?? 0);
+      if (i + 1 < columns.length && end > columns[i + 1].x + 144 && !used.has(i + 1)) return false;
+    }
     const ys = cellObjects.map((o) => o.position?.y ?? 0);
     return ys.length === 0 || Math.max(...ys) - Math.min(...ys) <= 144;
   }
@@ -1647,6 +1657,15 @@ class RdlBuilder {
           const o = p.obj;
           if (o.kind === 'text' || o.kind === 'field') {
             const leftAligned = o.align === 'left' || (!o.align && (o.kind === 'text' || (o.field !== undefined && this.valueTypeOf(o.field) === 'string')));
+            // Text set to the right within its own column ends where that column's values end in the rows laid out
+            // a cell per column (at most 288 twips short of the column's edge).
+            if (!leftAligned && p.first === p.last) {
+              const columnRight = columns[p.first].x + inchesToTwips(columns[p.first].width);
+              const objectRight = p.x + (o.size?.width ?? 0);
+              if (objectRight <= columnRight && columnRight - objectRight > 288) {
+                box.left = Math.max(0, twipsToInches(columnRight - 288 - left) - box.width);
+              }
+            }
             const y = o.position?.y ?? 0;
             const bottom = y + (o.size?.height ?? 0);
             const next = inCell
