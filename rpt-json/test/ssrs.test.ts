@@ -558,6 +558,21 @@ describe('layout conversion', () => {
     assert.match(convertToRdl(lined, source, { reportName: 'C' }).rdl, /<Style>=IIf\(IsNothing\(Fields!Region\.Value\), "None", "Solid"\)<\/Style>/);
   });
 
+  it('keeps headings and values at their own place when the column\'s values line up with them', () => {
+    const at = (kind: string, name: string, x: number, width: number, extra: object = {}) => ({ kind, name, position: { x, y: 0 }, size: { width, height: 200 }, ...extra });
+    const definition: ReportDefinition = { ...emptyDefinition(), groups: ['Orders.Region'], layout: [
+      { name: 'GroupHeaderArea1', sections: [{ name: 'GH', height: 500, objects: [
+        at('text', 'HeadWho', 0, 2000, { text: 'Customer' }), at('text', 'HeadAmt', 4000, 1200, { text: 'Amount', align: 'center' }),
+        { ...at('text', 'Wide', 0, 6000, { text: 'Across' }), position: { x: 0, y: 260 } }] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 220, objects: [
+        at('field', 'Who', 0, 2000, { field: 'Orders.Customer' }), at('field', 'Amt', 4000, 1200, { field: 'Orders.Amount', align: 'right' }), at('field', 'Region', 6400, 1000, { field: 'Orders.Region' })] }] },
+    ] };
+    const { rdl } = convertToRdl(definition, source, { reportName: 'P' });
+    // The heading and the values under it end where Crystal has them, though the column runs on to the next field.
+    assert.match(rdl, /<Textbox Name="HeadAmt">[\s\S]*?<Left>0in<\/Left>/);
+    assert.match(rdl, /<Textbox Name="Amt">[\s\S]*?<PaddingRight>60.0pt<\/PaddingRight>/);
+  });
+
   it('leaves out a total\'s own rule where the total is empty', () => {
     const definition: ReportDefinition = { ...emptyDefinition(), groups: ['Orders.Region'], layout: [
       { name: 'DetailArea1', sections: [{ name: 'D', height: 220, objects: [{ kind: 'field', name: 'Amt', field: 'Orders.Amount', position: { x: 0, y: 0 }, size: { width: 1440, height: 200 } }] }] },
