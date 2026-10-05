@@ -1853,7 +1853,9 @@ class RdlBuilder {
             if (!leftAligned && p.first === p.last) {
               const columnRight = columns[p.first].x + inchesToTwips(columns[p.first].width);
               const objectRight = p.x + (o.size?.width ?? 0);
-              if (objectRight <= columnRight && columnRight - objectRight > 288) {
+              // Unless the column's values end where it does (or are all set to the left): it stays where it is.
+              const ends = this.detailValueEnds(columns, p.first);
+              if (objectRight <= columnRight && columnRight - objectRight > 288 && ends.length && !ends.some((end) => Math.abs(end - objectRight) <= 60)) {
                 box.left = Math.max(0, twipsToInches(columnRight - 288 - left) - box.width);
               }
             }
@@ -1937,7 +1939,9 @@ class RdlBuilder {
         const leftAligned = obj?.align === 'left' || (!obj?.align && (obj?.kind === 'text' || (obj?.field !== undefined && this.valueTypeOf(obj.field) === 'string')));
         const padding = obj?.position && obj.size ? {
           left: Math.min(Math.max(obj.position.x - columns[i].x, 0), 288),
-          right: leftAligned ? 0 : Math.min(Math.max(columnRight - (obj.position.x + obj.size.width), 0), 288),
+          // Text set to the right keeps its place (as far as SSRS's 1in of padding goes), unless the column's values
+          // are moved across by a formula: then it ends at most 288 twips short of the column's edge, as they do.
+          right: leftAligned ? 0 : Math.min(Math.max(columnRight - (obj.position.x + obj.size.width), 0), this.detailValueEnds(columns, i).length ? 288 : 1440),
           // Its place down the section (a heading set lower in its row), as far as the row's height allows.
           top: section.height ? Math.min(Math.max(obj.position.y, 0), Math.max(section.height - obj.size.height, 0), 288) : 0,
           // Its whole distance from the column's edges, which formulas moving or widening it start from.
@@ -2058,6 +2062,14 @@ class RdlBuilder {
       })));
     this.noteTopRule(row, section, tableWidth);
     return { row, height, hidden };
+  }
+
+  /** Right edges (twips) of the detail values in a column moved across by a formula (not drawn where Crystal has them). */
+  private detailValueEnds(columns: Column[], index: number): number[] {
+    return this.definition.layout.filter((a) => /^Detail/i.test(a.name)).flatMap((a) => a.sections).flatMap((s) => s.objects)
+      .filter((o) => o.kind === 'field' && o.position && o.size && !o.suppressed && !!o.conditions?.deltaX
+        && this.columnIndex(columns, o.position.x) === index)
+      .map((o) => o.position!.x + o.size!.width);
   }
 
   /** Rows whose top border is a line along the row, with the line's width (twips). */
