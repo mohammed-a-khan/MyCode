@@ -49,8 +49,12 @@ export function checkRdlWidths(xml: string): string {
 
   /** A table's right edge (its columns, which SSRS uses over its Width), checking each cell's contents too. */
   const tablixRight = (tablix: XmlElement): number => {
+    // A column hidden by a formula closes up where it is hidden: counted as not there (the widest it can be, shown
+    // only where others are hidden, is decided by the data).
+    const members = childElements(child(tablix, 'TablixColumnHierarchy/TablixMembers') ?? tablix, 'TablixMember');
+    const optional = (i: number) => members.length > i && textOf(child(members[i], 'Visibility/Hidden')).startsWith('=');
     const columns = childElements(child(tablix, 'TablixBody/TablixColumns') ?? tablix, 'TablixColumn').map((c) => size(child(c, 'Width')));
-    const total = columns.reduce((a, b) => a + b, 0);
+    const total = columns.reduce((a, b, i) => a + (optional(i) ? 0 : b), 0);
     const declared = size(child(tablix, 'Width'));
     if (total > declared + 0.01) issues.push(`${name(tablix)} columns add up to ${fmt(total)}, more than its width ${fmt(declared)}`);
     for (const [r, row] of childElements(child(tablix, 'TablixBody/TablixRows') ?? tablix, 'TablixRow').entries()) {

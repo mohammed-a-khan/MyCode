@@ -218,7 +218,7 @@ const PARAMETER_TYPES: Record<string, string> = {
   string: 'String', integer: 'Integer', number: 'Float', currency: 'Float', boolean: 'Boolean',
   date: 'DateTime', dateTime: 'DateTime', time: 'DateTime',
 };
-const FORMATS: Record<string, string> = { currency: 'C2', number: 'N2', integer: 'N0', date: 'd', dateTime: 'g' };
+const FORMATS: Record<string, string> = { currency: 'N2', number: 'N2', integer: 'N0', date: 'd', dateTime: 'g' };
 
 const SUMMARY_OPERATIONS: Record<string, string> = {
   sum: 'Sum', count: 'Count', average: 'Avg', maximum: 'Max', minimum: 'Min', 'distinct count': 'CountDistinct',
@@ -1224,7 +1224,8 @@ class RdlBuilder {
       : [];
     // Crystal clips a subreport's content to the subreport object's frame: items reaching past it are trimmed to it
     // (otherwise the frame would grow, possibly past the page's edge).
-    const content = result.width > box.width + 0.001 ? fitWidth(result.items, box.width) : result.items;
+    const fitted = result.width > box.width + 0.001 ? fitWidth(result.items, box.width) : result.items;
+    const content = mode === 'body' ? this.frameFormulas(obj, item, fitted) : fitted;
     const rectangle = el('Rectangle', { Name: this.itemNames.make(obj.name || 'Subreport') },
       content.length || keep.length ? el('ReportItems', ...content, ...keep) : null,
       el('KeepTogether', 'true'),
@@ -1234,6 +1235,82 @@ class RdlBuilder {
       el('Style', ...this.borderStyle(obj.border)));
     this.contentHeights.set(rectangle, Math.max(box.height, result.height));
     return { item: rectangle, height };
+  }
+
+  /**
+   * A subreport object's X position and width formulas (in twips, from its own place and size): Crystal moves the
+   * frame and cuts its content off at the frame's right edge. SSRS cannot size or move an item by a formula; its
+   * tables can hide columns by one, and a hidden column closes up. So the columns of the subreport's tables past the
+   * frame's width are hidden, and blank columns ahead of them (of 1, 2, 4, ... times 30 twips, each shown by one
+   * bit of the move) move them across.
+   */
+  private frameFormulas(obj: ReportObject, item: string, items: XmlElement[]): XmlElement[] {
+    const { deltaX, deltaWidth } = obj.conditions ?? {};
+    if (!deltaX && !deltaWidth) return items;
+    const twips = (ref: typeof deltaX) => {
+      const e = ref ? this.conditionExpression(ref, false, item, 'body') : undefined;
+      return e ? `IIf(IsNothing(${e.slice(1)}), 0, CDbl(${e.slice(1)}))` : undefined;
+    };
+    const width = twips(deltaWidth);
+    const move = twips(deltaX);
+    const frame = obj.size?.width ?? 0;
+    let tables = 0;
+    const clip = (element: XmlElement, left: number): XmlElement => {
+      if (element.name === 'Rectangle') {
+        const own = left + itemNumber(element, 'Left');
+        return { ...element, children: element.children.map((c) => (typeof c === 'object' && c !== null && (c as XmlElement).name === 'ReportItems'
+          ? { ...(c as XmlElement), children: (c as XmlElement).children.map((i) => (typeof i === 'object' && i !== null ? clip(i as XmlElement, own) : i)) }
+          : c)) };
+      }
+      if (element.name !== 'Tablix') return element;
+      tables++;
+      const body = child(element, 'TablixBody')!;
+      const columns = child(body, 'TablixColumns')!.children.filter((c): c is XmlElement => typeof c === 'object' && c !== null);
+      const members = child(child(element, 'TablixColumnHierarchy')!, 'TablixMembers')!;
+      const columnMembers = members.children.filter((c): c is XmlElement => typeof c === 'object' && c !== null);
+      if (columnMembers.length !== columns.length) return element;
+      // Each column's middle, in twips from the frame's left edge.
+      let x = inchesToTwips(left + itemNumber(element, 'Left'));
+      const hiddenColumns = columnMembers.map((m, i) => {
+        const w = inchesToTwips(itemNumber(columns[i], 'Width'));
+        const middle = Math.round(x + w / 2);
+        x += w;
+        return width ? { ...m, children: [...m.children, el('Visibility', el('Hidden', `=${frame} + ${width} < ${middle}`))] } : m;
+      });
+      const bits = move ? Array.from({ length: Math.max(1, Math.ceil(Math.log2(frame / 30 + 1))) }, (_, k) => k) : [];
+      const spacerColumns = bits.map((k) => el('TablixColumn', el('Width', inches(twipsToInches(30 * 2 ** k)))));
+      const spacerMembers = bits.map((k) => el('TablixMember', el('Visibility', el('Hidden', `=((CInt(Math.Max(0, ${move}) / 30) \\ ${2 ** k}) Mod 2) = 0`))));
+      const spacerCell = () => el('TablixCell', el('CellContents', el('Textbox', { Name: this.itemNames.make('Spacer') },
+        el('CanGrow', 'false'), el('KeepTogether', 'true'),
+        el('Paragraphs', el('Paragraph', el('TextRuns', el('TextRun', el('Value', ''))))),
+        el('Style', el('Border', el('Style', 'None'))))));
+      const rows = child(body, 'TablixRows')!;
+      return {
+        ...element,
+        children: element.children.map((c) => {
+          if (typeof c !== 'object' || c === null) return c;
+          const e = c as XmlElement;
+          if (e.name === 'TablixColumnHierarchy') return el('TablixColumnHierarchy', el('TablixMembers', ...spacerMembers, ...hiddenColumns));
+          if (e.name !== 'TablixBody') return e;
+          return el('TablixBody',
+            el('TablixColumns', ...spacerColumns, ...columns),
+            { ...rows, children: rows.children.map((r) => {
+              if (typeof r !== 'object' || r === null) return r;
+              const row = r as XmlElement;
+              return { ...row, children: row.children.map((rc) => (typeof rc === 'object' && rc !== null && (rc as XmlElement).name === 'TablixCells'
+                ? { ...(rc as XmlElement), children: [...bits.map(spacerCell), ...(rc as XmlElement).children] }
+                : rc)) };
+            }) });
+        }),
+      };
+    };
+    const out = items.map((i) => clip(i, 0));
+    if (tables) {
+      this.note(item, 'has X position and width formulas: the columns of its table past the width are hidden, and blank columns ahead move it across (SSRS cannot move or size an item by a formula)');
+    } else {
+      this.note(item, 'has X position and width formulas, which are not converted (SSRS cannot move or size an item by a formula); it keeps its own place and size');
+    }
+    return out;
   }
 
   private keepContentHeight(from: XmlElement, to: XmlElement): XmlElement {
