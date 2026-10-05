@@ -299,7 +299,9 @@ export interface SectionInfo {
   suppressed?: boolean;
   /** The section's New Page Before box is ticked. */
   newPageBefore?: boolean;
-  /** The section format record's flag bytes, as hex (byte 6 is the Suppress box, byte 10 New Page Before). */
+  /** The section's New Page After box is ticked. */
+  newPageAfter?: boolean;
+  /** The section format record's flag bytes, as hex (byte 6 is the Suppress box, byte 10 New Page Before, byte 12 New Page After). */
   formatFlags?: string;
   objects: ReportObject[];
 }
@@ -856,6 +858,8 @@ function buildLayout(records: RecordNode[]): AreaInfo[] {
       if (section && flags && flags.length > 6 && flags[6] === 0) section.suppressed = true;
       // Byte 10 is 1 when New Page Before is ticked.
       if (section && flags && flags.length > 10 && flags[10] === 1) section.newPageBefore = true;
+      // Byte 12 is 1 when New Page After is ticked.
+      if (section && flags && flags.length > 12 && flags[12] === 1) section.newPageAfter = true;
       if (section && flags) section.formatFlags = Array.from(flags.subarray(0, 24), (b) => b.toString(16).padStart(2, '0')).join('');
       const conditions = namedConditions(record);
       // Before the area's first section the conditions belong to the whole area.
