@@ -964,7 +964,8 @@ class RdlBuilder {
     const formulaOf = (ref: FormulaRef | undefined) => (ref ? this.conditionExpression(ref, false, item, scope)?.slice(1) : undefined);
     const lineFormulas = { top: formulaOf(conditions.topLine), bottom: formulaOf(conditions.bottomLine), left: formulaOf(conditions.leftLine), right: formulaOf(conditions.rightLine) };
     // A total's own rule: not drawn where the total is empty (a group with nothing to add up).
-    const total = obj?.kind === 'field' && /^=\s*(Sum|Count|CountDistinct|Avg|Min|Max)\(/i.test(value) ? value.slice(1) : undefined;
+    // So is a field's own line in a row printed with or without records (no value when there are none).
+    const total = obj?.kind === 'field' && (/^=\s*(Sum|Count|CountDistinct|Avg|Min|Max)\(/i.test(value) || (this.ungroupedRows && value.startsWith('='))) ? value.slice(1) : undefined;
     const blankWhen = total && obj?.border && !obj.border.sides.every((side) => side > 0) ? `IsNothing(${total})` : undefined;
     // Formulas moving the object across (X position) and changing its width, in twips from its own place and size
     // (DefaultAttribute leaves them): the text moves within its box by as much (its left edge with X, its right edge

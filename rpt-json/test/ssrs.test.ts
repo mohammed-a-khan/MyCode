@@ -553,6 +553,9 @@ describe('layout conversion', () => {
     assert.match(rdl, /<Value>=Sum\(Fields!Amount\.Value\)<\/Value>/);
     // A field that is null (no records) gives the condition no result, as in Crystal: what it suppresses prints.
     assert.match(rdl, /<Hidden>=\(Not \(IsNothing\(Fields!Amount\.Value\)\)\) AndAlso /);
+    // A field's own line there is not drawn when it has no value (no records), as in Crystal.
+    const lined = { ...definition, layout: definition.layout.map((a) => a.name !== 'GroupHeaderArea1' ? a : { ...a, sections: [{ name: 'GH', height: 240, objects: [{ kind: 'field', name: 'Top', field: 'Orders.Region', position: { x: 0, y: 0 }, size: { width: 1440, height: 200 }, border: { sides: [0, 0, 1, 0] as [number, number, number, number], width: 20 } }] }] }) };
+    assert.match(convertToRdl(lined, source, { reportName: 'C' }).rdl, /<Style>=IIf\(IsNothing\(Fields!Region\.Value\), "None", "Solid"\)<\/Style>/);
   });
 
   it('leaves out a total\'s own rule where the total is empty', () => {
