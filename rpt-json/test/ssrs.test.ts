@@ -497,6 +497,21 @@ describe('layout conversion', () => {
     assert.ok(review.some((r) => /kept together on a page/.test(r.message)));
   });
 
+  it('keeps a group name set left of the rows under it in its own place', () => {
+    const definition: ReportDefinition = { ...emptyDefinition(), groups: ['Orders.Region'], layout: [
+      { name: 'GroupHeaderArea1', sections: [{ name: 'GH', height: 240, objects: [{ kind: 'field', name: 'G', field: 'Group #1 Name', position: { x: 90, y: 0 }, size: { width: 2508, height: 228 } }] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 264, objects: [
+        { kind: 'field', name: 'Name', field: 'Orders.Customer', position: { x: 390, y: 0 }, size: { width: 3690, height: 228 } },
+        { kind: 'field', name: 'Amt', field: 'Orders.Amount', position: { x: 4200, y: 0 }, size: { width: 1695, height: 228 } },
+      ] }] },
+    ] };
+    const { rdl } = convertToRdl(definition, source, { reportName: 'Out' });
+    const widths = (rdl.slice(rdl.indexOf('<TablixColumns>'), rdl.indexOf('</TablixColumns>')).match(/<Width>[^<]*/g) ?? []).map((w) => w.slice(7));
+    // A column of its own left of the rows (300 twips), so the group name stands out to their left.
+    assert.equal(widths[0], '0.208in');
+    assert.match(rdl, /<Tablix Name="Table">[\s\S]*?<Left>0.063in<\/Left>/);
+  });
+
   it('lists what reaches past the printable page or past what holds it', () => {
     const rdl = `<Report><ReportSections><ReportSection><Body><ReportItems>
       <Rectangle Name="Area"><ReportItems><Textbox Name="Wide"><Left>1in</Left><Width>3in</Width></Textbox></ReportItems><Left>0in</Left><Width>2in</Width></Rectangle>

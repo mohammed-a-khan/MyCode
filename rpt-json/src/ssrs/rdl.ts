@@ -2104,6 +2104,16 @@ class RdlBuilder {
       }
     }
 
+    // Text in a group's header or footer set further left than the first column (a group name standing out to the left
+    // of the rows under it): the table starts there, with a column of its own, so the text keeps its place.
+    {
+      const outdented = [...areas.groupHeaders.values(), ...areas.groupFooters.values()].flat()
+        .filter((s) => !s.suppressed).flatMap((s) => s.objects)
+        .filter((o) => (o.kind === 'field' || o.kind === 'text') && !o.suppressed && o.position)
+        .map((o) => o.position!.x);
+      const left = Math.min(...outdented);
+      if (outdented.length && columns[0].x - left > 144) columns = [{ x: left, width: twipsToInches(columns[0].x - left) }, ...columns];
+    }
     // A line along the rows reaching past the outer columns (a rule across the page, under a table set in from its
     // edges): the table reaches out to its ends, with an empty column on either side, so the row's border is as wide.
     {
