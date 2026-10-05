@@ -512,6 +512,30 @@ describe('layout conversion', () => {
     assert.match(rdl, /<Tablix Name="Table">[\s\S]*?<Left>0.063in<\/Left>/);
   });
 
+  it('draws every rule across the middle of a tall heading section', () => {
+    const line = (name: string, y: number) => ({ kind: 'line' as const, name, position: { x: 0, y }, size: { width: 15263, height: 0 }, border: { sides: [0, 0, 1, 0] as [number, number, number, number], color: '#000000', width: 60 } });
+    const text = (name: string, x: number, y: number, w: number) => ({ kind: 'text' as const, name, text: name, position: { x, y }, size: { width: w, height: 240 } });
+    const definition: ReportDefinition = { ...emptyDefinition(), groups: ['Orders.Region'], layout: [
+      { name: 'GroupHeaderArea1', sections: [{ name: 'GH', height: 2320, objects: [
+        text('Title', 0, 0, 14880), line('Rule1', 280),
+        text('Label', 315, 1090, 4485), { kind: 'field', name: 'Figure', field: 'Orders.Amount', position: { x: 5160, y: 1080 }, size: { width: 1620, height: 240 } },
+        line('Rule2', 1500),
+        text('HeadA', 315, 1800, 3810), text('HeadB', 5160, 1800, 1620), line('Rule3', 2210),
+      ] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [
+        { kind: 'field', name: 'Name', field: 'Orders.Customer', position: { x: 315, y: 0 }, size: { width: 3810, height: 210 } },
+        { kind: 'field', name: 'Amt', field: 'Orders.Amount', position: { x: 5160, y: 0 }, size: { width: 1620, height: 210 } },
+      ] }] },
+    ] };
+    const { rdl } = convertToRdl(definition, source, { reportName: 'Rules' });
+    const rows = rdl.split('<TablixRow>').slice(1);
+    const ruled = rows.map((r) => /<BottomBorder>\s*<Style>Solid<\/Style>\s*<Width>3.50pt/.test(r));
+    // Title | figures | headings: each ends at its rule.
+    assert.deepEqual(ruled.slice(0, 3), [true, true, true]);
+    assert.match(rows[1], /Label/);
+    assert.match(rows[2], /HeadA/);
+  });
+
   it('lists what reaches past the printable page or past what holds it', () => {
     const rdl = `<Report><ReportSections><ReportSection><Body><ReportItems>
       <Rectangle Name="Area"><ReportItems><Textbox Name="Wide"><Left>1in</Left><Width>3in</Width></Textbox></ReportItems><Left>0in</Left><Width>2in</Width></Rectangle>

@@ -1724,14 +1724,16 @@ class RdlBuilder {
   private tableRow(columns: Column[], section: SectionInfo, rowName: string, area: string, minHeight = MIN_ROW_HEIGHT, outerOnly = false, splitDone: boolean | 'below' = false): { row: XmlElement; height: number; hidden?: string; more?: { row: XmlElement; height: number }[] } {
     // Split once, at the first rule (the one under the heading's title); a rule lower down closes the headings.
     // The part below a title's rule may still end at a rule of its own (the one under the column headings).
-    const atRule = splitDone ? null : this.splitAtRule(columns, section);
+    // Below the first rule, any further rule across the middle splits the rest again (a rule between a block of figures
+    // and the column headings under it).
+    const atRule = splitDone === true ? null : this.splitAtRule(columns, section);
     const split = atRule ?? (splitDone === true ? null : this.splitBelowRule(columns, section));
     if (split) {
       // A line across the middle of the section (a rule under a heading): two rows, the upper ending at the line
       // (its bottom border), the lower starting there; the lines running down from it are the lower row's cell
       // borders, drawn as in the rows below it.
       // Above a title's rule the row is the title's alone; a row ending at a rule below it is laid out as usual.
-      const upper = this.tableRow(columns, split.upper, rowName, area, minHeight, !!atRule, true);
+      const upper = this.tableRow(columns, split.upper, rowName, area, minHeight, !!atRule && !splitDone, true);
       const lower = this.tableRow(columns, split.lower, `${rowName}_Lower`, area, minHeight, false, atRule ? 'below' : true);
       // The lower part may itself end at a rule, with an empty row after it.
       const lowerOwn = lower.height - (lower.more ?? []).reduce((h, m) => h + m.height, 0);
