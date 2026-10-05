@@ -1453,7 +1453,7 @@ export class Emitter {
         const ref = group.t === 'field' ? group.ref : undefined;
         const name = ref ? this.ctx.groupScope?.(ref) : undefined;
         if (name) scope = `, ${vbString(name)}`;
-        else this.note(`aggregates over a group that could not be matched (${ref ?? 'expression'}); check the scope`);
+        else if (name !== '') this.note(`aggregates over a group that could not be matched (${ref ?? 'expression'}); check the scope`);
         if (args.length > 2) this.note('uses a date-grouping condition in a summary; check the grouping');
       }
       return `${AGGREGATES[key]}(${inner}${scope})`;
