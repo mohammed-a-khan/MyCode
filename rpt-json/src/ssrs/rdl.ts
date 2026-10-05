@@ -418,6 +418,9 @@ class RdlBuilder {
   constructor(definition: ReportDefinition, source: DataSourceInfo, options: RdlOptions) {
     const spread = spreadFormulaColumns(definition);
     this.definition = spread.definition;
+    for (const field of this.definition.groupsKeptTogether ?? []) {
+      this.note(`Group on ${field}`, 'is kept together on a page (Crystal Keep Group Together, read from the group record); check where its pages break');
+    }
     if (spread.columns) {
       this.note('Layout', `${spread.columns} columns are placed by X position formulas (each read from the data); they are laid out side by side in their design order, so their places do not follow the data`);
     }
@@ -2225,7 +2228,9 @@ class RdlBuilder {
         el('SortExpressions', el('SortExpression', el('Value', sortValue), descending ? el('Direction', 'Descending') : null),
           // Groups sorted by a summary keep Crystal's order among equal summaries: by the group's own value.
           sortValue !== `=${expression}` ? el('SortExpression', el('Value', `=${expression}`), (fieldSort?.descending ?? groupOrder === 1) ? el('Direction', 'Descending') : null) : null),
-        el('TablixMembers', ...headerMembers[level - 1], member, ...footerMembers[level - 1]));
+        el('TablixMembers', ...headerMembers[level - 1], member, ...footerMembers[level - 1]),
+        // Keep Group Together: a group that does not fit in what is left of the page starts on the next.
+        this.definition.groupsKeptTogether?.some((g) => g.toLowerCase() === field.toLowerCase()) ? el('KeepTogether', 'true') : null);
     }
 
     const left = twipsToInches(columns[0].x);

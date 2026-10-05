@@ -1,3 +1,4 @@
+import { groupOptionByte } from '../src/crystal/model.ts';
 import { checkRdlWidths } from '../src/ssrs/widthcheck.ts';
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
@@ -478,6 +479,20 @@ describe('layout conversion', () => {
       ] },
     ] };
     assert.match(convertToRdl(sections, source, { reportName: 'S' }).rdl, /<Rectangle Name="First_Page">[\s\S]*?<PageBreak>\s*<BreakLocation>End<\/BreakLocation>/);
+  });
+
+  it('keeps a group together when its record says so', () => {
+    const hex = (h: string) => Uint8Array.from(h.match(/../g)!.map((b) => parseInt(b, 16)));
+    // The end of a group record: the options byte follows the last ffff 00000001 0000 ffff.
+    const tail = '0000000000010000ffff0000000000010000ffff000000010000ffff';
+    assert.equal(groupOptionByte(hex(`${tail}02000000000000`), 0), 2);
+    assert.equal(groupOptionByte(hex(`${tail}00000000000000`), 0), 0);
+    const definition: ReportDefinition = { ...emptyDefinition(), groups: ['Orders.Region'], groupsKeptTogether: ['Orders.Region'], layout: [
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 220, objects: [{ kind: 'field', name: 'Amt', field: 'Orders.Amount', position: { x: 0, y: 0 }, size: { width: 1440, height: 200 } }] }] },
+    ] };
+    const { rdl, review } = convertToRdl(definition, source, { reportName: 'K' });
+    assert.match(rdl, /<\/TablixMembers>\s*<KeepTogether>true<\/KeepTogether>\s*<\/TablixMember>/);
+    assert.ok(review.some((r) => /kept together on a page/.test(r.message)));
   });
 
   it('lists what reaches past the printable page or past what holds it', () => {
