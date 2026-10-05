@@ -142,7 +142,8 @@ describe('RDL generation', () => {
     assert.ok(!rdl.includes('[Order ID]'), 'only used columns are selected');
     assert.ok(rdl.includes('WHERE [Orders].[Amount] &gt; 100</CommandText>'), 'selection becomes a WHERE clause');
     assert.ok(!rdl.includes('<Filters>'), 'no dataset filter needed');
-    assert.ok(rdl.includes('<Format>C2</Format>'));
+    // A currency field left at Crystal's default format shows as a number (no currency sign).
+    assert.ok(rdl.includes('<Format>N2</Format>'));
     assert.ok(!review.some((r) => r.item === 'Data source'), 'no placeholder connection needed');
   });
 
@@ -437,6 +438,29 @@ describe('layout conversion', () => {
     const columns = (rdl.slice(rdl.indexOf('<TablixColumns>'), rdl.indexOf('</TablixColumns>')).match(/<Width>[^<]*/g) ?? []).map((w) => parseFloat(w.slice(7)));
     // Wider than the page, SSRS would print the overflow on a page of its own after every page.
     assert.ok(columns.reduce((a, b) => a + b, 0) <= 10.5 + 1e-9, `columns ${columns.join(', ')}`);
+    assert.match(checkRdlWidths(rdl), /nothing reaches past the page or what holds it/);
+  });
+
+  it('narrows and moves a subreport by its width and X position formulas', () => {
+    const fields = [{ name: 'Customer', type: 'string' as const }, ...[1, 2, 3, 4].map((i) => ({ name: `V${i}`, type: 'number' as const }))];
+    const subSource: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields }] };
+    const values = [1, 2, 3, 4].map((i) => ({ kind: 'field' as const, name: `V${i}f`, field: `T.V${i}`, position: { x: 3000 + (i - 1) * 1500, y: 0 }, size: { width: 1400, height: 200 }, align: 'right' as const }));
+    const sub: ReportDefinition = { ...emptyDefinition(), layout: [
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 220, objects: [{ kind: 'field', name: 'Nf', field: 'T.Customer', position: { x: 0, y: 0 }, size: { width: 2900, height: 200 } }, ...values] }] }] };
+    const main: ReportDefinition = { ...emptyDefinition(), page: { orientation: 'landscape', paperSize: 1 },
+      formulas: [
+        { name: 'DeltaX_Value_Formula', index: 1, kind: 'conditionalFormat', text: '{Orders.Amount} * 1440', referencedFields: ['Orders.Amount'] },
+        { name: 'DeltaWidth_Value_Formula', index: 2, kind: 'conditionalFormat', text: '-{Orders.Amount} * 2880', referencedFields: ['Orders.Amount'] },
+      ],
+      layout: [{ name: 'ReportFooterArea1', sections: [{ name: 'RF', height: 300, objects: [{ kind: 'subreport', name: 'Sub1', subreport: { index: 1, onDemand: false }, position: { x: 0, y: 0 }, size: { width: 9000, height: 300 },
+        conditions: { deltaX: { name: 'DeltaX_Value_Formula', index: 1 }, deltaWidth: { name: 'DeltaWidth_Value_Formula', index: 2 } } }] }] }] };
+    const { rdl, review } = convertToRdl(main, source, { reportName: 'Main', subreports: new Map([[1, { name: 'Sub1', links: [], definition: sub, dataSource: subSource }]]) });
+    // A column past the frame's width is hidden (Crystal cuts it off); the label column's middle is at 1500 twips.
+    assert.match(rdl, /<Hidden>=9000 \+ IIf\(IsNothing\([^<]*\) &lt; 1500<\/Hidden>/);
+    // Blank columns of 30, 60, 120, ... twips ahead of it, each shown by one bit of the move, move it across.
+    assert.match(rdl, /<Hidden>=\(\(CInt\(Math.Max\(0, [^<]*\) \/ 30\) \\ 1\) Mod 2\) = 0<\/Hidden>/);
+    assert.ok(review.some((r) => /X position and width formulas: the columns of its table past the width are hidden/.test(r.message)));
+    // The blank columns take no room where hidden: nothing reaches past the page.
     assert.match(checkRdlWidths(rdl), /nothing reaches past the page or what holds it/);
   });
 
