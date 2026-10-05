@@ -14,7 +14,7 @@ import { isBasicSyntax } from '../src/ssrs/basic.ts';
 import { chartStyle, convertToRdl, fixedCondition, dateFormatString, formatFor, numberFormatString, scopeOutsideRegion, substituteCommandParameters } from '../src/ssrs/rdl.ts';
 import { classifyAreas } from '../src/crystal/areas.ts';
 import { buildHouseReport, readHouseTemplate } from '../src/ssrs/house.ts';
-import { child, childElements, descendants, parseXml } from '../src/ssrs/xml.ts';
+import { child, childElements, descendants, parseXml, textOf, type XmlElement } from '../src/ssrs/xml.ts';
 
 const ctx: FormulaContext = {
   field: (table, column) => (table === 'Orders' ? column.replace(/\W/g, '_') : undefined),
@@ -205,6 +205,27 @@ describe('RDL generation', () => {
   });
 });
 
+/** Runs of static rows next to a group whose RepeatOnNewPage values differ (SSRS rejects them). */
+function mixedRepeat(rdl: string): number {
+  let mixed = 0;
+  const walk = (members: XmlElement | undefined) => {
+    if (!members) return;
+    let run: boolean[] = [];
+    const flush = () => {
+      if (new Set(run).size > 1) mixed++;
+      run = [];
+    };
+    for (const member of childElements(members, 'TablixMember')) {
+      if (child(member, 'Group')) flush();
+      else run.push(textOf(child(member, 'RepeatOnNewPage')) === 'true');
+      walk(child(member, 'TablixMembers'));
+    }
+    flush();
+  };
+  for (const e of descendants(parseXml(rdl))) if (e.name === 'TablixRowHierarchy') walk(child(e, 'TablixMembers'));
+  return mixed;
+}
+
 // Optional: convert real reports with RPT_SAMPLES_DIR=/path/to/rpt/files npm test
 const samplesDir = process.env.RPT_SAMPLES_DIR;
 describe('real .rpt samples to RDL', { skip: !samplesDir && 'set RPT_SAMPLES_DIR to enable' }, () => {
@@ -216,6 +237,8 @@ describe('real .rpt samples to RDL', { skip: !samplesDir && 'set RPT_SAMPLES_DIR
       for (const report of reports) {
         assert.ok(report.rdl.length > 0, `${report.fileName} was generated`);
         assertBalancedXml(report.rdl);
+        // SSRS refuses (on upload) a table whose heading rows next to a group do not all repeat on each page alike.
+        assert.equal(mixedRepeat(report.rdl), 0, `${report.fileName}: heading rows disagree on RepeatOnNewPage`);
         // Nothing past the printable page, nor a thousandth past a cell (SSRS would add a page after every page).
         const widths = checkRdlWidths(report.rdl);
         assert.ok(!/past the printable page|body wider/.test(widths), `${report.fileName}: ${widths}`);
@@ -556,12 +579,16 @@ describe('layout conversion', () => {
     const header = rdl.slice(rdl.indexOf('<PageHeader>'), rdl.indexOf('</PageHeader>'));
     assert.match(header, /Name="Title"/);
     assert.ok(!/Summary|HeadName/.test(header), 'only the title stays in the page header');
+    // The block prints once, above the table; the headings start the table and repeat on every page (all its heading
+    // rows alike, as SSRS requires).
+    const body = rdl.slice(rdl.indexOf('<Body>'), rdl.indexOf('</Body>'));
+    assert.ok(body.indexOf('Name="Summary"') >= 0 && body.indexOf('Name="Summary"') < body.indexOf('<Tablix Name='), 'the block is above the table');
     const rows = rdl.slice(rdl.indexOf('<TablixRows>'), rdl.indexOf('</TablixRows>')).split('<TablixRow>').slice(1);
-    assert.match(rows[0], /Name="Summary"/);
-    assert.match(rows[1], /Name="HeadName"[\s\S]*Name="HeadAmount"/);
-    // The block prints once; the headings on every page.
-    const members = rdl.slice(rdl.indexOf('<TablixRowHierarchy>'));
-    assert.match(members, /<TablixMembers>\s*<TablixMember>\s*<KeepWithGroup>After<\/KeepWithGroup>\s*<\/TablixMember>\s*<TablixMember>\s*<KeepWithGroup>After<\/KeepWithGroup>\s*<RepeatOnNewPage>true/);
+    assert.match(rows[0], /Name="HeadName"[\s\S]*Name="HeadAmount"/);
+    const hierarchy = rdl.slice(rdl.indexOf('<TablixRowHierarchy>'), rdl.indexOf('<Group Name="Details"'));
+    const statics = hierarchy.split('<TablixMember>').slice(1).filter((m) => /KeepWithGroup/.test(m));
+    assert.ok(statics.length > 0 && statics.every((m) => /<RepeatOnNewPage>true/.test(m)), 'every heading row repeats');
+    assert.equal(mixedRepeat(rdl), 0);
   });
 
   it('lists what reaches past the printable page or past what holds it', () => {
