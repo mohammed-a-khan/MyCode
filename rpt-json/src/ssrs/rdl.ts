@@ -421,7 +421,7 @@ class RdlBuilder {
     const spread = spreadFormulaColumns(definition);
     this.definition = spread.definition;
     for (const field of this.definition.groupsKeptTogether ?? []) {
-      this.note(`Group on ${field}`, 'is kept together on a page (Crystal Keep Group Together, read from the group record): each of its values starts on a new page, as SSRS does not reliably move a group that does not fit; check where its pages break');
+      this.note(`Group on ${field}`, 'is kept together on a page (Crystal Keep Group Together, read from the group record): a value that does not fit in what is left of a page starts the next; SSRS does this in print and PDF, its web viewer may not');
     }
     if (spread.columns) {
       this.note('Layout', `${spread.columns} columns are placed by X position formulas (each read from the data); they are laid out side by side in their design order, so their places do not follow the data`);
@@ -897,8 +897,15 @@ class RdlBuilder {
   }
 
   /** Border and background elements for an item's Style. */
-  private borderStyle(border: BorderInfo | undefined, extra: { top?: boolean; bottom?: boolean; left?: boolean; right?: boolean } = {}, formulas: { top?: string; bottom?: string; left?: string; right?: string } = {}): XmlElement[] {
-    const side = (name: string, style: number, formula?: string) => {
+  private borderStyle(border: BorderInfo | undefined, extra: { top?: boolean; bottom?: boolean; left?: boolean; right?: boolean } = {}, formulas: { top?: string; bottom?: string; left?: string; right?: string } = {}, blankWhen?: string): XmlElement[] {
+    const side = (name: string, style: number, formula?: string, own = false) => {
+      if (!formula && own && blankWhen && BORDER_STYLES[style]) {
+        // The object's own line, left out where its value is empty.
+        return el(name,
+          el('Color', border?.color ?? 'Black'),
+          el('Style', `=IIf(${blankWhen}, "None", "${BORDER_STYLES[style]}")`),
+          el('Width', `${Math.max(0.25, ((border?.width ?? 20) / 20)).toFixed(2)}pt`));
+      }
       if (formula) {
         // A line style formula decides the side's line; DefaultAttribute keeps the object's own.
         return el(name,
@@ -920,14 +927,14 @@ class RdlBuilder {
     const left = extra.left && !sideLeft ? 1 : sideLeft;
     const right = extra.right && !sideRight ? 1 : sideRight;
     const conditional = !!(formulas.top || formulas.bottom || formulas.left || formulas.right);
-    const same = left === right && right === top && top === bottom && !conditional;
+    const same = left === right && right === top && top === bottom && !conditional && !blankWhen;
     const out: XmlElement[] = [];
     if (same && left > 0) out.push(side('Border', left)!);
     else {
       out.push(el('Border', el('Style', 'None')));
       if (!same) {
-        for (const [name, style, formula] of [['TopBorder', top, formulas.top], ['BottomBorder', bottom, formulas.bottom], ['LeftBorder', left, formulas.left], ['RightBorder', right, formulas.right]] as const) {
-          const e = side(name, style, formula);
+        for (const [name, style, formula, own] of [['TopBorder', top, formulas.top, sideTop], ['BottomBorder', bottom, formulas.bottom, sideBottom], ['LeftBorder', left, formulas.left, sideLeft], ['RightBorder', right, formulas.right, sideRight]] as const) {
+          const e = side(name, style, formula, own > 0);
           if (e) out.push(e);
         }
       }
@@ -950,6 +957,9 @@ class RdlBuilder {
     }
     const formulaOf = (ref: FormulaRef | undefined) => (ref ? this.conditionExpression(ref, false, item, scope)?.slice(1) : undefined);
     const lineFormulas = { top: formulaOf(conditions.topLine), bottom: formulaOf(conditions.bottomLine), left: formulaOf(conditions.leftLine), right: formulaOf(conditions.rightLine) };
+    // A total's own rule: not drawn where the total is empty (a group with nothing to add up).
+    const total = obj?.kind === 'field' && /^=\s*(Sum|Count|CountDistinct|Avg|Min|Max)\(/i.test(value) ? value.slice(1) : undefined;
+    const blankWhen = total && obj?.border && !obj.border.sides.every((side) => side > 0) ? `IsNothing(${total})` : undefined;
     // Formulas moving the object across (X position) and changing its width, in twips from its own place and size
     // (DefaultAttribute leaves them): the text moves within its box by as much (its left edge with X, its right edge
     // with X and the width), from where the object is in its cell (not the capped padding), in whole points (a size
@@ -988,7 +998,7 @@ class RdlBuilder {
       box ? el('Width', inches(box.width)) : null,
       hidden || suppress ? el('Visibility', el('Hidden', hidden && suppress ? `=(${hidden.slice(1)}) OrElse (${suppress.slice(1)})` : (hidden ?? suppress)!)) : null,
       // Crystal draws text right up to the object's edges: SSRS's default 2pt padding would make it wrap sooner.
-      el('Style', ...this.borderStyle(border, lines, lineFormulas),
+      el('Style', ...this.borderStyle(border, lines, lineFormulas, blankWhen),
         // Crystal keeps a text object's text a little inside its own border.
         el('PaddingLeft', deltaX
           ? `=CStr(CInt(Math.Max(0, ${placeLeft + (framed ? 80 : 0)} + ${shift(deltaX)}) / 20)) & "pt"`
@@ -1742,7 +1752,12 @@ class RdlBuilder {
       return { row: upper.row, height: upper.height + lower.height, hidden: upper.hidden, more: [{ row: lower.row, height: lowerOwn }, ...(lower.more ?? [])] };
     }
     const suppress = section.conditions?.suppress;
-    const hidden = suppress ? this.conditionExpression(suppress, false, `Section ${section.name}`) : undefined;
+    let hidden = suppress ? this.conditionExpression(suppress, false, `Section ${section.name}`) : undefined;
+    if (!hidden && blankRows.has(section) && section.objects[0]) {
+      // A message's own row: hidden where the message is blank.
+      const { value } = this.objectValue(section.objects[0], 'row');
+      if (value.startsWith('=')) hidden = `=IsNothing(${value.slice(1)}) OrElse Len(Trim(CStr(${value.slice(1)}))) = 0`;
+    }
     const background = section.conditions?.backColor ? this.conditionExpression(section.conditions.backColor, true, `Section ${section.name}`) : undefined;
     const sectionHeight = section.height !== undefined ? twipsToInches(section.height) : 0;
     const tableLeft = columns[0].x;
@@ -2207,10 +2222,8 @@ class RdlBuilder {
       .map((s) => ({ ...s, expression: this.fieldObjectValue(s.field, 'row', 'Record sort').expression }))
       .filter((s) => s.expression !== 'Nothing');
     const summarySort = sorts.find((s) => s.bySummary);
-    // A group kept together (Keep Group Together) starts each of its values on a new page: SSRS honours a group's
-    // KeepTogether only now and then (not where outer groups repeat their headers on each page).
-    const pageBreak = (sections: SectionInfo[] | undefined, footer?: SectionInfo[], keptTogether = false) => {
-      const before = keptTogether || (sections ?? []).some((s) => s.conditions?.newPageBefore || s.newPageBefore);
+    const pageBreak = (sections: SectionInfo[] | undefined, footer?: SectionInfo[]) => {
+      const before = (sections ?? []).some((s) => s.conditions?.newPageBefore || s.newPageBefore);
       const after = [...(sections ?? []), ...(footer ?? [])].some((s) => s.conditions?.newPageAfter || s.newPageAfter);
       return before || after ? el('PageBreak', el('BreakLocation', before && after ? 'StartAndEnd' : before ? 'Between' : 'End')) : null;
     };
@@ -2257,7 +2270,7 @@ class RdlBuilder {
       member = el('TablixMember',
         el('Group', { Name: this.groupNames[level - 1] },
           el('GroupExpressions', el('GroupExpression', `=${expression}`)),
-          pageBreak(areas.groupHeaders.get(level), areas.groupFooters.get(level), this.definition.groupsKeptTogether?.some((g) => g.toLowerCase() === field.toLowerCase())),
+          pageBreak(areas.groupHeaders.get(level), areas.groupFooters.get(level)),
           filters.length ? el('Filters', ...filters) : null),
         el('SortExpressions', el('SortExpression', el('Value', sortValue), descending ? el('Direction', 'Descending') : null),
           // Groups sorted by a summary keep Crystal's order among equal summaries: by the group's own value.
@@ -2651,6 +2664,19 @@ class RdlBuilder {
    * The page header section shown on page 1 only, where it is the only conditional one and the sections after it all
    * print on every page with something to show (the column headings); -1 otherwise.
    */
+  /**
+   * A formula field giving a message only on some rows ("if ... then <text>", with no final else): blank on the others.
+   */
+  private isBlankMessage(o: ReportObject): boolean {
+    if (o.kind !== 'field' || !o.field?.startsWith('@')) return false;
+    const formula = this.definition.formulas.find((f) => f.kind === 'formula' && f.name.toLowerCase() === o.field!.slice(1).toLowerCase());
+    const text = (formula?.text ?? '').replace(/"[^"]*"|'[^']*'/g, '""').toLowerCase();
+    if (!/^\s*if\b/.test(text) || formula?.valueType && !['string', 'memo'].includes(formula.valueType)) return false;
+    const thens = (text.match(/\bthen\b/g) ?? []).length;
+    const elses = (text.match(/\belse\b/g) ?? []).length;
+    return thens > elses;
+  }
+
   private pageOneSection(sections: SectionInfo[]): number {
     const textOf = (s: SectionInfo) => {
       const ref = s.conditions?.suppress;
@@ -2740,7 +2766,7 @@ class RdlBuilder {
       .filter((s) => !s.suppressed || s.conditions?.suppress)
       .map((s) => this.clipSpanning(s));
     // Table sections: an object shown only on a condition and laid across a row's other fields gets a row of its own.
-    const tableShown = (sections: SectionInfo[]) => shown(sections).flatMap(splitConditionalSpans);
+    const tableShown = (sections: SectionInfo[]) => shown(sections).flatMap((s) => splitConditionalSpans(s, (o) => this.isBlankMessage(o)));
     const levels = (map: Map<number, SectionInfo[]>) => new Map([...map].map(([level, sections]) => [level, tableShown(sections)]));
     return {
       pageHeader: shown(areas.pageHeader), pageFooter: shown(areas.pageFooter),
@@ -3708,28 +3734,34 @@ function paddedCentred(obj: ReportObject): boolean {
  * into its place. It gets a row of its own just after the section's, shown on the same condition. A section with
  * a suppress condition of its own is left as it is.
  */
-function splitConditionalSpans(section: SectionInfo): SectionInfo[] {
+function splitConditionalSpans(section: SectionInfo, blankMessage: (o: ReportObject) => boolean = () => false): SectionInfo[] {
   if (section.conditions?.suppress) return [section];
   const cells = section.objects.filter((o) => o.kind === 'field' || o.kind === 'text');
   const left = (o: ReportObject) => o.position?.x ?? 0;
   const top = (o: ReportObject) => o.position?.y ?? 0;
   const sameLine = (a: ReportObject, b: ReportObject) => top(a) < top(b) + (b.size?.height ?? 0) && top(b) < top(a) + (a.size?.height ?? 0);
-  const spanning = cells.filter((o) => o.conditions?.suppress && !o.suppressed
+  // Shown on a condition: a suppress formula, or a message formula that is blank but where it applies.
+  const spanning = cells.filter((o) => (o.conditions?.suppress || blankMessage(o)) && !o.suppressed
     && cells.filter((q) => q !== o && sameLine(o, q) && left(q) > left(o) + 144 && left(q) < left(o) + (o.size?.width ?? 0)).length >= 2);
   if (!spanning.length || spanning.length === cells.length) return [section];
   return [
     { ...section, objects: section.objects.filter((o) => !spanning.includes(o)) },
     ...spanning.map((o, i) => {
-      const { suppress, ...rest } = o.conditions!;
-      return messageSection({
+      const { suppress, ...rest } = o.conditions ?? {};
+      const row = messageSection({
         name: `${section.name}_Shown${i + 1}`,
         height: o.size?.height ?? MIN_ROW_HEIGHT * 1440,
-        conditions: { suppress: suppress! },
+        ...(suppress ? { conditions: { suppress } } : {}),
         objects: [{ ...o, position: { x: left(o), y: 0 }, conditions: Object.keys(rest).length ? rest : undefined }],
       });
+      if (!suppress) blankRows.add(row);
+      return row;
     }),
   ];
 }
+
+/** Rows made by splitConditionalSpans for a message formula: hidden where the message is blank. */
+const blankRows = new WeakSet<SectionInfo>();
 
 /** Rows made by splitConditionalSpans: their message spans the columns, so it does not decide where they are. */
 const messageSections = new WeakSet<SectionInfo>();

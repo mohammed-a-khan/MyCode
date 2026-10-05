@@ -515,9 +515,31 @@ describe('layout conversion', () => {
     ] };
     const { rdl, review } = convertToRdl(definition, source, { reportName: 'K' });
     assert.match(rdl, /<\/TablixMembers>\s*<KeepTogether>true<\/KeepTogether>\s*<\/TablixMember>/);
-    // Each value on a new page as well (SSRS does not reliably keep a group together).
-    assert.match(rdl, /<Group Name="[^"]*Region[^"]*">[\s\S]*?<PageBreak>\s*<BreakLocation>Between<\/BreakLocation>/);
+    // No page break of its own: a value moves to the next page only when it does not fit (as Crystal does).
+    assert.ok(!/<PageBreak>/.test(rdl));
     assert.ok(review.some((r) => /kept together on a page/.test(r.message)));
+  });
+
+  it('gives a message shown on some rows only a row of its own, hidden where it is blank', () => {
+    const at = (name: string, field: string, x: number, width: number) => ({ kind: 'field', name, field, position: { x, y: 0 }, size: { width, height: 200 } });
+    const definition: ReportDefinition = { ...emptyDefinition(), groups: ['Orders.Region'],
+      formulas: [{ name: 'Note', kind: 'formula', text: 'if {Orders.Amount} = 0 then "NOTHING TO SHOW"', referencedFields: ['Orders.Amount'], valueType: 'string' }],
+      layout: [{ name: 'DetailArea1', sections: [{ name: 'D', height: 220, objects: [
+        at('Who', 'Orders.Customer', 1200, 3000), at('Msg', '@Note', 300, 6900), at('Amt', 'Orders.Amount', 4500, 1500), at('Amt2', 'Orders.Amount', 6300, 1500)] }] }] };
+    const { rdl } = convertToRdl(definition, source, { reportName: 'M' });
+    assert.match(rdl, /<Hidden>=IsNothing\(Fields!F_Note\.Value\) OrElse Len\(Trim\(CStr\(Fields!F_Note\.Value\)\)\) = 0<\/Hidden>/);
+    assert.match(rdl, /<Value>=Fields!F_Note\.Value<\/Value>[\s\S]*?<ColSpan>\d<\/ColSpan>/);
+    // One with a final else is a value on every row: it stays where it is.
+    definition.formulas[0].text = 'if {Orders.Amount} = 0 then "NOTHING TO SHOW" else ""';
+    assert.ok(!/Len\(Trim/.test(convertToRdl(definition, source, { reportName: 'M' }).rdl));
+  });
+
+  it('leaves out a total\'s own rule where the total is empty', () => {
+    const definition: ReportDefinition = { ...emptyDefinition(), groups: ['Orders.Region'], layout: [
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 220, objects: [{ kind: 'field', name: 'Amt', field: 'Orders.Amount', position: { x: 0, y: 0 }, size: { width: 1440, height: 200 } }] }] },
+      { name: 'GroupFooterArea1', sections: [{ name: 'GF', height: 300, objects: [{ kind: 'field', name: 'Tot', field: 'Sum of Orders.Amount', position: { x: 0, y: 60 }, size: { width: 1440, height: 200 }, border: { sides: [0, 0, 1, 0], width: 20 } }] }] },
+    ] };
+    assert.match(convertToRdl(definition, source, { reportName: 'T' }).rdl, /<TopBorder>[\s\S]*?<Style>=IIf\(IsNothing\(Sum\(Fields!Amount\.Value\)\), "None", "Solid"\)<\/Style>/);
   });
 
   it('keeps a group name set left of the rows under it in its own place', () => {
