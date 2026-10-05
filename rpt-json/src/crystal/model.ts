@@ -415,6 +415,8 @@ export interface ReportDefinition {
   /** Each report group's order: 0 ascending, 1 descending, 2 original (as the records come). */
   groupSorts?: { field: string; order: 0 | 1 | 2 }[];
   /** A group whose name is a formula's value ("Use a formula as group name"). */
+  /** Fields of the groups kept together on a page (Keep Group Together), by their option byte. */
+  groupsKeptTogether?: string[];
   groupNameFormulas?: { field: string; formula: string }[];
   runningTotals?: RunningTotal[];
   summarizedFields: string[];
@@ -1067,6 +1069,16 @@ function buildLayout(records: RecordNode[]): AreaInfo[] {
   return areas;
 }
 
+/** The group options byte: the one after the last ff ff 00 00 00 01 00 00 ff ff in a group record. */
+export function groupOptionByte(bytes: Uint8Array, from: number): number | undefined {
+  const marker = [0xff, 0xff, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0xff, 0xff];
+  let found: number | undefined;
+  for (let i = from; i + marker.length < bytes.length; i++) {
+    if (marker.every((b, k) => bytes[i + k] === b) && bytes[i + marker.length] !== 0xff) found = i + marker.length;
+  }
+  return found === undefined ? undefined : bytes[found];
+}
+
 export function buildReportDefinition(records: RecordNode[]): ReportDefinition {
   const report: ReportDefinition = {
     saveInfo: {},
@@ -1158,6 +1170,10 @@ export function buildReportDefinition(records: RecordNode[]): ReportDefinition {
     const named = ownStrings(node).map((t) => t.replace(/^\{|\}$/g, '')).find((t) => t.startsWith('@') && !/^@Group #\d+/i.test(t)
       && report.formulas.some((f) => f.kind === 'formula' && f.name.toLowerCase() === t.slice(1).toLowerCase()));
     if (named) report.groupNameFormulas.push({ field: field.text, formula: named.slice(1) });
+    // Near the record's end, after the marker ffff 00000001 0000 ffff, a byte of group options: 0 normally; 2 on a
+    // group Crystal moves whole to the next page when it does not fit (Keep Group Together).
+    const options = groupOptionByte(bytes, field.length);
+    if (options !== undefined && (options & 2)) (report.groupsKeptTogether ??= []).push(field.text);
     // Group: field, 6 bytes, "Others" label, Top N count (u16), keep-others flag (u16).
     const others = readString(bytes, field.length + 6);
     const at = field.length + 6 + (others?.length ?? 0);
