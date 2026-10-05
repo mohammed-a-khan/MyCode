@@ -1758,6 +1758,21 @@ class RdlBuilder {
       const { value } = this.objectValue(section.objects[0], 'row');
       if (value.startsWith('=')) hidden = `=IsNothing(${value.slice(1)}) OrElse Len(Trim(CStr(${value.slice(1)}))) = 0`;
     }
+    const messages = messageRows.get(section);
+    if (messages && !section.objects.some((o) => o.kind === 'text' && !o.suppressed && (o.text ?? '').trim())) {
+      // The row a message was laid over, showing nothing else where the message shows: the message's row stands
+      // in for it (Crystal prints the message on its line), so it is not left as a blank line above.
+      const blank = (o: ReportObject) => {
+        const { value } = this.objectValue(o, 'row');
+        return value.startsWith('=') ? `Len(Trim(CStr(${value.slice(1)}))) = 0` : undefined;
+      };
+      const shows = messages.map(blank);
+      const empty = section.objects.filter((o) => o.kind === 'field' && !o.suppressed).map(blank);
+      if (shows.every(Boolean) && empty.every(Boolean)) {
+        const own = [`Not (${shows.join(' AndAlso ')})`, ...empty].join(' AndAlso ');
+        hidden = hidden ? `=(${hidden.slice(1)}) OrElse (${own})` : `=${own}`;
+      }
+    }
     const background = section.conditions?.backColor ? this.conditionExpression(section.conditions.backColor, true, `Section ${section.name}`) : undefined;
     const sectionHeight = section.height !== undefined ? twipsToInches(section.height) : 0;
     const tableLeft = columns[0].x;
@@ -3744,8 +3759,11 @@ function splitConditionalSpans(section: SectionInfo, blankMessage: (o: ReportObj
   const spanning = cells.filter((o) => (o.conditions?.suppress || blankMessage(o)) && !o.suppressed
     && cells.filter((q) => q !== o && sameLine(o, q) && left(q) > left(o) + 144 && left(q) < left(o) + (o.size?.width ?? 0)).length >= 2);
   if (!spanning.length || spanning.length === cells.length) return [section];
+  const rest: SectionInfo = { ...section, objects: section.objects.filter((o) => !spanning.includes(o)) };
+  const messages = spanning.filter((o) => !o.conditions?.suppress);
+  if (messages.length) messageRows.set(rest, messages);
   return [
-    { ...section, objects: section.objects.filter((o) => !spanning.includes(o)) },
+    rest,
     ...spanning.map((o, i) => {
       const { suppress, ...rest } = o.conditions ?? {};
       const row = messageSection({
@@ -3762,6 +3780,8 @@ function splitConditionalSpans(section: SectionInfo, blankMessage: (o: ReportObj
 
 /** Rows made by splitConditionalSpans for a message formula: hidden where the message is blank. */
 const blankRows = new WeakSet<SectionInfo>();
+/** The row a message was laid over, and the message: Crystal prints the message on that row's line. */
+const messageRows = new WeakMap<SectionInfo, ReportObject[]>();
 
 /** Rows made by splitConditionalSpans: their message spans the columns, so it does not decide where they are. */
 const messageSections = new WeakSet<SectionInfo>();
