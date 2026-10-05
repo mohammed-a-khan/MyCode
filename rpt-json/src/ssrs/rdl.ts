@@ -2079,7 +2079,7 @@ class RdlBuilder {
     const anyContent = [...areas.groupHeaders.values(), ...areas.groupFooters.values(), areas.detail].flat().some((s) => s.objects.length > 0);
     if (columns.length === 0 && anyContent) {
       // No tabular columns at all (a form-style report): one column spanning the content.
-      const objects = [...areas.groupHeaders.values(), ...areas.groupFooters.values(), areas.detail].flat().flatMap((s) => s.objects);
+      const objects = [...(areas.headingSections ?? []).map((h) => h.section), ...areas.groupHeaders.values(), ...areas.groupFooters.values(), areas.detail].flat().flatMap((s) => s.objects);
       const left = Math.min(...objects.map((o) => o.position?.x ?? 0));
       const right = Math.max(...objects.map((o) => (o.position?.x ?? 0) + (o.size?.width ?? 1440)));
       columns = [{ x: left, width: Math.max(twipsToInches(right - left), 1) }];
@@ -2124,17 +2124,29 @@ class RdlBuilder {
       const tableLeft = columns[0].x;
       const last = columns[columns.length - 1];
       const tableRight = last.x + inchesToTwips(last.width);
-      const rowLines = [...areas.groupHeaders.values(), ...areas.groupFooters.values(), areas.detail].flat().flatMap((s) => s.objects)
+      const rowLines = [...(areas.headingSections ?? []).map((h) => h.section), ...areas.groupHeaders.values(), ...areas.groupFooters.values(), areas.detail].flat().flatMap((s) => s.objects)
         .filter((o) => o.kind === 'line' && !this.runOn.has(o) && !(o.size?.height) && (o.size?.width ?? 0) >= (tableRight - tableLeft) * 0.8);
       const lineLeft = Math.min(...rowLines.map((o) => o.position?.x ?? 0));
       const lineRight = Math.max(...rowLines.map((o) => (o.position?.x ?? 0) + (o.size?.width ?? 0)));
       // Only where nothing else of the table would fall in the new column (it holds the line alone).
-      const others = [...areas.groupHeaders.values(), ...areas.groupFooters.values(), areas.detail].flat().flatMap((s) => s.objects)
+      const others = [...(areas.headingSections ?? []).map((h) => h.section), ...areas.groupHeaders.values(), ...areas.groupFooters.values(), areas.detail].flat().flatMap((s) => s.objects)
         .filter((o) => o.kind !== 'line');
       const clearLeft = others.every((o) => (o.position?.x ?? 0) >= tableLeft - 144);
       const clearRight = others.every((o) => (o.position?.x ?? 0) + (o.size?.width ?? 0) <= tableRight + 144);
-      if (rowLines.length && clearLeft && tableLeft - lineLeft > 144) columns = [{ x: lineLeft, width: twipsToInches(tableLeft - lineLeft) }, ...columns];
-      if (rowLines.length && clearRight && lineRight - tableRight > 144) columns = [...columns, { x: tableRight, width: twipsToInches(lineRight - tableRight) }];
+      // Where page headings laid out in the table would fall in the new column, the outer column reaches out to the
+      // line instead.
+      const widen = !!areas.headingSections;
+      if (rowLines.length && tableLeft - lineLeft > 144 && (clearLeft || widen)) {
+        columns = clearLeft
+          ? [{ x: lineLeft, width: twipsToInches(tableLeft - lineLeft) }, ...columns]
+          : [{ x: lineLeft, width: columns[0].width + twipsToInches(tableLeft - lineLeft) }, ...columns.slice(1)];
+      }
+      if (rowLines.length && lineRight - tableRight > 144 && (clearRight || widen)) {
+        const last = columns[columns.length - 1];
+        columns = clearRight
+          ? [...columns, { x: tableRight, width: twipsToInches(lineRight - tableRight) }]
+          : [...columns.slice(0, -1), { ...last, width: last.width + twipsToInches(lineRight - tableRight) }];
+      }
     }
 
     const rows: XmlElement[] = [];
@@ -3261,7 +3273,20 @@ class RdlBuilder {
       const sections = areas.pageHeader;
       const { suppress: _, ...conditions } = sections[pageOneAt].conditions ?? {};
       areas.reportHeader = [{ ...sections[pageOneAt], conditions }, ...areas.reportHeader];
-      areas.headingSections = sections.slice(pageOneAt + 1).map((section) => ({ section, repeat: true }));
+      // A rule along the top of a heading section is the bottom border of a thin row of its own (a table's top border
+      // is drawn half outside it, so thinner than the other rules).
+      areas.headingSections = sections.slice(pageOneAt + 1).flatMap((section) => {
+        const rule = section.objects.find((o) => o.kind === 'line' && !(o.size?.height) && (o.position?.y ?? 0) <= 60 && (o.size?.width ?? 0) > 0);
+        if (!rule) return [{ section, repeat: true }];
+        const cut = Math.max((rule.position?.y ?? 0) + Math.ceil((rule.border?.width ?? 20) / 2), 44);
+        const ruleRow: SectionInfo = { name: `${section.name}_Rule`, height: cut, objects: [{ ...rule, position: { x: rule.position?.x ?? 0, y: cut } }] };
+        const rest: SectionInfo = {
+          ...section,
+          height: Math.max((section.height ?? cut) - cut, 44),
+          objects: section.objects.filter((o) => o !== rule).map((o) => ({ ...o, position: { x: o.position?.x ?? 0, y: Math.max((o.position?.y ?? 0) - cut, 0) } })),
+        };
+        return [{ section: ruleRow, repeat: true }, { section: rest, repeat: true }];
+      });
       areas.pageHeader = sections.slice(0, pageOneAt);
     }
     // Page-header text objects aligned with detail columns are column headings: they go into the table.

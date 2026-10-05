@@ -584,7 +584,9 @@ describe('layout conversion', () => {
     const body = rdl.slice(rdl.indexOf('<Body>'), rdl.indexOf('</Body>'));
     assert.ok(body.indexOf('Name="Summary"') >= 0 && body.indexOf('Name="Summary"') < body.indexOf('<Tablix Name='), 'the block is above the table');
     const rows = rdl.slice(rdl.indexOf('<TablixRows>'), rdl.indexOf('</TablixRows>')).split('<TablixRow>').slice(1);
-    assert.match(rows[0], /Name="HeadName"[\s\S]*Name="HeadAmount"/);
+    // The rule at the headings' top is a thin row's bottom border (a table's own top border is drawn thinner).
+    assert.match(rows[0], /<BottomBorder>\s*<Style>Solid<\/Style>\s*<Width>3.50pt/);
+    assert.ok(rows.some((r) => /Name="HeadName"[\s\S]*Name="HeadAmount"/.test(r)));
     const hierarchy = rdl.slice(rdl.indexOf('<TablixRowHierarchy>'), rdl.indexOf('<Group Name="Details"'));
     const statics = hierarchy.split('<TablixMember>').slice(1).filter((m) => /KeepWithGroup/.test(m));
     assert.ok(statics.length > 0 && statics.every((m) => /<RepeatOnNewPage>true/.test(m)), 'every heading row repeats');
