@@ -419,7 +419,7 @@ class RdlBuilder {
     const spread = spreadFormulaColumns(definition);
     this.definition = spread.definition;
     for (const field of this.definition.groupsKeptTogether ?? []) {
-      this.note(`Group on ${field}`, 'is kept together on a page (Crystal Keep Group Together, read from the group record); check where its pages break');
+      this.note(`Group on ${field}`, 'is kept together on a page (Crystal Keep Group Together, read from the group record): each of its values starts on a new page, as SSRS does not reliably move a group that does not fit; check where its pages break');
     }
     if (spread.columns) {
       this.note('Layout', `${spread.columns} columns are placed by X position formulas (each read from the data); they are laid out side by side in their design order, so their places do not follow the data`);
@@ -2175,8 +2175,10 @@ class RdlBuilder {
       .map((s) => ({ ...s, expression: this.fieldObjectValue(s.field, 'row', 'Record sort').expression }))
       .filter((s) => s.expression !== 'Nothing');
     const summarySort = sorts.find((s) => s.bySummary);
-    const pageBreak = (sections: SectionInfo[] | undefined, footer?: SectionInfo[]) => {
-      const before = (sections ?? []).some((s) => s.conditions?.newPageBefore || s.newPageBefore);
+    // A group kept together (Keep Group Together) starts each of its values on a new page: SSRS honours a group's
+    // KeepTogether only now and then (not where outer groups repeat their headers on each page).
+    const pageBreak = (sections: SectionInfo[] | undefined, footer?: SectionInfo[], keptTogether = false) => {
+      const before = keptTogether || (sections ?? []).some((s) => s.conditions?.newPageBefore || s.newPageBefore);
       const after = [...(sections ?? []), ...(footer ?? [])].some((s) => s.conditions?.newPageAfter || s.newPageAfter);
       return before || after ? el('PageBreak', el('BreakLocation', before && after ? 'StartAndEnd' : before ? 'Between' : 'End')) : null;
     };
@@ -2223,7 +2225,7 @@ class RdlBuilder {
       member = el('TablixMember',
         el('Group', { Name: this.groupNames[level - 1] },
           el('GroupExpressions', el('GroupExpression', `=${expression}`)),
-          pageBreak(areas.groupHeaders.get(level), areas.groupFooters.get(level)),
+          pageBreak(areas.groupHeaders.get(level), areas.groupFooters.get(level), this.definition.groupsKeptTogether?.some((g) => g.toLowerCase() === field.toLowerCase())),
           filters.length ? el('Filters', ...filters) : null),
         el('SortExpressions', el('SortExpression', el('Value', sortValue), descending ? el('Direction', 'Descending') : null),
           // Groups sorted by a summary keep Crystal's order among equal summaries: by the group's own value.
