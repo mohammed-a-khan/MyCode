@@ -536,6 +536,34 @@ describe('layout conversion', () => {
     assert.match(rows[2], /HeadA/);
   });
 
+  it('turns a page-1-only page header block and the headings after it into heading rows', () => {
+    const rule = (name: string, y: number) => ({ kind: 'line' as const, name, position: { x: 0, y }, size: { width: 9000, height: 0 }, border: { sides: [0, 0, 1, 0] as [number, number, number, number], color: '#000000', width: 60 } });
+    const text = (name: string, x: number, y: number, w = 1400) => ({ kind: 'text' as const, name, text: name, position: { x, y }, size: { width: w, height: 240 } });
+    const definition: ReportDefinition = { ...emptyDefinition(),
+      formulas: [{ name: 'Section_Visibility', index: 1, kind: 'conditionalFormat', text: 'pagenumber <> 1', referencedFields: [] }],
+      layout: [
+        { name: 'PageHeaderArea1', sections: [
+          { name: 'PH1', height: 441, objects: [text('Title', 0, 0, 9000), rule('TitleRule', 340)] },
+          { name: 'PH2', height: 1150, conditions: { suppress: { name: 'Section_Visibility', index: 1 } }, objects: [text('Summary', 360, 840, 3000)] },
+          { name: 'PH3', height: 888, objects: [rule('Above', 35), text('HeadName', 360, 360), text('HeadAmount', 4320, 360), rule('Below', 840)] },
+        ] },
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [
+          { kind: 'field', name: 'Name', field: 'Orders.Customer', position: { x: 360, y: 0 }, size: { width: 3780, height: 210 } },
+          { kind: 'field', name: 'Amt', field: 'Orders.Amount', position: { x: 4320, y: 0 }, size: { width: 1440, height: 210 } },
+        ] }] },
+      ] };
+    const { rdl } = convertToRdl(definition, source, { reportName: 'PageOne' });
+    const header = rdl.slice(rdl.indexOf('<PageHeader>'), rdl.indexOf('</PageHeader>'));
+    assert.match(header, /Name="Title"/);
+    assert.ok(!/Summary|HeadName/.test(header), 'only the title stays in the page header');
+    const rows = rdl.slice(rdl.indexOf('<TablixRows>'), rdl.indexOf('</TablixRows>')).split('<TablixRow>').slice(1);
+    assert.match(rows[0], /Name="Summary"/);
+    assert.match(rows[1], /Name="HeadName"[\s\S]*Name="HeadAmount"/);
+    // The block prints once; the headings on every page.
+    const members = rdl.slice(rdl.indexOf('<TablixRowHierarchy>'));
+    assert.match(members, /<TablixMembers>\s*<TablixMember>\s*<KeepWithGroup>After<\/KeepWithGroup>\s*<\/TablixMember>\s*<TablixMember>\s*<KeepWithGroup>After<\/KeepWithGroup>\s*<RepeatOnNewPage>true/);
+  });
+
   it('lists what reaches past the printable page or past what holds it', () => {
     const rdl = `<Report><ReportSections><ReportSection><Body><ReportItems>
       <Rectangle Name="Area"><ReportItems><Textbox Name="Wide"><Left>1in</Left><Width>3in</Width></Textbox></ReportItems><Left>0in</Left><Width>2in</Width></Rectangle>

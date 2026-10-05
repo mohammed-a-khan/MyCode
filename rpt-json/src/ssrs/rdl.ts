@@ -272,6 +272,8 @@ interface Classified {
   groupHeaders: Map<number, SectionInfo[]>;
   groupFooters: Map<number, SectionInfo[]>;
   columnHeadings: ReportObject[];
+  /** Page header sections laid out as the table's heading rows: printed once (page 1 only) or repeated on every page. */
+  headingSections?: { section: SectionInfo; repeat: boolean }[];
 }
 
 /** Whether every bracket in a text closes in order. */
@@ -2155,9 +2157,15 @@ class RdlBuilder {
       return members;
     };
 
-    const headingMembers = areas.columnHeadings.length
-      ? addRows([{ name: 'Column headings', objects: areas.columnHeadings }], 'Header', 'Page Header', 'After').map((m) => ({ ...m, children: [...m.children, el('RepeatOnNewPage', 'true')] }))
-      : [];
+    const repeatOn = (members: XmlElement[]) => members.map((m) => ({ ...m, children: [...m.children, el('RepeatOnNewPage', 'true')] }));
+    const headingMembers = areas.headingSections
+      ? areas.headingSections.flatMap(({ section, repeat }) => {
+        const members = addRows([section], 'Header', 'Page Header', 'After');
+        return repeat ? repeatOn(members) : members;
+      })
+      : areas.columnHeadings.length
+        ? repeatOn(addRows([{ name: 'Column headings', objects: areas.columnHeadings }], 'Header', 'Page Header', 'After'))
+        : [];
     const levels = this.groupFields.length;
     const headerMembers: XmlElement[][] = [];
     for (let level = 1; level <= levels; level++) {
@@ -2625,6 +2633,23 @@ class RdlBuilder {
       }
     }
     return [...counts].sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'Arial';
+  }
+
+  /**
+   * The page header section shown on page 1 only, where it is the only conditional one and the sections after it all
+   * print on every page with something to show (the column headings); -1 otherwise.
+   */
+  private pageOneSection(sections: SectionInfo[]): number {
+    const textOf = (s: SectionInfo) => {
+      const ref = s.conditions?.suppress;
+      const text = ref && (this.definition.formulaTexts?.[ref.index] ?? this.definition.formulas.find((f) => f.index === ref.index)?.text);
+      return (text ?? '').replace(/\/\/[^\n]*/g, '').replace(/\s+/g, '').replace(/;$/, '').toLowerCase();
+    };
+    const at = sections.findIndex((s) => /^pagenumber(>1|>=2|<>1)$/.test(textOf(s)));
+    if (at < 0) return -1;
+    const after = sections.slice(at + 1);
+    if (!after.length || after.some((s) => s.conditions?.suppress) || sections.slice(0, at).some((s) => s.conditions?.suppress)) return -1;
+    return after.some((s) => s.objects.some((o) => o.kind === 'text' || o.kind === 'field')) ? at : -1;
   }
 
   private splitFirstPage(sections: SectionInfo[]): { first: SectionInfo[]; later: SectionInfo[] } | null {
@@ -3227,8 +3252,21 @@ class RdlBuilder {
 
     const areas = this.classify(def.layout);
     const detailXs = new Set(this.columnsFor(areas.detail).map((c) => c.x));
+    // A page header with a section for page 1 only (a block of figures between the title and the column headings),
+    // all else printed on every page: the sections before it stay the page header; it and those after it become the
+    // table's heading rows, whole (rules too), itself printed once and those after it repeated on every page.
+    const pageOneAt = this.pageOneSection(areas.pageHeader);
+    if (pageOneAt >= 0 && areas.detail.some((s) => s.objects.length)) {
+      const sections = areas.pageHeader;
+      const { suppress: _, ...conditions } = sections[pageOneAt].conditions ?? {};
+      areas.headingSections = [
+        { section: { ...sections[pageOneAt], conditions }, repeat: false },
+        ...sections.slice(pageOneAt + 1).map((section) => ({ section, repeat: true })),
+      ];
+      areas.pageHeader = sections.slice(0, pageOneAt);
+    }
     // Page-header text objects aligned with detail columns are column headings: they go into the table.
-    for (const section of areas.pageHeader) {
+    for (const section of areas.headingSections ? [] : areas.pageHeader) {
       const keep: ReportObject[] = [];
       for (const obj of section.objects) {
         const x = obj.position?.x;
