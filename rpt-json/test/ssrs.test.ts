@@ -536,6 +536,25 @@ describe('layout conversion', () => {
     assert.ok(!/Len\(Trim/.test(convertToRdl(definition, source, { reportName: 'M' }).rdl));
   });
 
+  it('prints the header and footer of a group on a constant even with no records', () => {
+    const definition: ReportDefinition = { ...emptyDefinition(), groups: ['@One'],
+      formulas: [
+        { name: 'One', kind: 'formula', text: 'WhileReadingRecords; "X"', referencedFields: [] },
+        { name: 'Visibility', index: 1, kind: 'conditionalFormat', text: '{Orders.Amount} = 0', referencedFields: ['Orders.Amount'] },
+      ],
+      layout: [
+        { name: 'GroupHeaderArea1', sections: [{ name: 'GH', height: 240, objects: [{ kind: 'text', name: 'Head', text: 'Customer', position: { x: 0, y: 0 }, size: { width: 1440, height: 200 } }] }] },
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 220, objects: [{ kind: 'field', name: 'Who', field: 'Orders.Customer', position: { x: 0, y: 0 }, size: { width: 1440, height: 200 } }] }] },
+        { name: 'GroupFooterArea1', sections: [{ name: 'GF', height: 240, objects: [{ kind: 'field', name: 'Tot', field: 'Sum of Orders.Amount', position: { x: 0, y: 0 }, size: { width: 1440, height: 200 }, conditions: { suppress: { name: 'Visibility', index: 1 } } }] }] },
+      ] };
+    const { rdl } = convertToRdl(definition, source, { reportName: 'C' });
+    // Only the details are a group: the header and footer rows are the table's own, which SSRS prints with no data.
+    assert.deepEqual([...rdl.matchAll(/<Group Name="([^"]+)"/g)].map((m) => m[1]), ['Details']);
+    assert.match(rdl, /<Value>=Sum\(Fields!Amount\.Value\)<\/Value>/);
+    // A field that is null (no records) gives the condition no result, as in Crystal: what it suppresses prints.
+    assert.match(rdl, /<Hidden>=\(Not \(IsNothing\(Fields!Amount\.Value\)\)\) AndAlso /);
+  });
+
   it('leaves out a total\'s own rule where the total is empty', () => {
     const definition: ReportDefinition = { ...emptyDefinition(), groups: ['Orders.Region'], layout: [
       { name: 'DetailArea1', sections: [{ name: 'D', height: 220, objects: [{ kind: 'field', name: 'Amt', field: 'Orders.Amount', position: { x: 0, y: 0 }, size: { width: 1440, height: 200 } }] }] },

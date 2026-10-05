@@ -509,6 +509,8 @@ class RdlBuilder {
 
   private groupScopeOf(ref: string): string | undefined {
     const level = this.groupFields.findIndex((g) => g.toLowerCase() === ref.toLowerCase());
+    // The outer group on a constant holds every record: no group of its own, its scope is the whole table.
+    if (level === 0 && this.isConstantGroup(this.groupFields[0])) return '';
     return level >= 0 ? this.groupNames[level] : undefined;
   }
 
@@ -649,6 +651,9 @@ class RdlBuilder {
   }
 
   /** A formatting-condition formula (by name and position in the formula list), translated for a property. */
+  /** Building table rows outside every group (a constant outer group's header and footer). */
+  private ungroupedRows = false;
+
   private conditionExpression(ref: FormulaRef, colors: boolean, item: string, scope: Scope = 'row'): string | undefined {
     const text = this.definition.formulaTexts?.[ref.index] ?? this.definition.formulas.find((f) => f.index === ref.index)?.text;
     if (!text?.trim()) {
@@ -663,9 +668,10 @@ class RdlBuilder {
     this.addCode(t);
     for (const issue of t.issues) this.note(`${item}: formula ${ref.name}`, issue);
     if (t.expression === '=Nothing') return undefined;
-    // Outside the table, fields need a dataset scope.
-    if (scope === 'row') return t.expression;
-    const scoped = scopeOutsideRegion(t.expression.slice(1), this.dataset);
+    // Outside the table, fields need a dataset scope; table rows outside every group read the first record.
+    const outside = scope !== 'row';
+    if (!outside && !this.ungroupedRows) return t.expression;
+    const scoped = outside ? scopeOutsideRegion(t.expression.slice(1), this.dataset) : t.expression.slice(1);
     // Crystal (Exceptions For Nulls) gives a formula no result when a database field it reads is null on the
     // current record, here the first one (or there are no records): the condition does not hold, so what it
     // suppresses still prints. Unless the formula tests IsNull itself.
@@ -673,7 +679,7 @@ class RdlBuilder {
     if (boolean && fields.length && !/\bisnull\b/i.test(text)) {
       const present = translateFormula(fields.map((f) => `not IsNull({${f}})`).join(' and '), this.formulaContext, { boolean: true });
       if (present.expression !== '=Nothing' && !present.issues.length) {
-        return `=(${scopeOutsideRegion(present.expression.slice(1), this.dataset)}) AndAlso (${scoped})`;
+        return `=(${outside ? scopeOutsideRegion(present.expression.slice(1), this.dataset) : present.expression.slice(1)}) AndAlso (${scoped})`;
       }
     }
     return `=${scoped}`;
@@ -2211,7 +2217,9 @@ class RdlBuilder {
     const levels = this.groupFields.length;
     const headerMembers: XmlElement[][] = [];
     for (let level = 1; level <= levels; level++) {
+      this.ungroupedRows = level === 1 && this.isConstantGroup(this.groupFields[0]);
       headerMembers[level - 1] = addRows(areas.groupHeaders.get(level), `Group${level}Header`, `Group Header ${level}`, 'After');
+      this.ungroupedRows = false;
       // Grouping on a constant formula is Crystal's way to repeat a header on every page.
       if (this.isConstantGroup(this.groupFields[level - 1])) {
         headerMembers[level - 1] = headerMembers[level - 1].map((m) => ({ ...m, children: [...m.children, el('RepeatOnNewPage', 'true')] }));
@@ -2220,7 +2228,9 @@ class RdlBuilder {
     const detailMembers = addRows(areas.detail, 'Detail', 'Details', null, true);
     const footerMembers: XmlElement[][] = [];
     for (let level = levels; level >= 1; level--) {
+      this.ungroupedRows = level === 1 && this.isConstantGroup(this.groupFields[0]);
       footerMembers[level - 1] = addRows(areas.groupFooters.get(level), `Group${level}Footer`, `Group Footer ${level}`, 'Before');
+      this.ungroupedRows = false;
       // A box framing a group that holds every record is closed by the table's own bottom border (drawn at the
       // foot of each page, as Crystal closes a box running on to the next page).
       if (this.frameFooters.has(level) && !(level === 1 && this.isConstantGroup(this.groupFields[0]))) {
@@ -2249,6 +2259,7 @@ class RdlBuilder {
       detailSorts.length ? el('SortExpressions', ...detailSorts.map((s) => el('SortExpression', el('Value', `=${s.expression}`), s.descending ? el('Direction', 'Descending') : null))) : null,
       detailMembers.length > 1 ? el('TablixMembers', ...detailMembers) : null,
       detailMembers.length === 1 ? (detailMembers[0].children.find((c) => typeof c === 'object' && c !== null && (c as XmlElement).name === 'Visibility') ?? null) : null);
+    let outer: XmlElement[] | undefined;
     for (let level = levels; level >= 1; level--) {
       const field = this.groupFields[level - 1];
       let expression = this.fieldObjectValue(field, 'row', `Group ${level}`).expression;
@@ -2282,6 +2293,12 @@ class RdlBuilder {
       }
       const groupSelection = level === levels ? this.groupSelectionFilter() : null;
       if (groupSelection) filters.push(groupSelection);
+      if (level === 1 && this.isConstantGroup(field) && !filters.length) {
+        // A group on a constant holds every record: its header and footer are the table's own rows, printed (as in
+        // Crystal) even when there is no data, where a group's rows are not.
+        outer = [...headerMembers[0], member, ...footerMembers[0]];
+        continue;
+      }
       member = el('TablixMember',
         el('Group', { Name: this.groupNames[level - 1] },
           el('GroupExpressions', el('GroupExpression', `=${expression}`)),
@@ -2307,7 +2324,7 @@ class RdlBuilder {
         el('TablixColumns', ...columns.map((c) => el('TablixColumn', el('Width', inches(c.width))))),
         el('TablixRows', ...rows)),
       el('TablixColumnHierarchy', el('TablixMembers', ...columns.map(() => el('TablixMember')))),
-      el('TablixRowHierarchy', el('TablixMembers', ...headingMembers, member)),
+      el('TablixRowHierarchy', el('TablixMembers', ...headingMembers, ...(outer ?? [member]))),
       el('DataSetName', this.dataset),
       el('Top', inches(top)),
       el('Left', inches(left)),
