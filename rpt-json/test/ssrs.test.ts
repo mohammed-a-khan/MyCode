@@ -492,6 +492,8 @@ describe('layout conversion', () => {
     ] };
     const { rdl, review } = convertToRdl(definition, source, { reportName: 'K' });
     assert.match(rdl, /<\/TablixMembers>\s*<KeepTogether>true<\/KeepTogether>\s*<\/TablixMember>/);
+    // Each value on a new page as well (SSRS does not reliably keep a group together).
+    assert.match(rdl, /<Group Name="[^"]*Region[^"]*">[\s\S]*?<PageBreak>\s*<BreakLocation>Between<\/BreakLocation>/);
     assert.ok(review.some((r) => /kept together on a page/.test(r.message)));
   });
 
