@@ -1050,11 +1050,22 @@ class RdlBuilder {
     const breakFormula = section.conditions?.newPageBefore
       ? this.conditionExpression(section.conditions.newPageBefore, false, `Section ${section.name}`, 'body')
       : undefined;
-    if (scope === 'body' && (section.newPageBefore || breakFormula) && items.length) {
+    // New Page After likewise ends the page after the section's items.
+    const afterFormula = section.conditions?.newPageAfter
+      ? this.conditionExpression(section.conditions.newPageAfter, false, `Section ${section.name}`, 'body')
+      : undefined;
+    const before = !!(section.newPageBefore || breakFormula);
+    const after = !!(section.newPageAfter || afterFormula);
+    if (scope === 'body' && (before || after) && items.length) {
       const sectionHeight = Math.max(section.height !== undefined ? twipsToInches(section.height) : 0, bottom);
+      // One break element: where both are formulas, each side is decided by its own (a break that is off is disabled).
+      const both = before && after;
+      const switchedOff = both
+        ? (breakFormula && afterFormula ? `=Not (${breakFormula.slice(1)}) AndAlso Not (${afterFormula.slice(1)})` : undefined)
+        : before ? (breakFormula ? `=Not (${breakFormula.slice(1)})` : undefined) : (afterFormula ? `=Not (${afterFormula.slice(1)})` : undefined);
       const wrapper = el('Rectangle', { Name: this.itemNames.make(`${section.name || 'Section'}_Page`) },
         el('ReportItems', ...items.map((item) => moveItem(item, -top, 0))),
-        el('PageBreak', el('BreakLocation', 'Start'), breakFormula ? el('Disabled', `=Not (${breakFormula.slice(1)})`) : null),
+        el('PageBreak', el('BreakLocation', both ? 'StartAndEnd' : before ? 'Start' : 'End'), switchedOff ? el('Disabled', switchedOff) : null),
         el('KeepTogether', 'false'),
         el('Top', inches(top)), el('Left', '0in'), el('Height', inches(sectionHeight)),
         el('Width', inches(Math.max(...items.map(itemRight), 0.1))),
@@ -2163,7 +2174,7 @@ class RdlBuilder {
     const summarySort = sorts.find((s) => s.bySummary);
     const pageBreak = (sections: SectionInfo[] | undefined, footer?: SectionInfo[]) => {
       const before = (sections ?? []).some((s) => s.conditions?.newPageBefore || s.newPageBefore);
-      const after = [...(sections ?? []), ...(footer ?? [])].some((s) => s.conditions?.newPageAfter);
+      const after = [...(sections ?? []), ...(footer ?? [])].some((s) => s.conditions?.newPageAfter || s.newPageAfter);
       return before || after ? el('PageBreak', el('BreakLocation', before && after ? 'StartAndEnd' : before ? 'Between' : 'End')) : null;
     };
 

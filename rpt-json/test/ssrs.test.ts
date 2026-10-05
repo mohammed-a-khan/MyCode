@@ -465,6 +465,21 @@ describe('layout conversion', () => {
     assert.match(checkRdlWidths(rdl), /nothing reaches past the page or what holds it/);
   });
 
+  it('starts a new page after a group footer or a section with New Page After', () => {
+    const grouped: ReportDefinition = { ...emptyDefinition(), groups: ['Orders.Region'], layout: [
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 220, objects: [{ kind: 'field', name: 'Amt', field: 'Orders.Amount', position: { x: 0, y: 0 }, size: { width: 1440, height: 200 } }] }] },
+      { name: 'GroupFooterArea1', sections: [{ name: 'GF', height: 220, newPageAfter: true, objects: [{ kind: 'text', name: 'Total', text: 'Total', position: { x: 0, y: 0 }, size: { width: 1440, height: 200 } }] }] },
+    ] };
+    assert.match(convertToRdl(grouped, source, { reportName: 'G' }).rdl, /<Group Name="[^"]*">[\s\S]*?<PageBreak>\s*<BreakLocation>End<\/BreakLocation>/);
+    const sections: ReportDefinition = { ...emptyDefinition(), layout: [
+      { name: 'ReportHeaderArea1', sections: [
+        { name: 'First', height: 300, newPageAfter: true, objects: [{ kind: 'text', name: 'One', text: 'One', position: { x: 0, y: 0 }, size: { width: 1440, height: 200 } }] },
+        { name: 'Second', height: 300, objects: [{ kind: 'text', name: 'Two', text: 'Two', position: { x: 0, y: 0 }, size: { width: 1440, height: 200 } }] },
+      ] },
+    ] };
+    assert.match(convertToRdl(sections, source, { reportName: 'S' }).rdl, /<Rectangle Name="First_Page">[\s\S]*?<PageBreak>\s*<BreakLocation>End<\/BreakLocation>/);
+  });
+
   it('lists what reaches past the printable page or past what holds it', () => {
     const rdl = `<Report><ReportSections><ReportSection><Body><ReportItems>
       <Rectangle Name="Area"><ReportItems><Textbox Name="Wide"><Left>1in</Left><Width>3in</Width></Textbox></ReportItems><Left>0in</Left><Width>2in</Width></Rectangle>
