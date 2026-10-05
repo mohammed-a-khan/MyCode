@@ -3253,16 +3253,15 @@ class RdlBuilder {
     const areas = this.classify(def.layout);
     const detailXs = new Set(this.columnsFor(areas.detail).map((c) => c.x));
     // A page header with a section for page 1 only (a block of figures between the title and the column headings),
-    // all else printed on every page: the sections before it stay the page header; it and those after it become the
-    // table's heading rows, whole (rules too), itself printed once and those after it repeated on every page.
+    // all else printed on every page: the sections before it stay the page header; it starts the body (printed once,
+    // above the table) and those after it become the table's heading rows, whole (rules too), repeated on every page.
+    // (SSRS wants a table's heading rows all repeated or none: the block cannot be one of them.)
     const pageOneAt = this.pageOneSection(areas.pageHeader);
     if (pageOneAt >= 0 && areas.detail.some((s) => s.objects.length)) {
       const sections = areas.pageHeader;
       const { suppress: _, ...conditions } = sections[pageOneAt].conditions ?? {};
-      areas.headingSections = [
-        { section: { ...sections[pageOneAt], conditions }, repeat: false },
-        ...sections.slice(pageOneAt + 1).map((section) => ({ section, repeat: true })),
-      ];
+      areas.reportHeader = [{ ...sections[pageOneAt], conditions }, ...areas.reportHeader];
+      areas.headingSections = sections.slice(pageOneAt + 1).map((section) => ({ section, repeat: true }));
       areas.pageHeader = sections.slice(0, pageOneAt);
     }
     // Page-header text objects aligned with detail columns are column headings: they go into the table.
