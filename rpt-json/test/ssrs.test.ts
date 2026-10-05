@@ -529,6 +529,8 @@ describe('layout conversion', () => {
     const { rdl } = convertToRdl(definition, source, { reportName: 'M' });
     assert.match(rdl, /<Hidden>=IsNothing\(Fields!F_Note\.Value\) OrElse Len\(Trim\(CStr\(Fields!F_Note\.Value\)\)\) = 0<\/Hidden>/);
     assert.match(rdl, /<Value>=Fields!F_Note\.Value<\/Value>[\s\S]*?<ColSpan>\d<\/ColSpan>/);
+    // The row it was laid over is left out where the message shows and nothing else does (no blank line above it).
+    assert.match(rdl, /<Hidden>=Not \(Len\(Trim\(CStr\(Fields!F_Note\.Value\)\)\) = 0\) AndAlso Len\(Trim\(CStr\(Fields!Customer\.Value\)\)\) = 0 AndAlso /);
     // One with a final else is a value on every row: it stays where it is.
     definition.formulas[0].text = 'if {Orders.Amount} = 0 then "NOTHING TO SHOW" else ""';
     assert.ok(!/Len\(Trim/.test(convertToRdl(definition, source, { reportName: 'M' }).rdl));
