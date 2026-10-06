@@ -3656,7 +3656,7 @@ class RdlBuilder {
       const used = def.layout.some((a) => a.sections.some((s) =>
         Object.values(s.conditions ?? {}).some((c) => c.index === f.index) ||
         s.objects.some((o) => Object.values(o.conditions ?? {}).some((c) => c.index === f.index))));
-      if (!used && f.text.trim()) this.note(`Formula {@${f.name}}`, 'is a formatting formula that no object uses in a decoded property; check whether it is still needed');
+      if (!used && f.text.replace(/\/\/[^\n]*/g, '').trim()) this.note(`Formula {@${f.name}}`, 'is a formatting formula that no object uses in a decoded property; check whether it is still needed');
     }
     const inlinedOnly = [...this.inlinedSubreports].filter((n) => !this.referencedSubreports.has(n));
     const rdl = this.withoutBodyPageNumbers(this.resolveShared(toXml(report)));

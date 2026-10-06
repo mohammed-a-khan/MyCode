@@ -1113,6 +1113,16 @@ export function buildReportDefinition(records: RecordNode[]): ReportDefinition {
     if (node) indexed.set(node, index);
     report.formulaTexts![index] = node ? parseFormula(node).text : '';
   });
+  // A condition whose formula is empty (or only comments) does nothing in Crystal: the ticked setting stands.
+  const blank = (ref: FormulaRef) => {
+    const text = report.formulaTexts![ref.index];
+    return [...indexed.values()].includes(ref.index) && text !== undefined && !text.replace(/\/\/[^\n]*/g, '').trim();
+  };
+  for (const holder of report.layout.flatMap((a) => a.sections.flatMap((s): { conditions?: Record<string, FormulaRef> }[] => [s, ...s.objects]))) {
+    if (!holder.conditions) continue;
+    for (const [kind, ref] of Object.entries(holder.conditions)) if (blank(ref)) delete holder.conditions[kind];
+    if (!Object.keys(holder.conditions).length) delete holder.conditions;
+  }
   for (const node of findAll(records, FORMULA)) {
     const formula = parseFormula(node);
     const index = indexed.get(node);
