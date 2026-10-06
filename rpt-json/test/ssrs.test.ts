@@ -591,8 +591,8 @@ describe('layout conversion', () => {
     // Only the details are a group: the header and footer rows are the table's own, which SSRS prints with no data.
     assert.deepEqual([...rdl.matchAll(/<Group Name="([^"]+)"/g)].map((m) => m[1]), ['Details']);
     assert.match(rdl, /<Value>=Sum\(Fields!Amount\.Value\)<\/Value>/);
-    // A field that is null (no records) gives the condition no result, as in Crystal: what it suppresses prints.
-    assert.match(rdl, /<Hidden>=\(Not \(IsNothing\(Fields!Amount\.Value\)\)\) AndAlso /);
+    // With no records the condition gives no result, as in Crystal: what it suppresses prints.
+    assert.match(rdl, /<Hidden>=\(CountRows\("DataSet1"\) &gt; 0\) AndAlso /);
     // A field's own line there is not drawn when it has no value (no records), as in Crystal.
     const lined = { ...definition, layout: definition.layout.map((a) => a.name !== 'GroupHeaderArea1' ? a : { ...a, sections: [{ name: 'GH', height: 240, objects: [{ kind: 'field', name: 'Top', field: 'Orders.Region', position: { x: 0, y: 0 }, size: { width: 1440, height: 200 }, border: { sides: [0, 0, 1, 0] as [number, number, number, number], width: 20 } }] }] }) };
     assert.match(convertToRdl(lined, source, { reportName: 'C' }).rdl, /<Style>=IIf\(IsNothing\(Fields!Region\.Value\), "None", "Solid"\)<\/Style>/);
@@ -2059,7 +2059,7 @@ describe('subreports in the report footer', () => {
       ...panel.layout.slice(1),
     ] };
     const { rdl } = convertToRdl(main([sub('Titled', 1, 150)]), source, { reportName: 'M', subreports: new Map([[1, { name: 'M_Subdocument_1', links: [], definition: withTitle, dataSource: source }]]) });
-    assert.ok(/<Hidden>=\(Not \(IsNothing\(First\(Fields!Label\.Value, "DataSet_M_Subdocument_1"\)\)\)\) AndAlso \(/.test(rdl), rdl.slice(rdl.indexOf('<Textbox Name="Heading">'), rdl.indexOf('<Textbox Name="Heading">') + 1500));
+    assert.ok(/<Hidden>=\(CountRows\("DataSet_M_Subdocument_1"\) &gt; 0\) AndAlso \(/.test(rdl), rdl.slice(rdl.indexOf('<Textbox Name="Heading">'), rdl.indexOf('<Textbox Name="Heading">') + 1500));
   });
 
   it('keeps a subreport to its frame, its wider content cut off at the frame as Crystal does', () => {
