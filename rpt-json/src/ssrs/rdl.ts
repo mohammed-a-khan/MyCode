@@ -672,15 +672,12 @@ class RdlBuilder {
     const outside = scope !== 'row';
     if (!outside && !this.ungroupedRows) return t.expression;
     const scoped = outside ? scopeOutsideRegion(t.expression.slice(1), this.dataset) : t.expression.slice(1);
-    // Crystal (Exceptions For Nulls) gives a formula no result when a database field it reads is null on the
-    // current record, here the first one (or there are no records): the condition does not hold, so what it
-    // suppresses still prints. Unless the formula tests IsNull itself.
+    // With no records Crystal gives a formula reading a database field no result: the condition does not hold, so
+    // what it suppresses still prints. A field that is merely empty on a record counts as 0 (or ""), as SSRS has it.
+    // Unless the formula tests IsNull itself.
     const fields = [...new Set([...text.matchAll(/\{([^}@?#][^}]*\.[^}]*)\}/g)].map((m) => m[1]))];
     if (boolean && fields.length && !/\bisnull\b/i.test(text)) {
-      const present = translateFormula(fields.map((f) => `not IsNull({${f}})`).join(' and '), this.formulaContext, { boolean: true });
-      if (present.expression !== '=Nothing' && !present.issues.length) {
-        return `=(${outside ? scopeOutsideRegion(present.expression.slice(1), this.dataset) : present.expression.slice(1)}) AndAlso (${scoped})`;
-      }
+      return `=(CountRows(${vbString(this.dataset)}) > 0) AndAlso (${scoped})`;
     }
     return `=${scoped}`;
   }
