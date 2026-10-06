@@ -686,6 +686,23 @@ class RdlBuilder {
     return `=${scoped}`;
   }
 
+  /** Whether a formatting formula reads a shared variable, itself or through the formulas it uses. */
+  private readsShared(ref: FormulaRef): boolean {
+    const byName = new Map(this.definition.formulas.filter((f) => f.kind === 'formula').map((f) => [f.name.toLowerCase(), f.text]));
+    const seen = new Set<string>();
+    const reads = (text: string | undefined): boolean => {
+      if (!text) return false;
+      if (/\bshared\b/i.test(text)) return true;
+      return [...text.matchAll(/\{@([^}]+)\}/g)].some((m) => {
+        const name = m[1].toLowerCase();
+        if (seen.has(name)) return false;
+        seen.add(name);
+        return reads(byName.get(name));
+      });
+    };
+    return reads(this.definition.formulaTexts?.[ref.index] ?? this.definition.formulas.find((f) => f.index === ref.index)?.text);
+  }
+
   /** An expression's database fields read as their type's default (0, "") where empty on the record. */
   private emptyAsDefault(expression: string): string {
     const types = new Map([...this.fields.values()].map((f) => [f.name, f.type]));
@@ -2899,11 +2916,12 @@ class RdlBuilder {
     const { unrecognised, ...areas } = classifyAreas(layout, this.options.subreport);
     for (const area of unrecognised) this.note(`Area "${area.name}"`, 'unrecognised area; its objects were not converted');
     this.findSpanEnds(areas);
-    // A section with its Suppress box ticked never prints, unless a suppress formula decides instead.
+    // A section with its Suppress box ticked never prints, unless a suppress formula decides instead; one reading a
+    // shared variable (set by a subreport as it prints, which SSRS only approximates) keeps the box's word.
     const shown = (sections: SectionInfo[]) => sections
       .map((s) => this.decideFixed(s))
       .filter((s): s is SectionInfo => s !== null)
-      .filter((s) => !s.suppressed || s.conditions?.suppress)
+      .filter((s) => !s.suppressed || (s.conditions?.suppress && !this.readsShared(s.conditions.suppress)))
       .map((s) => this.clipSpanning(s));
     // Table sections: an object shown only on a condition and laid across a row's other fields gets a row of its own.
     const tableShown = (sections: SectionInfo[]) => shown(sections).flatMap((s) => splitConditionalSpans(s, (o) => this.isBlankMessage(o)));

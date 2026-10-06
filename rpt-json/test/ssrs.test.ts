@@ -528,6 +528,25 @@ describe('layout conversion', () => {
     assert.match(convertToRdl(sections, source, { reportName: 'S' }).rdl, /<Rectangle Name="First_Page">[\s\S]*?<PageBreak>\s*<BreakLocation>End<\/BreakLocation>/);
   });
 
+  it('keeps a section suppressed whose suppress formula reads a shared variable', () => {
+    const text = (name: string) => ({ kind: 'text', name, text: name, position: { x: 0, y: 0 }, size: { width: 1440, height: 200 } });
+    const definition: ReportDefinition = { ...emptyDefinition(),
+      formulas: [
+        { name: 'Note', kind: 'formula', text: 'WhilePrintingRecords; shared StringVar note; note', referencedFields: [] },
+        { name: 'Section_Visibility', index: 1, kind: 'conditionalFormat', text: 'if length({@Note}) > 200 then false else true', referencedFields: [] },
+        { name: 'Section_Visibility', index: 2, kind: 'conditionalFormat', text: '{Orders.Amount} = 0', referencedFields: ['Orders.Amount'] },
+      ],
+      layout: [{ name: 'ReportFooterArea1', sections: [
+        { name: 'Long', height: 240, suppressed: true, conditions: { suppress: { name: 'Section_Visibility', index: 1 } }, objects: [text('LongNote')] },
+        { name: 'Plain', height: 240, suppressed: true, conditions: { suppress: { name: 'Section_Visibility', index: 2 } }, objects: [text('PlainNote')] },
+      ] }] };
+    const { rdl } = convertToRdl(definition, source, { reportName: 'S' });
+    // SSRS only approximates a shared variable (set by a subreport as it prints): the ticked Suppress box decides.
+    assert.ok(!/LongNote/.test(rdl));
+    // A suppress formula on the record's own fields decides, as before.
+    assert.match(rdl, /PlainNote/);
+  });
+
   it('breaks no page after the report\'s last section', () => {
     const text = (name: string) => ({ kind: 'text', name, text: name, position: { x: 0, y: 0 }, size: { width: 1440, height: 200 } });
     const last: ReportDefinition = { ...emptyDefinition(), layout: [
