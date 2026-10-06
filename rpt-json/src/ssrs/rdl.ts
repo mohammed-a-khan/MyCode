@@ -206,6 +206,8 @@ const PAPER_SIZES: Record<number, [number, number]> = { 1: [8.5, 11], 5: [8.5, 1
 const inches = (value: number) => `${Math.round(value * 1000) / 1000}in`;
 const twipsToInches = (twips: number) => twips / TWIPS_PER_INCH;
 /** The length of the pieces a line moved by formulas is drawn in (0.05in): its ends fall within half of one. */
+/** The gap Crystal leaves between a rule along a field's top and its text (twips). */
+const RULE_GAP = 40;
 const RULE_PIECE = 72;
 const inchesToTwips = (value: number) => value * TWIPS_PER_INCH;
 
@@ -977,8 +979,7 @@ class RdlBuilder {
     const framed = !!obj?.border && obj.border.sides.every((side) => side > 0);
     // A rule drawn above a field placed at its own position (a total under its column): Crystal keeps the text a
     // little below it.
-    // So it does under a rule a line style formula draws along its top.
-    const ruleAbove = !framed && ((!!box && !!obj?.border && obj.border.sides[2] > 0) || !!conditions.topLine);
+    const ruleAbove = !!box && !framed && !!obj?.border && obj.border.sides[2] > 0;
     // Paragraphs aligned each their own way (a plain text, not a formula's value).
     const paragraphs = obj && !value.startsWith('=Fields') ? textParagraphs(obj)?.map((p) => ({
       value: p.lines.length > 1 ? `=${p.lines.map((l) => vbString(l)).join(' & vbCrLf & ')}` : (p.lines[0].startsWith('=') ? `=${vbString(p.lines[0])}` : p.lines[0]),
@@ -2020,7 +2021,7 @@ class RdlBuilder {
           // are moved across by a formula: then it ends at most 288 twips short of the column's edge, as they do.
           right: leftAligned ? 0 : Math.min(Math.max(columnRight - (obj.position.x + obj.size.width), 0), this.detailValueEnds(columns, i).length ? 288 : 1440),
           // Its place down the section (a heading set lower in its row), as far as the row's height allows.
-          top: section.height ? Math.min(Math.max(obj.position.y, 0), Math.max(section.height - obj.size.height, 0), 288) : 0,
+          top: section.height ? Math.min(Math.max(obj.position.y, 0), Math.max(section.height - obj.size.height, 0), 1440) : 0,
           // Its whole distance from the column's edges, which formulas moving or widening it start from.
           exact: { left: Math.max(obj.position.x - columns[i].x, 0), right: leftAligned ? 0 : Math.max(columnRight - (obj.position.x + obj.size.width), 0) },
         } : undefined;
@@ -2080,7 +2081,9 @@ class RdlBuilder {
           for (const key of ruleFormulas) {
             const style = this.conditionExpression(obj!.conditions![key]!, false, `${obj!.kind} object "${obj!.name}"`, 'row');
             if (!style) continue;
-            const y = key === 'topLine' ? obj!.position!.y : obj!.position!.y + obj!.size!.height;
+            // Crystal keeps the text a little below a rule along the field's top (2pt): the rule is drawn that much
+            // higher (the row keeps its height, as Crystal's does), as far as the row's top allows.
+            const y = key === 'topLine' ? Math.max(0, obj!.position!.y - RULE_GAP) : obj!.position!.y + obj!.size!.height;
             const sides = obj!.border?.sides ?? [0, 0, 0, 0];
             const own = BORDER_STYLES[key === 'topLine' ? sides[2] : sides[3]] ?? 'None';
             // Formulas moving or widening the field move its line too. A line's place cannot be an expression, so the line
@@ -2127,8 +2130,9 @@ class RdlBuilder {
           const textObj = ruleFormulas.length && cellObj
             ? { ...cellObj, conditions: Object.fromEntries(Object.entries(cellObj.conditions ?? {}).filter(([key]) => !(ruleFormulas as readonly string[]).includes(key))) }
             : cellObj;
-          // Crystal keeps the text a little below a rule drawn along the field's top (2pt).
-          const textPadding = ruleFormulas.includes('topLine') && padding ? { ...padding, top: (padding.top ?? 0) + 40 } : padding;
+          // The part of the gap below a rule along the top that the row's top left no room for moves the text down.
+          const short = Math.max(0, RULE_GAP - (obj?.position?.y ?? 0));
+          const textPadding = ruleFormulas.includes('topLine') && padding && short ? { ...padding, top: (padding.top ?? 0) + short } : padding;
           const text = obj || ruled.top || ruled.bottom || ruled.left || ruled.right || background
             ? this.textbox(name, value, this.ruledBorderObject(textObj, ruled), format, 'row', { top: 0, left: 0, width: columnWidth, height }, undefined, ruled, textPadding)
             : null;
