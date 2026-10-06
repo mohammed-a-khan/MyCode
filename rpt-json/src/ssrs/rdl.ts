@@ -1112,9 +1112,13 @@ class RdlBuilder {
       const both = before && after;
       // The break after it is off, too, where nothing prints after it (afterOff).
       const afterIsOff = afterFormula && afterOff ? `(Not (${afterFormula.slice(1)}) OrElse (${afterOff}))` : afterFormula ? `Not (${afterFormula.slice(1)})` : afterOff ? `(${afterOff})` : undefined;
-      const switchedOff = both
+      const formulaOff = both
         ? (breakFormula && afterIsOff ? `=Not (${breakFormula.slice(1)}) AndAlso ${afterIsOff}` : undefined)
         : before ? (breakFormula ? `=Not (${breakFormula.slice(1)})` : undefined) : (afterIsOff ? `=${afterIsOff}` : undefined);
+      // A hidden section breaks no page (SSRS may still apply a hidden item's break).
+      const switchedOff = hidden && hidden !== '=True'
+        ? `=(${hidden.slice(1)})${formulaOff ? ` OrElse (${formulaOff.slice(1)})` : ''}`
+        : formulaOff;
       const wrapper = el('Rectangle', { Name: this.itemNames.make(`${section.name || 'Section'}_Page`) },
         el('ReportItems', ...items.map((item) => moveItem(item, -top, 0))),
         el('PageBreak', el('BreakLocation', both ? 'StartAndEnd' : before ? 'Start' : 'End'), switchedOff ? el('Disabled', switchedOff) : null),
