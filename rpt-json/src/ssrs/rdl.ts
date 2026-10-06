@@ -3554,6 +3554,9 @@ class RdlBuilder {
       el('rd:ReportID', reportId(this.options.reportName)),
       el('df:DefaultFontFamily', this.defaultFont()),
       el('AutoRefresh', '0'),
+      // A subreport's rectangle keeps its Crystal height and grows with its table: the space SSRS would keep below
+      // it as well (and a blank page at the end) is given up, as Crystal prints the next section straight after.
+      el('ConsumeContainerWhitespace', 'true'),
       el('DataSources', this.options.sharedDataSource
         ? el('DataSource', { Name: this.dataSourceName },
           el('DataSourceReference', this.options.sharedDataSource),
@@ -4443,11 +4446,12 @@ export function timeFormatString(f: TimeFormatInfo): string {
 /** The format Crystal shows a value of a type with, as a .NET format string; undefined when not decided by the format. */
 export function formatFor(format: ValueFormat, type: string | undefined): string | undefined {
   switch (type) {
-    case 'currency':
-      // A field left at the default format shows currency values like other numbers (no symbol); a customised
-      // one uses its currency format.
-      if (format.systemDefault) return format.number && numberFormatString(format.number);
-      return format.currency && numberFormatString(format.currency);
+    case 'currency': {
+      // Crystal shows currency values with the second number format it stores, as other numbers (the first holds
+      // its currency style, a symbol and brackets), whether or not the field keeps the default format.
+      const f = format.number ?? format.currency;
+      return f && numberFormatString(f);
+    }
     case 'number':
     case 'integer':
       return format.number && numberFormatString(format.number);
