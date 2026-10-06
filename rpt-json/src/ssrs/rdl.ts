@@ -980,7 +980,8 @@ class RdlBuilder {
     const framed = !!obj?.border && obj.border.sides.every((side) => side > 0);
     // A rule drawn above a field placed at its own position (a total under its column): Crystal keeps the text a
     // little below it.
-    const ruleAbove = !!box && !framed && !!obj?.border && obj.border.sides[2] > 0;
+    // So it does under a rule a line style formula draws along its top.
+    const ruleAbove = !framed && ((!!box && !!obj?.border && obj.border.sides[2] > 0) || !!conditions.topLine);
     // Paragraphs aligned each their own way (a plain text, not a formula's value).
     const paragraphs = obj && !value.startsWith('=Fields') ? textParagraphs(obj)?.map((p) => ({
       value: p.lines.length > 1 ? `=${p.lines.map((l) => vbString(l)).join(' & vbCrLf & ')}` : (p.lines[0].startsWith('=') ? `=${vbString(p.lines[0])}` : p.lines[0]),
@@ -2127,8 +2128,10 @@ class RdlBuilder {
           const textObj = ruleFormulas.length && cellObj
             ? { ...cellObj, conditions: Object.fromEntries(Object.entries(cellObj.conditions ?? {}).filter(([key]) => !(ruleFormulas as readonly string[]).includes(key))) }
             : cellObj;
+          // Crystal keeps the text a little below a rule drawn along the field's top (2pt).
+          const textPadding = ruleFormulas.includes('topLine') && padding ? { ...padding, top: (padding.top ?? 0) + 40 } : padding;
           const text = obj || ruled.top || ruled.bottom || ruled.left || ruled.right || background
-            ? this.textbox(name, value, this.ruledBorderObject(textObj, ruled), format, 'row', { top: 0, left: 0, width: columnWidth, height }, undefined, ruled, padding)
+            ? this.textbox(name, value, this.ruledBorderObject(textObj, ruled), format, 'row', { top: 0, left: 0, width: columnWidth, height }, undefined, ruled, textPadding)
             : null;
           return el('TablixCell', el('CellContents', el('Rectangle', { Name: this.itemNames.make(`${name}_Area`) },
             el('ReportItems', ...(text ? [text] : []), ...items.filter((item): item is XmlElement => !!item)),

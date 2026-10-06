@@ -597,6 +597,18 @@ describe('layout conversion', () => {
     assert.match(rdl, /<Textbox Name="Amt">[\s\S]*?<PaddingRight>60.0pt<\/PaddingRight>/);
   });
 
+  it('keeps a value a little below a rule a line style formula draws along its top', () => {
+    const definition: ReportDefinition = { ...emptyDefinition(),
+      formulas: [{ name: 'Top_Line_Style', index: 1, kind: 'conditionalFormat', text: 'if {Orders.Region} = "Total" then crSingleLine else crNoLine', referencedFields: ['Orders.Region'] }],
+      layout: [{ name: 'DetailArea1', sections: [{ name: 'D', height: 233, objects: [
+        { kind: 'field', name: 'Who', field: 'Orders.Customer', position: { x: 0, y: 30 }, size: { width: 2000, height: 180 } },
+        { kind: 'field', name: 'Amt', field: 'Orders.Amount', position: { x: 2600, y: 30 }, size: { width: 1500, height: 180 }, align: 'right', conditions: { topLine: { name: 'Top_Line_Style', index: 1 } } },
+        { kind: 'field', name: 'Reg', field: 'Orders.Region', position: { x: 4500, y: 30 }, size: { width: 1500, height: 180 } }] }] }] };
+    const rdl = convertToRdl(definition, source, { reportName: 'R' }).rdl;
+    // The text 30 twips down, 2pt more under the rule.
+    assert.match(rdl, /<Textbox Name="Amt">[\s\S]*?<PaddingTop>3.5pt<\/PaddingTop>/);
+  });
+
   it('leaves out a total\'s own rule where the total is empty', () => {
     const definition: ReportDefinition = { ...emptyDefinition(), groups: ['Orders.Region'], layout: [
       { name: 'DetailArea1', sections: [{ name: 'D', height: 220, objects: [{ kind: 'field', name: 'Amt', field: 'Orders.Amount', position: { x: 0, y: 0 }, size: { width: 1440, height: 200 } }] }] },
