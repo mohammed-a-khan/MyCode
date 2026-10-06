@@ -621,8 +621,10 @@ describe('layout conversion', () => {
         { kind: 'field', name: 'Amt', field: 'Orders.Amount', position: { x: 2600, y: 30 }, size: { width: 1500, height: 180 }, align: 'right', conditions: { topLine: { name: 'Top_Line_Style', index: 1 } } },
         { kind: 'field', name: 'Reg', field: 'Orders.Region', position: { x: 4500, y: 30 }, size: { width: 1500, height: 180 } }] }] }] };
     const rdl = convertToRdl(definition, source, { reportName: 'R' }).rdl;
-    // The text 30 twips down, 2pt more under the rule.
-    assert.match(rdl, /<Textbox Name="Amt">[\s\S]*?<PaddingTop>3.5pt<\/PaddingTop>/);
+    // The rule 2pt above the text, at the row's top: the text 30 twips down plus the 10 the row's top left no room for
+    // (the row keeps its height).
+    assert.match(rdl, /<Line Name="Amt_Above">\s*<Top>0in<\/Top>/);
+    assert.match(rdl, /<Textbox Name="Amt">[\s\S]*?<PaddingTop>2pt<\/PaddingTop>/);
   });
 
   it('leaves out a total\'s own rule where the total is empty', () => {
