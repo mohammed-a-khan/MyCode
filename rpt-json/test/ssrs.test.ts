@@ -528,6 +528,22 @@ describe('layout conversion', () => {
     assert.match(convertToRdl(sections, source, { reportName: 'S' }).rdl, /<Rectangle Name="First_Page">[\s\S]*?<PageBreak>\s*<BreakLocation>End<\/BreakLocation>/);
   });
 
+  it('breaks no page after the report\'s last section', () => {
+    const text = (name: string) => ({ kind: 'text', name, text: name, position: { x: 0, y: 0 }, size: { width: 1440, height: 200 } });
+    const last: ReportDefinition = { ...emptyDefinition(), layout: [
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF', height: 300, newPageAfter: true, objects: [text('End')] }] },
+    ] };
+    assert.ok(!/<PageBreak>/.test(convertToRdl(last, source, { reportName: 'L' }).rdl));
+    // Followed by a section a formula can hide: no break where it is hidden.
+    const followed: ReportDefinition = { ...emptyDefinition(),
+      formulas: [{ name: 'Section_Visibility', index: 1, kind: 'conditionalFormat', text: '{Orders.Amount} = 0', referencedFields: ['Orders.Amount'] }],
+      layout: [{ name: 'ReportFooterArea1', sections: [
+        { name: 'RF', height: 300, newPageAfter: true, objects: [text('End')] },
+        { name: 'RF2', height: 300, conditions: { suppress: { name: 'Section_Visibility', index: 1 } }, objects: [text('More')] },
+      ] }] };
+    assert.match(convertToRdl(followed, source, { reportName: 'F' }).rdl, /<BreakLocation>End<\/BreakLocation>\s*<Disabled>=[^<]*Fields!Amount\.Value[^<]*<\/Disabled>/);
+  });
+
   it('keeps a group together when its record says so', () => {
     const hex = (h: string) => Uint8Array.from(h.match(/../g)!.map((b) => parseInt(b, 16)));
     // The end of a group record: the options byte follows the last ffff 00000001 0000 ffff.
