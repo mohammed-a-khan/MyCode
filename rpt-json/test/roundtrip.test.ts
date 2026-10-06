@@ -257,6 +257,17 @@ describe('real .rpt samples', { skip: !samplesDir && 'set RPT_SAMPLES_DIR to ena
       assert.deepEqual(rptToJson(rebuilt, { metadata: false }).root, rptToJson(original, { metadata: false }).root);
       assertValidRedBlackTrees(rebuilt);
       assert.ok(!json.metadata?.reports?.some((r) => r.errors), 'every report decodes');
+      // A condition with an empty formula does nothing in Crystal, so none is kept.
+      for (const report of json.metadata?.reports ?? []) {
+        const definition = report.definition;
+        if (!definition) continue;
+        for (const holder of definition.layout.flatMap((a) => a.sections.flatMap((s) => [s, ...s.objects]))) {
+          for (const [kind, ref] of Object.entries(holder.conditions ?? {})) {
+            const text = definition.formulaTexts?.[ref.index] ?? 'unknown';
+            assert.ok(text.replace(/\/\/[^\n]*/g, '').trim(), `${holder.name} keeps an empty ${kind} formula`);
+          }
+        }
+      }
       // Re-encrypt every encrypted stream from its decoded form; the decoded content must survive.
       const strip = (j: RptJson) => JSON.stringify(j.root, (_k, v) => (v && typeof v === 'object' && 'decoded' in v ? { ...v, size: 0, sha256: '', data: '' } : v));
       const decodedOnly = rptToJson(original, { metadata: false, keepOriginal: false });
