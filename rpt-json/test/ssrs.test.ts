@@ -1290,9 +1290,11 @@ describe('Crystal value formats', () => {
     assert.equal(dateFormatString({ ...date, order: 0, year: 0 }), "yy'/'MM'/'dd");
     const format = { currency: number({ symbolType: 2, symbol: '$', symbolPosition: 1 }), number: number({ decimals: 4 }), date, dateTimeOrder: 2 };
     assert.equal(formatFor(format, 'number'), '#,0.0000;-#,0.0000');
-    assert.equal(formatFor(format, 'currency'), "'$'#,0.00;-'$'#,0.00");
-    // Left at the default format, a currency value shows like a number: no symbol.
+    // A currency value shows with the second number format, as a number (no symbol), customised or not.
+    assert.equal(formatFor(format, 'currency'), '#,0.0000;-#,0.0000');
     assert.equal(formatFor({ ...format, systemDefault: true }, 'currency'), '#,0.0000;-#,0.0000');
+    // With only one stored, that one.
+    assert.equal(formatFor({ currency: format.currency }, 'currency'), "'$'#,0.00;-'$'#,0.00");
     assert.equal(formatFor(format, 'dateTime'), "MM'/'dd'/'yyyy", 'date only');
     assert.equal(formatFor(format, 'string'), undefined);
   });
