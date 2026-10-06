@@ -6,7 +6,7 @@
 import type { CfbDocument } from '../cfb/types.ts';
 import { buildMetadata } from '../json.ts';
 import { classifyAreas } from './areas.ts';
-import { allGroupRecords, groupRecords, textRecords, type FormulaRef, type ReportDefinition, type ReportObject, type SectionInfo } from './model.ts';
+import { allGroupRecords, groupRecords, textRecords, type FormulaRef, type NumberFormatInfo, type ReportDefinition, type ReportObject, type SectionInfo } from './model.ts';
 
 /** Object names Crystal generates (kept: they say nothing about the report). */
 const GENERIC_NAME = /^((Text|Field|Line|Box|Graph|Chart|Subreport|Picture|Drawing|CrossTab|Map|OLAP)\d*|(Page|Report|Group)(Header|Footer)\d*(Area\d*)?(Section\d*)?|Detail(Area\d*)?(Section\d*)?|TSection\d+|Section\d+)$/i;
@@ -94,6 +94,11 @@ export function layoutSummary(doc: CfbDocument, find: string[]): string {
       if (formula?.text) parts.push(`= {${shownFormula(formula.text)}}`);
     }
     if (o.border) parts.push(`border=${o.border.sides.join('')}${o.border.width ? `/${o.border.width}` : ''}`);
+    // Its number formats (the first and second stored): negative style, symbol shown, decimals.
+    if (o.format?.currency || o.format?.number) {
+      const n = (f: NumberFormatInfo | undefined) => (f ? `neg${f.negative}/sym${f.symbolType}${f.symbolPosition}/dec${f.decimals}` : '-');
+      parts.push(`fmt=${o.format.systemDefault ? 'default' : 'custom'}:${n(o.format.currency)},${n(o.format.number)}`);
+    }
     if (o.subreport) parts.push(`-> Subdocument ${o.subreport.index}`);
     if (o.chart) parts.push(`chart family=${o.chart.family} type=${o.chart.graphType} values=${o.chart.values.length} category=${o.chart.onChangeOf ? 'yes' : 'no'} series=${o.chart.series ? 'yes' : 'no'}`);
     if (o.suppressed) parts.push('SUPPRESSED');
