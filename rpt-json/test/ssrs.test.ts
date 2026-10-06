@@ -441,6 +441,23 @@ describe('layout conversion', () => {
     assert.match(checkRdlWidths(rdl), /nothing reaches past the page or what holds it/);
   });
 
+  it('designs a section a formula can hide, holding only a subreport, as low as it goes', () => {
+    const subSource: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Customer', type: 'string' }] }] };
+    const sub: ReportDefinition = { ...emptyDefinition(), layout: [
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 220, objects: [{ kind: 'field', name: 'Nf', field: 'T.Customer', position: { x: 0, y: 0 }, size: { width: 3000, height: 200 } }] }] }] };
+    const block = (name: string) => ({ name, height: 308, conditions: { suppress: { name: 'Section_Visibility', index: 1 } },
+      objects: [{ kind: 'subreport', name: `${name}Sub`, subreport: { index: 1, onDemand: false }, position: { x: 0, y: 0 }, size: { width: 9000, height: 308 } }] });
+    const main: ReportDefinition = { ...emptyDefinition(),
+      formulas: [{ name: 'Section_Visibility', index: 1, kind: 'conditionalFormat', text: '{Orders.Amount} = 0', referencedFields: ['Orders.Amount'] }],
+      layout: [{ name: 'ReportFooterArea1', sections: [block('A'), block('B'), block('C')] }] };
+    const { rdl } = convertToRdl(main, source, { reportName: 'Main', subreports: new Map([[1, { name: 'Sub1', links: [], definition: sub, dataSource: subSource }]]) });
+    // SSRS keeps a hidden item's designed height (Crystal gives a suppressed section none): each block is 0.01in, grown by
+    // what its subreport shows, and the body ends at the last one.
+    const body = rdl.slice(rdl.indexOf('<Body>'), rdl.indexOf('</Body>'));
+    assert.match(body, /<Rectangle Name="CSub">[\s\S]*<Top>0.02in<\/Top>\s*<Left>0in<\/Left>\s*<Height>0.01in<\/Height>/);
+    assert.match(body, /<\/ReportItems>\s*<Height>0.03in<\/Height>\s*<Style \/>\s*$/);
+  });
+
   it('narrows and moves a subreport by its width and X position formulas', () => {
     const fields = [{ name: 'Customer', type: 'string' as const }, ...[1, 2, 3, 4].map((i) => ({ name: `V${i}`, type: 'number' as const }))];
     const subSource: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields }] };

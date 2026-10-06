@@ -196,6 +196,8 @@ const DATASOURCE = 'DataSource1';
 const TWIPS_PER_INCH = 1440;
 const MIN_ROW_HEIGHT = 0.2;
 const DEFAULT_HEIGHT = 0.25;
+/** The lowest an item is designed when what it shows decides its height (inches). */
+const MIN_DESIGN_HEIGHT = 0.01;
 const DEFAULT_WIDTH = 1.5;
 /** Crystal's default ("use printer defaults") margin. */
 const MARGIN = 0.25;
@@ -1065,8 +1067,14 @@ class RdlBuilder {
     // (a chart title placed over a chart's top stays readable), as in Crystal.
     const layer = (o: ReportObject) => (o.kind === 'box' ? 0 : ['chart', 'picture', 'subreport'].includes(o.kind) ? 1 : 2);
     const ordered = [...section.objects].sort((a, b) => layer(a) - layer(b));
+    // A section a formula can hide, holding only subreports filling it (that grow to what they show): SSRS keeps a
+    // hidden item's designed height, Crystal gives a suppressed section none, so it is designed as low as it goes.
+    const collapsible = scope === 'body' && !!hidden && this.options.embedSubreports !== false && !this.options.inline
+      && section.objects.length > 0 && section.objects.every((o) => o.kind === 'subreport' && !!o.size
+        && (o.position?.y ?? 0) <= 15 && (o.position?.y ?? 0) + o.size.height >= (section.height ?? 0) - 15);
     for (const obj of ordered) {
       const box = this.boxOf(obj, top);
+      if (collapsible) box.height = MIN_DESIGN_HEIGHT;
       if (obj.kind === 'chart') this.belowTitles(obj, section, box);
       if (scope === 'body' && this.runOn.has(obj)) {
         this.spanning.push({ obj, section, box, area, hidden });
@@ -1084,7 +1092,7 @@ class RdlBuilder {
         const both = hidden && own ? `=(${hidden.slice(1)}) OrElse (${own.slice(1)})` : (hidden ?? own);
         // Page 1's page header, moved into the body, keeps its subreports as in a page header (first row, items
         // at their places).
-        const room = section.height !== undefined ? twipsToInches(section.height) - (box.top - top) : undefined;
+        const room = collapsible ? MIN_DESIGN_HEIGHT : section.height !== undefined ? twipsToInches(section.height) - (box.top - top) : undefined;
         const inline = this.inlineSubreport(obj, box, area, both, scope === 'page' || pageLike ? 'page' : 'body', room);
         if (inline) items.push(inline.item);
         bottom = Math.max(bottom, box.top - top + (inline?.height ?? box.height));
@@ -1107,7 +1115,7 @@ class RdlBuilder {
     const before = !!(section.newPageBefore || breakFormula);
     const after = !!(section.newPageAfter || afterFormula);
     if (scope === 'body' && (before || after) && items.length) {
-      const sectionHeight = Math.max(section.height !== undefined ? twipsToInches(section.height) : 0, bottom);
+      const sectionHeight = collapsible ? bottom : Math.max(section.height !== undefined ? twipsToInches(section.height) : 0, bottom);
       // One break element: where both are formulas, each side is decided by its own (a break that is off is disabled).
       const both = before && after;
       // The break after it is off, too, where nothing prints after it (afterOff).
@@ -1129,7 +1137,7 @@ class RdlBuilder {
         el('Style', el('Border', el('Style', 'None'))));
       items.splice(0, items.length, wrapper);
     }
-    const height = Math.max(section.height !== undefined ? twipsToInches(section.height) : 0, bottom);
+    const height = collapsible ? bottom : Math.max(section.height !== undefined ? twipsToInches(section.height) : 0, bottom);
     return { items, height: section.objects.length || section.height ? height : 0 };
   }
 
@@ -3626,7 +3634,7 @@ class RdlBuilder {
           el('rd:DataSourceID', reportId(`${this.options.reportName}/${d.name}`))))),
       el('DataSets', this.datasetElement(this.dataSourceName), ...this.extraDataSets),
       el('ReportSections', el('ReportSection',
-        el('Body', el('ReportItems', ...fitInside(joinBoxes(clearLineOverlaps(bodyItems)))), el('Height', inches(Math.max(top, DEFAULT_HEIGHT))), el('Style')),
+        el('Body', el('ReportItems', ...fitInside(joinBoxes(clearLineOverlaps(bodyItems)))), el('Height', inches(top > 0 ? top : DEFAULT_HEIGHT)), el('Style')),
         el('Width', inches(Math.max(width, 1))),
         el('Page',
           header.items.length ? el('PageHeader', el('Height', inches(header.height)), el('PrintOnFirstPage', 'true'), el('PrintOnLastPage', 'true'), el('ReportItems', ...clearLineOverlaps(header.items)), el('Style')) : null,
