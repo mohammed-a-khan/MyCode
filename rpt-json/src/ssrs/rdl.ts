@@ -670,18 +670,30 @@ class RdlBuilder {
     this.addCode(t);
     for (const issue of t.issues) this.note(`${item}: formula ${ref.name}`, issue);
     if (t.expression === '=Nothing') return undefined;
+    // A condition reading a database field that is empty on the record reads it as 0 (or "") as Crystal does here:
+    // SSRS would compare Nothing (Nothing = 0 does not hold, so what it suppresses would print). Unless the formula
+    // tests IsNull itself.
+    const fields = [...new Set([...text.matchAll(/\{([^}@?#][^}]*\.[^}]*)\}/g)].map((m) => m[1]))];
+    const nullable = boolean && fields.length > 0 && !/\bisnull\b/i.test(text);
+    const expression = nullable ? `=${this.emptyAsDefault(t.expression.slice(1))}` : t.expression;
     // Outside the table, fields need a dataset scope; table rows outside every group read the first record.
     const outside = scope !== 'row';
-    if (!outside && !this.ungroupedRows) return t.expression;
-    const scoped = outside ? scopeOutsideRegion(t.expression.slice(1), this.dataset) : t.expression.slice(1);
-    // With no records Crystal gives a formula reading a database field no result: the condition does not hold, so
-    // what it suppresses still prints. A field that is merely empty on a record counts as 0 (or ""), as SSRS has it.
-    // Unless the formula tests IsNull itself.
-    const fields = [...new Set([...text.matchAll(/\{([^}@?#][^}]*\.[^}]*)\}/g)].map((m) => m[1]))];
-    if (boolean && fields.length && !/\bisnull\b/i.test(text)) {
-      return `=(CountRows(${vbString(this.dataset)}) > 0) AndAlso (${scoped})`;
-    }
+    if (!outside && !this.ungroupedRows) return expression;
+    const scoped = outside ? scopeOutsideRegion(expression.slice(1), this.dataset) : expression.slice(1);
+    // With no records Crystal gives such a formula no result: the condition does not hold, so what it suppresses
+    // still prints.
+    if (nullable) return `=(CountRows(${vbString(this.dataset)}) > 0) AndAlso (${scoped})`;
     return `=${scoped}`;
+  }
+
+  /** An expression's database fields read as their type's default (0, "") where empty on the record. */
+  private emptyAsDefault(expression: string): string {
+    const types = new Map([...this.fields.values()].map((f) => [f.name, f.type]));
+    return expression.replace(/(?:First|Last)\(Fields!(\w+)\.Value(?:, "[^"]*")?\)|Fields!(\w+)\.Value/g, (m, a: string | undefined, b: string | undefined) => {
+      const type = types.get(a ?? b ?? '');
+      const empty = ['integer', 'number', 'currency'].includes(type ?? '') ? '0' : type === 'string' || type === 'memo' ? '""' : undefined;
+      return empty === undefined ? m : `IIf(IsNothing(${m}), ${empty}, ${m})`;
+    });
   }
 
   private runningTotalExpression(name: string, item: string): string | undefined {

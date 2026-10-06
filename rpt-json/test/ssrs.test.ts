@@ -542,6 +542,8 @@ describe('layout conversion', () => {
         { name: 'RF2', height: 300, conditions: { suppress: { name: 'Section_Visibility', index: 1 } }, objects: [text('More')] },
       ] }] };
     assert.match(convertToRdl(followed, source, { reportName: 'F' }).rdl, /<BreakLocation>End<\/BreakLocation>\s*<Disabled>=[^<]*Fields!Amount\.Value[^<]*<\/Disabled>/);
+    // A count that is empty (not 0) on the record reads as 0, as Crystal has it: the section is hidden and breaks nothing.
+    assert.match(convertToRdl(followed, source, { reportName: 'F' }).rdl, /<Disabled>=[^<]*IIf\(IsNothing\(First\(Fields!Amount\.Value, "DataSet1"\)\), 0, First\(Fields!Amount\.Value, "DataSet1"\)\) = 0[^<]*<\/Disabled>/);
   });
 
   it('keeps a group together when its record says so', () => {
