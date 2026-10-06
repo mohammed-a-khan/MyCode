@@ -561,6 +561,12 @@ describe('layout conversion', () => {
         { name: 'RF2', height: 300, conditions: { suppress: { name: 'Section_Visibility', index: 1 } }, objects: [text('More')] },
       ] }] };
     assert.match(convertToRdl(followed, source, { reportName: 'F' }).rdl, /<BreakLocation>End<\/BreakLocation>\s*<Disabled>=[^<]*Fields!Amount\.Value[^<]*<\/Disabled>/);
+    // A hidden section breaks no page itself, whatever follows it.
+    const hiddenToo: ReportDefinition = { ...followed, layout: [{ name: 'ReportFooterArea1', sections: [
+      { name: 'RF1', height: 300, newPageAfter: true, conditions: { suppress: { name: 'Section_Visibility', index: 1 } }, objects: [text('First')] },
+      { name: 'RF2', height: 300, conditions: { suppress: { name: 'Section_Visibility', index: 1 } }, objects: [text('Second')] },
+    ] }] };
+    assert.match(convertToRdl(hiddenToo, source, { reportName: 'H' }).rdl, /<BreakLocation>End<\/BreakLocation>\s*<Disabled>=\(\(CountRows\("DataSet1"\) &gt; 0\) AndAlso [^<]*\) OrElse \(/);
     // A count that is empty (not 0) on the record reads as 0, as Crystal has it: the section is hidden and breaks nothing.
     assert.match(convertToRdl(followed, source, { reportName: 'F' }).rdl, /<Disabled>=[^<]*IIf\(IsNothing\(First\(Fields!Amount\.Value, "DataSet1"\)\), 0, First\(Fields!Amount\.Value, "DataSet1"\)\) = 0[^<]*<\/Disabled>/);
   });
