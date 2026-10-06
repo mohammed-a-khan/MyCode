@@ -1029,7 +1029,7 @@ class RdlBuilder {
   }
 
   /** Places a section's objects at their positions starting at `top`; returns items and the block height. */
-  private placeSection(section: SectionInfo, top: number, scope: Scope, area: string, pageLike = false): { items: XmlElement[]; height: number } {
+  private placeSection(section: SectionInfo, top: number, scope: Scope, area: string, pageLike = false, afterOff?: string): { items: XmlElement[]; height: number } {
     const hidden = section.conditions?.suppress ? this.conditionExpression(section.conditions.suppress, false, `Section ${section.name}`, scope) : undefined;
     if (hidden) this.note(`Section ${section.name}`, 'its suppress condition was applied to each item as a Hidden expression');
     const items: XmlElement[] = [];
@@ -1083,9 +1083,11 @@ class RdlBuilder {
       const sectionHeight = Math.max(section.height !== undefined ? twipsToInches(section.height) : 0, bottom);
       // One break element: where both are formulas, each side is decided by its own (a break that is off is disabled).
       const both = before && after;
+      // The break after it is off, too, where nothing prints after it (afterOff).
+      const afterIsOff = afterFormula && afterOff ? `(Not (${afterFormula.slice(1)}) OrElse (${afterOff}))` : afterFormula ? `Not (${afterFormula.slice(1)})` : afterOff ? `(${afterOff})` : undefined;
       const switchedOff = both
-        ? (breakFormula && afterFormula ? `=Not (${breakFormula.slice(1)}) AndAlso Not (${afterFormula.slice(1)})` : undefined)
-        : before ? (breakFormula ? `=Not (${breakFormula.slice(1)})` : undefined) : (afterFormula ? `=Not (${afterFormula.slice(1)})` : undefined);
+        ? (breakFormula && afterIsOff ? `=Not (${breakFormula.slice(1)}) AndAlso ${afterIsOff}` : undefined)
+        : before ? (breakFormula ? `=Not (${breakFormula.slice(1)})` : undefined) : (afterIsOff ? `=${afterIsOff}` : undefined);
       const wrapper = el('Rectangle', { Name: this.itemNames.make(`${section.name || 'Section'}_Page`) },
         el('ReportItems', ...items.map((item) => moveItem(item, -top, 0))),
         el('PageBreak', el('BreakLocation', both ? 'StartAndEnd' : before ? 'Start' : 'End'), switchedOff ? el('Disabled', switchedOff) : null),
@@ -3288,8 +3290,22 @@ class RdlBuilder {
       top += table.height;
     }
     const footerTop = top;
-    for (const section of areas.reportFooter) {
-      const placed = this.placeSection(section, top, 'body', 'Report Footer');
+    for (const [i, original] of areas.reportFooter.entries()) {
+      // Crystal prints no page after the report's last section: New Page After there breaks no page. Followed only
+      // by sections a formula can hide, it breaks none where they are all hidden.
+      let section = original;
+      let afterOff: string | undefined;
+      if (section.newPageAfter || section.conditions?.newPageAfter) {
+        const following = areas.reportFooter.slice(i + 1).filter((s) => !s.suppressed && (s.objects.length || s.height));
+        if (!following.length) {
+          const { newPageAfter: _formula, ...conditions } = section.conditions ?? {};
+          section = { ...section, newPageAfter: false, conditions };
+        } else if (following.every((s) => s.conditions?.suppress)) {
+          const hidden = following.map((s) => this.conditionExpression(s.conditions!.suppress!, false, `Section ${s.name}`, 'body'));
+          if (hidden.every(Boolean)) afterOff = hidden.map((h) => `(${h!.slice(1)})`).join(' AndAlso ');
+        }
+      }
+      const placed = this.placeSection(section, top, 'body', 'Report Footer', false, afterOff);
       items.push(...placed.items);
       top += placed.height;
     }
