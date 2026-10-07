@@ -1394,7 +1394,9 @@ class RdlBuilder {
       }
       case 'line':
         return el('Line', { Name: name() },
-          el('Top', inches(box.top)), el('Left', inches(box.left)),
+          // Crystal draws a thick line's width down from its place (SSRS around it): a horizontal one is moved down by
+          // half its width, so a rule at a section's foot still meets what follows.
+          el('Top', inches(box.top + (obj.size?.height ? 0 : twipsToInches(thickHalf(obj))))), el('Left', inches(box.left)),
           el('Height', inches(obj.size ? box.height : 0)), el('Width', inches(box.width)),
           visibility,
           el('Style', el('Border',
