@@ -486,6 +486,8 @@ describe('layout conversion', () => {
     // The middle one, with an item to its right, gets an empty rectangle in its place; the right one has nothing beside it.
     assert.deepEqual(box('Middle_Place'), box('Middle'));
     assert.ok(!rdl.includes('Right_Place'));
+    // It shows only where the item is hidden (over a shown item it would cover its border).
+    assert.match(rdl, /<Rectangle Name="Middle_Place">[\s\S]*?<Hidden>=Not \([^<]*\)<\/Hidden>/);
   });
 
   it('scales a bar chart of a single bar as Crystal does', () => {
