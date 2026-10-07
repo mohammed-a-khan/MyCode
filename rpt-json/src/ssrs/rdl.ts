@@ -429,7 +429,9 @@ class RdlBuilder {
 
   constructor(definition: ReportDefinition, source: DataSourceInfo, options: RdlOptions) {
     const spread = spreadFormulaColumns(definition);
-    this.definition = spread.definition;
+    // Text objects show only the lines their height holds, as in Crystal.
+    this.definition = { ...spread.definition, layout: spread.definition.layout.map((area) => ({ ...area,
+      sections: area.sections.map((section) => ({ ...section, objects: section.objects.map(clippedText) })) })) };
     for (const field of this.definition.groupsKeptTogether ?? []) {
       this.note(`Group on ${field}`, 'is kept together on a page (Crystal Keep Group Together, read from the group record): a value that does not fit in what is left of a page starts the next; SSRS does this in print and PDF, its web viewer may not');
     }
@@ -2437,6 +2439,27 @@ class RdlBuilder {
       }
     }
 
+    // A table grouped on a constant prints its outer header and footer even with no data; Crystal prints the
+    // sections between them once too, blank (the band under the headings, with its column lines). Rows of their own,
+    // shown only where there is no data (kept aside until the table is laid out, as they come last).
+    const rowsBefore = rows.length;
+    const heightBefore = height;
+    const emptyMembers = levels >= 1 && this.isConstantGroup(this.groupFields[0])
+      ? [...Array.from({ length: levels - 1 }, (_, i) => areas.groupHeaders.get(i + 2) ?? []).flat(), ...areas.detail,
+        ...Array.from({ length: levels - 1 }, (_, i) => areas.groupFooters.get(levels - i) ?? []).flat()]
+        .filter((section) => !section.suppressed && section.objects.length > 0)
+        .flatMap((section, i) => addRows([section], `NoData_${i + 1}`, 'No data', null))
+        .map((m) => {
+          const own = (m.children.find((c) => typeof c === 'object' && c !== null && (c as XmlElement).name === 'Visibility') as XmlElement | undefined)
+            ?.children.map((c) => (typeof c === 'object' && c !== null ? String((c as XmlElement).children[0] ?? '') : '')).find(Boolean);
+          const hidden = own && own.startsWith('=') ? `=CountRows() > 0 OrElse (${own.slice(1)})` : '=CountRows() > 0';
+          return { ...m, children: [el('Visibility', el('Hidden', hidden)), ...m.children.filter((c) => !(typeof c === 'object' && c !== null && (c as XmlElement).name === 'Visibility'))] };
+        })
+      : [];
+    const emptyRows = rows.splice(rowsBefore);
+    const emptyHeight = height - heightBefore;
+    height = heightBefore;
+
     // Sorting: record sorts go on the details; group sorts / Top N go on their group.
     const sorts = this.definition.sorts ?? this.definition.sortFields.map((field) => ({ field, descending: false, bySummary: false }));
     const detailSorts = sorts
@@ -2493,7 +2516,9 @@ class RdlBuilder {
       if (level === 1 && this.isConstantGroup(field) && !filters.length) {
         // A group on a constant holds every record: its header and footer are the table's own rows, printed (as in
         // Crystal) even when there is no data, where a group's rows are not.
-        outer = [...headerMembers[0], member, ...footerMembers[0]];
+        outer = [...headerMembers[0], member, ...footerMembers[0], ...emptyMembers];
+        rows.push(...emptyRows);
+        height += emptyHeight;
         continue;
       }
       member = el('TablixMember',
@@ -4109,6 +4134,23 @@ function textParagraphs(obj: ReportObject): { lines: string[]; align?: ReportObj
   let end = parts.length;
   while (end > 1 && !parts[end - 1].trim()) end--;
   return parts.slice(0, end).map((text, i) => ({ align: aligns[i], lines: wrapSpaces(text, obj, false, aligns[i]).split('\n') }));
+}
+
+/**
+ * A text object of lines broken by hand, more than its height shows: Crystal prints only the lines that fit (a
+ * text object does not grow by itself), where SSRS would grow it to show them all.
+ */
+function clippedText(obj: ReportObject): ReportObject {
+  if (obj.kind !== 'text' || obj.embeddedFields?.length || obj.runs?.some((r) => 'field' in r) || !obj.size) return obj;
+  const text = obj.runs ? obj.runs.map((r) => ('text' in r ? r.text : '')).join('') : obj.text ?? '';
+  const parts = text.replace(/\n+$/, '').split('\n');
+  // A line is the font's size and a seventh again (11pt: 253 twips); one shown at least half is counted.
+  const line = (obj.style?.size ?? 10) * 20 * 1.15;
+  const fit = Math.max(1, Math.floor((obj.size.height + line / 2) / line));
+  if (parts.length <= fit) return obj;
+  const kept = parts.slice(0, fit).join('\n');
+  return { ...obj, text: kept, ...(obj.runs ? { runs: [{ text: kept }] } : {}),
+    ...(obj.paragraphAligns ? { paragraphAligns: obj.paragraphAligns.slice(0, fit) } : {}) };
 }
 
 function flattenRectangle(item: XmlElement): XmlElement[] {
