@@ -472,6 +472,30 @@ describe('layout conversion', () => {
     assert.match(convertToRdl(pie(false), source, { reportName: 'P' }).rdl, /<Y>=IIf\(CDbl\(IIf\(IsNothing\([^<]*\)\) = 0, Nothing, [^<]*<\/Y>/);
   });
 
+  it('keeps the place of an item a formula can hide, so the items to its right stay put', () => {
+    const subSource: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Customer', type: 'string' }] }] };
+    const sub: ReportDefinition = { ...emptyDefinition(), layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 3000, objects: [{ kind: 'text', name: 'Title', text: 'Title', position: { x: 60, y: 60 }, size: { width: 3000, height: 255 } }] }] }] };
+    const subreport = (name: string, x: number, hideable = false) => ({ kind: 'subreport' as const, name, subreport: { index: 1, onDemand: false }, position: { x, y: 40 }, size: { width: 4000, height: 215 },
+      ...(hideable ? { conditions: { suppress: { name: 'Suppress', index: 1 } } } : {}) });
+    const main: ReportDefinition = { ...emptyDefinition(), page: { orientation: 'landscape', paperSize: 1 },
+      formulas: [{ name: 'Suppress', index: 1, kind: 'conditionalFormat', text: '{Orders.Amount} = 0', referencedFields: ['Orders.Amount'] }],
+      layout: [{ name: 'ReportFooterArea1', sections: [{ name: 'Row', height: 300, newPageBefore: true, objects: [subreport('Left', 140), subreport('Middle', 4300, true), subreport('Right', 8460, true)] }] }] };
+    const { rdl } = convertToRdl(main, source, { reportName: 'Main', subreports: new Map([[1, { name: 'Sub1', links: [], definition: sub, dataSource: subSource }]]) });
+    const box = (name: string) => new RegExp(`<Rectangle Name="${name}">[\\s\\S]*?<KeepTogether>true</KeepTogether>\\s*<Top>([^<]*)</Top>\\s*<Left>([^<]*)</Left>`).exec(rdl)?.slice(1);
+    // The middle one, with an item to its right, gets an empty rectangle in its place; the right one has nothing beside it.
+    assert.deepEqual(box('Middle_Place'), box('Middle'));
+    assert.ok(!rdl.includes('Right_Place'));
+  });
+
+  it('scales a bar chart of a single bar as Crystal does', () => {
+    const bars: ReportDefinition = { ...emptyDefinition(), layout: [{ name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 3000, objects: [
+      { kind: 'chart', name: 'Bars', position: { x: 0, y: 0 }, size: { width: 4000, height: 2800 }, chart: { family: 0, graphType: 0, values: ['Sum of Orders.Amount'], onChangeOf: 'Orders.Region' } }] }] }] };
+    const rdl = convertToRdl(bars, source, { reportName: 'B' }).rdl;
+    assert.match(rdl, /<Minimum>=IIf\(CountDistinct\(Fields!Region\.Value\) = 1 [^<]* \* 0\.4, Double\.NaN\)<\/Minimum>/);
+    assert.match(rdl, /<Maximum>=IIf\(CountDistinct\(Fields!Region\.Value\) = 1 [^<]* \* 1\.6, Double\.NaN\)<\/Maximum>/);
+  });
+
   it('never starts a row a rounding step above the bottom of the row before it', () => {
     const subSource: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Customer', type: 'string' }] }] };
     const sub: ReportDefinition = { ...emptyDefinition(), layout: [

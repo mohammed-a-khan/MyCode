@@ -1577,6 +1577,15 @@ class RdlBuilder {
     // Crystal: horizontal gridlines from the value axis, every category labelled, and the value axis scaled to the
     // values (not from zero).
     const isLine = style.type === 'Line';
+    // Crystal scales a bar chart of a single bar from 0.4 to 1.6 times its value (40% to 160% for 100%); SSRS
+    // would start just below the value and run far above it. Otherwise the axis is SSRS's own.
+    const barValue = style.type === 'Column' && values.length === 1 && !seriesExpression && !!categoryExpression && categoryExpression !== 'Nothing'
+      ? this.fieldObjectValue(values[0], 'row', item).expression : undefined;
+    // Only a summary of a field's categories can be read for the whole chart.
+    const single = barValue && /^(Sum|Avg|Min|Max|Count|CountDistinct)\(/.test(barValue) && /\bFields!/.test(categoryExpression ?? '') ? barValue : undefined;
+    const scaled = (factor: number) => single
+      ? `=IIf(CountDistinct(${categoryExpression}) = 1 AndAlso CDbl(IIf(IsNothing(${single}), 0, ${single})) > 0, CDbl(IIf(IsNothing(${single}), 0, ${single})) * ${factor}, Double.NaN)`
+      : 'NaN';
     const axis = (title: string | undefined, kind: 'category' | 'value', format?: string) => el('ChartAxis', { Name: 'Primary' },
       // Crystal's axis text is small, as small as its data labels.
       el('Style', el('FontFamily', 'Arial'), el('FontSize', '5.5pt'), el('FontWeight', 'Normal'), format ? el('Format', format) : null),
@@ -1596,7 +1605,7 @@ class RdlBuilder {
       el('CrossAt', 'NaN'),
       // Crystal fits the value axis to the values (bars too: 1.00% to 1.40%, not from zero).
       kind === 'value' && !isPie ? el('IncludeZero', 'false') : null,
-      el('Minimum', 'NaN'), el('Maximum', 'NaN'),
+      el('Minimum', kind === 'value' ? scaled(0.4) : 'NaN'), el('Maximum', kind === 'value' ? scaled(1.6) : 'NaN'),
       el('ChartAxisScaleBreak', el('Style')));
     // One value over categories, as bars: Crystal gives each bar its own colour, in its palette's order (SSRS
     // would colour the whole series alike), and shows no legend for it.
@@ -3649,7 +3658,7 @@ class RdlBuilder {
           el('rd:DataSourceID', reportId(`${this.options.reportName}/${d.name}`))))),
       el('DataSets', this.datasetElement(this.dataSourceName), ...this.extraDataSets),
       el('ReportSections', el('ReportSection',
-        el('Body', el('ReportItems', ...clearRoundingOverlaps(fitInside(joinBoxes(clearLineOverlaps(bodyItems))))), el('Height', inches(top > 0 ? top : DEFAULT_HEIGHT)), el('Style')),
+        el('Body', el('ReportItems', ...holdPlaces(clearRoundingOverlaps(fitInside(joinBoxes(clearLineOverlaps(bodyItems)))), this.itemNames)), el('Height', inches(top > 0 ? top : DEFAULT_HEIGHT)), el('Style')),
         el('Width', inches(Math.max(width, 1))),
         el('Page',
           header.items.length ? el('PageHeader', el('Height', inches(header.height)), el('PrintOnFirstPage', 'true'), el('PrintOnLastPage', 'true'), el('ReportItems', ...clearLineOverlaps(header.items)), el('Style')) : null,
@@ -4049,6 +4058,40 @@ function flattenRectangle(item: XmlElement): XmlElement[] {
  * title, overlapping it by a few twips) ends at the line: SSRS moves or drops items that overlap, and the rule
  * would be lost.
  */
+/**
+ * An item a formula can hide, with items beside it to its right, gets an empty rectangle of its size under it: SSRS
+ * moves the items to the right of a hidden item into its room, where Crystal leaves the room empty.
+ */
+function holdPlaces(items: XmlElement[], names: { make(name: string): string }): XmlElement[] {
+  const hideable = (item: XmlElement) => {
+    const visibility = item.children.find((c): c is XmlElement => typeof c === 'object' && c !== null && (c as XmlElement).name === 'Visibility');
+    const hidden = visibility?.children.find((c): c is XmlElement => typeof c === 'object' && c !== null && (c as XmlElement).name === 'Hidden');
+    return !!hidden && String(hidden.children[0] ?? '').startsWith('=');
+  };
+  const out: XmlElement[] = [];
+  for (let item of items) {
+    // A section's page rectangle: the same within it.
+    if (item.name === 'Rectangle' && /_Page$/.test(item.attributes.Name ?? '')) {
+      item = { ...item, children: item.children.map((c) => (typeof c === 'object' && c !== null && (c as XmlElement).name === 'ReportItems'
+        ? { ...(c as XmlElement), children: holdPlaces((c as XmlElement).children.filter((x): x is XmlElement => typeof x === 'object' && x !== null), names) } : c)) };
+    }
+    const top = itemNumber(item, 'Top');
+    const bottom = top + itemNumber(item, 'Height');
+    const right = itemRight(item);
+    const beside = hideable(item) && items.some((other) => other !== item && itemNumber(other, 'Left') >= right - 0.01
+      && itemNumber(other, 'Top') < bottom && itemNumber(other, 'Top') + itemNumber(other, 'Height') > top);
+    if (beside) {
+      out.push(el('Rectangle', { Name: names.make(`${item.attributes.Name ?? 'Item'}_Place`) },
+        el('KeepTogether', 'true'),
+        el('Top', inches(top)), el('Left', inches(itemNumber(item, 'Left'))), el('Height', inches(itemNumber(item, 'Height'))),
+        el('Width', inches(right - itemNumber(item, 'Left'))),
+        el('Style', el('Border', el('Style', 'None')))));
+    }
+    out.push(item);
+  }
+  return out;
+}
+
 /**
  * Items that start a rounding step (up to 0.002in) above the bottom of an item above them start at its bottom
  * instead: SSRS keeps an item that overlaps the one above it at its place beside that one (it is not pushed down
