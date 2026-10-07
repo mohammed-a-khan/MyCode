@@ -488,6 +488,12 @@ describe('layout conversion', () => {
     assert.ok(!rdl.includes('Right_Place'));
     // It shows only where the item is hidden (over a shown item it would cover its border).
     assert.match(rdl, /<Rectangle Name="Middle_Place">[\s\S]*?<Hidden>=Not \([^<]*\)<\/Hidden>/);
+    // A row of boxes under it keeps its own top border: a box a formula can hide does not draw the side they share.
+    const under: ReportDefinition = { ...main, layout: [{ name: 'ReportFooterArea1', sections: [
+      { name: 'Row1', height: 300, objects: [{ ...subreport('Upper', 140, true), border: { sides: [1, 1, 1, 1], width: 20 } }] },
+      { name: 'Row2', height: 300, objects: [{ ...subreport('Lower', 140), border: { sides: [1, 1, 1, 1], width: 20 } }] }] }] };
+    const stacked = convertToRdl(under, source, { reportName: 'Main', subreports: new Map([[1, { name: 'Sub1', links: [], definition: sub, dataSource: subSource }]]) }).rdl;
+    assert.ok(stacked.includes('<Rectangle Name="Lower">') && !stacked.includes('<TopBorder>'), 'the lower box keeps its top border');
   });
 
   it('scales a bar chart of a single bar as Crystal does', () => {

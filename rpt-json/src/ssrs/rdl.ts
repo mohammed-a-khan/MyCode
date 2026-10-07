@@ -4196,6 +4196,13 @@ function clearLineOverlaps(items: XmlElement[]): XmlElement[] {
  * border): Crystal's print shows one line between them; SSRS would draw two lines a few hundredths of an inch
  * apart, reading as one thick line. The second box moves up to the first and leaves that side to it.
  */
+/** Whether a formula can hide an item. */
+function canHide(item: XmlElement): boolean {
+  const visibility = child(item, 'Visibility');
+  const hidden = visibility && child(visibility, 'Hidden');
+  return !!hidden && hidden.children.join('').startsWith('=');
+}
+
 function joinBoxes(input: XmlElement[]): XmlElement[] {
   const framed = (i: XmlElement) => {
     if (i.name !== 'Rectangle') return false;
@@ -4228,7 +4235,8 @@ function joinBoxes(input: XmlElement[]): XmlElement[] {
   for (const b of boxes) {
     const pb = pos(b);
     for (const { item: a, p: pa, final, held: inside } of [...boxes.map((item) => ({ item, p: pos(item), final: pos(item), held: false })), ...held]) {
-      if (a === b) continue;
+      // A box a formula can hide may not draw the side they share: the other keeps its own.
+      if (a === b || canHide(a)) continue;
       const gapX = pb.left - pa.right;
       // Side by side: a row of boxes alike in height (a grid of panels).
       if (!inside && gapX > 0 && gapX <= 0.1 && Math.abs(pa.top - pb.top) <= 0.05 && Math.abs((pa.bottom - pa.top) - (pb.bottom - pb.top)) <= 0.05) {
