@@ -542,7 +542,8 @@ describe('layout conversion', () => {
     const main: ReportDefinition = { ...emptyDefinition(), page: { orientation: 'landscape', paperSize: 1 },
       formulas: [{ name: 'Suppress', index: 1, kind: 'conditionalFormat', text: '{Orders.Amount} = 0', referencedFields: ['Orders.Amount'] }],
       layout: [{ name: 'ReportFooterArea1', sections: [
-        { name: 'Summary', height: 630, objects: [box('Upper', 60, 719), subreport('Inner', 170, 425, 9040, 205)] },
+        { name: 'Summary', height: 630, objects: [box('Upper', 60, 719), subreport('Inner', 170, 425, 9040, 205),
+          { kind: 'line', name: 'Divider', position: { x: 4665, y: 375 }, size: { width: 0, height: 390 }, border: { sides: [1, 0, 0, 0], width: 20 } }] },
         // A table its section can hide, designed as low as it goes, between the boxes.
         { name: 'Table', height: 195, conditions: { suppress: { name: 'Suppress', index: 1 } }, objects: [subreport('Between', 125, 0, 14955, 195, true)] },
         { name: 'Charts', height: 2797, objects: [subreport('Left', 240, 40, 3865, 60), box('Lower', 0, 2870)] }] }] };
@@ -550,6 +551,8 @@ describe('layout conversion', () => {
     const lower = rdl.slice(rdl.indexOf('<Rectangle Name="Lower">'));
     const inLower = lower.slice(0, lower.indexOf('</ReportItems>'));
     assert.ok(!inLower.includes('Name="Between"'), 'the table is not drawn inside the lower box');
+    assert.ok(!inLower.includes('<Line '), 'a line of the box above is not drawn again in the lower box');
+    assert.equal((rdl.match(/<Line Name="Divider/g) ?? []).length, 1);
     // An item's own Top and Height (not those of the items inside it).
     const own = (name: string, tag: string) => {
       const tags = /<(\/?)ReportItems>|<(Top|Height)>([^<]*)in<\/(?:Top|Height)>/g;
