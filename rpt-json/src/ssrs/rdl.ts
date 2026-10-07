@@ -385,6 +385,8 @@ export function convertToRdl(definition: ReportDefinition, dataSource: DataSourc
 class RdlBuilder {
   private readonly review: ReviewNote[] = [];
   private readonly itemNames = new NameSet();
+  /** Placing the report footer: conditions read the last record, as in Crystal. */
+  private lastRecord = false;
   private readonly fieldNames = new NameSet();
   private readonly imageNames = new NameSet();
   private readonly fields = new Map<string, DatasetField>();
@@ -681,7 +683,8 @@ class RdlBuilder {
     // Outside the table, fields need a dataset scope; table rows outside every group read the first record.
     const outside = scope !== 'row';
     if (!outside && !this.ungroupedRows) return expression;
-    const scoped = outside ? scopeOutsideRegion(expression.slice(1), this.dataset) : expression.slice(1);
+    // Crystal reads a report footer's conditions on the last record.
+    const scoped = outside ? scopeOutsideRegion(expression.slice(1), this.dataset, this.lastRecord ? 'Last' : 'First') : expression.slice(1);
     // With no records Crystal gives such a formula no result: the condition does not hold, so what it suppresses
     // still prints.
     if (nullable) return `=(CountRows(${vbString(this.dataset)}) > 0) AndAlso (${scoped})`;
@@ -1590,7 +1593,8 @@ class RdlBuilder {
       // Crystal's axis text is small, as small as its data labels.
       el('Style', el('FontFamily', 'Arial'), el('FontSize', '5.5pt'), el('FontWeight', 'Normal'), format ? el('Format', format) : null),
       el('ChartAxisTitle', el('Caption', title ?? ''), el('Style', el('FontFamily', 'Arial'), el('FontSize', '5.5pt'), el('FontWeight', 'Normal'))),
-      kind === 'category' ? el('Interval', '1') : null,
+      // Crystal's single bar: six steps from 0.4 to 1.6 times its value (every 20% for 100%).
+      kind === 'category' ? el('Interval', '1') : single && kind === 'value' ? el('Interval', scaled(0.2)) : null,
       // Crystal angles bar charts' category labels; a line chart's dates are staggered on two rows where they do
       // not fit on one (SSRS may offset them, but neither turn nor resize them).
       kind === 'category' && !isPie && !isLine ? el('Angle', '-45') : null,
@@ -3357,6 +3361,7 @@ class RdlBuilder {
       top += table.height;
     }
     const footerTop = top;
+    this.lastRecord = true;
     for (const [i, original] of areas.reportFooter.entries()) {
       // Crystal prints no page after the report's last section: New Page After there breaks no page. Followed only
       // by sections a formula can hide, it breaks none where they are all hidden.
@@ -3376,6 +3381,7 @@ class RdlBuilder {
       items.push(...placed.items);
       top += placed.height;
     }
+    this.lastRecord = false;
     // Run-on objects of the report footer have nothing below them: a box around subreports grows with them,
     // anything else is drawn as cut.
     for (const span of this.growAround(items, this.spanning.splice(0))) {
@@ -3697,7 +3703,7 @@ const SCOPED_AGGREGATES = ['Sum', 'Count', 'Avg', 'Max', 'Min', 'CountDistinct',
  * field references read the dataset's first row, and aggregates without a scope get the dataset as scope.
  * Text inside string literals is left alone.
  */
-export function scopeOutsideRegion(expression: string, dataset: string): string {
+export function scopeOutsideRegion(expression: string, dataset: string, record: 'First' | 'Last' = 'First'): string {
   const scopeArg = vbString(dataset);
   let out = '';
   let i = 0;
@@ -3734,7 +3740,7 @@ export function scopeOutsideRegion(expression: string, dataset: string): string 
     }
     const field = /^Fields!\w+\.Value/.exec(expression.slice(i));
     if (field && (i === 0 || !/[\w.!]/.test(expression[i - 1]))) {
-      out += `First(${field[0]}, ${scopeArg})`;
+      out += `${record}(${field[0]}, ${scopeArg})`;
       i += field[0].length;
       continue;
     }
@@ -4059,8 +4065,9 @@ function flattenRectangle(item: XmlElement): XmlElement[] {
  * would be lost.
  */
 /**
- * An item a formula can hide, with items beside it to its right, gets an empty rectangle of its size under it: SSRS
- * moves the items to the right of a hidden item into its room, where Crystal leaves the room empty.
+ * An item a formula can hide, with items beside it to its right, gets an empty rectangle as wide as it at its top,
+ * a hair high (taking up no room down the page): SSRS moves the items to the right of a hidden item into its room,
+ * where Crystal leaves the room empty.
  */
 function holdPlaces(items: XmlElement[], names: { make(name: string): string }): XmlElement[] {
   const hideable = (item: XmlElement) => {
@@ -4083,7 +4090,7 @@ function holdPlaces(items: XmlElement[], names: { make(name: string): string }):
     if (beside) {
       out.push(el('Rectangle', { Name: names.make(`${item.attributes.Name ?? 'Item'}_Place`) },
         el('KeepTogether', 'true'),
-        el('Top', inches(top)), el('Left', inches(itemNumber(item, 'Left'))), el('Height', inches(itemNumber(item, 'Height'))),
+        el('Top', inches(top)), el('Left', inches(itemNumber(item, 'Left'))), el('Height', inches(MIN_DESIGN_HEIGHT)),
         el('Width', inches(right - itemNumber(item, 'Left'))),
         el('Style', el('Border', el('Style', 'None')))));
     }
