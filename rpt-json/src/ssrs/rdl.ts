@@ -672,12 +672,12 @@ class RdlBuilder {
     this.addCode(t);
     for (const issue of t.issues) this.note(`${item}: formula ${ref.name}`, issue);
     if (t.expression === '=Nothing') return undefined;
-    // A condition reading a database field that is empty on the record reads it as 0 (or "") as Crystal does here:
-    // SSRS would compare Nothing (Nothing = 0 does not hold, so what it suppresses would print). Unless the formula
-    // tests IsNull itself.
+    // A condition reading a database field that is empty on the record has no result in Crystal (it converts no
+    // empty value to a default unless told to): the condition does not hold, so what it would suppress still prints.
+    // SSRS would compare the empty value as 0 or "". Unless the formula tests IsNull itself.
     const fields = [...new Set([...text.matchAll(/\{([^}@?#][^}]*\.[^}]*)\}/g)].map((m) => m[1]))];
     const nullable = boolean && fields.length > 0 && !/\bisnull\b/i.test(text);
-    const expression = nullable ? `=${this.emptyAsDefault(t.expression.slice(1))}` : t.expression;
+    const expression = nullable ? `=${this.unlessEmpty(t.expression.slice(1))}` : t.expression;
     // Outside the table, fields need a dataset scope; table rows outside every group read the first record.
     const outside = scope !== 'row';
     if (!outside && !this.ungroupedRows) return expression;
@@ -705,14 +705,26 @@ class RdlBuilder {
     return reads(this.definition.formulaTexts?.[ref.index] ?? this.definition.formulas.find((f) => f.index === ref.index)?.text);
   }
 
-  /** An expression's database fields read as their type's default (0, "") where empty on the record. */
-  private emptyAsDefault(expression: string): string {
+  /** A True/False expression that holds only where none of the database fields it reads is empty on the record. */
+  private unlessEmpty(expression: string): string {
     const types = new Map([...this.fields.values()].map((f) => [f.name, f.type]));
-    return expression.replace(/(?:First|Last)\(Fields!(\w+)\.Value(?:, "[^"]*")?\)|Fields!(\w+)\.Value/g, (m, a: string | undefined, b: string | undefined) => {
-      const type = types.get(a ?? b ?? '');
-      const empty = ['integer', 'number', 'currency'].includes(type ?? '') ? '0' : type === 'string' || type === 'memo' ? '""' : undefined;
-      return empty === undefined ? m : `IIf(IsNothing(${m}), ${empty}, ${m})`;
-    });
+    // Summaries leave empty values out (in Crystal too): only the fields read outside them count.
+    const summarized: [number, number][] = [];
+    for (const m of expression.matchAll(/\b(?:Sum|Avg|Min|Max|Count|CountDistinct|RunningValue|Aggregate|StDev|StDevP|Var|VarP)\(/g)) {
+      let depth = 0;
+      let end = m.index! + m[0].length - 1;
+      for (; end < expression.length; end++) {
+        if (expression[end] === '(') depth++;
+        else if (expression[end] === ')' && --depth === 0) break;
+      }
+      summarized.push([m.index!, end]);
+    }
+    const reads = new Set<string>();
+    for (const m of expression.matchAll(/(?:First|Last)\(Fields!(\w+)\.Value(?:, "[^"]*")?\)|Fields!(\w+)\.Value/g)) {
+      if (summarized.some(([from, to]) => m.index! > from && m.index! < to)) continue;
+      if (['integer', 'number', 'currency', 'string', 'memo'].includes(types.get(m[1] ?? m[2]) ?? '')) reads.add(m[0]);
+    }
+    return reads.size ? `${[...reads].map((r) => `Not IsNothing(${r})`).join(' AndAlso ')} AndAlso (${expression})` : expression;
   }
 
   private runningTotalExpression(name: string, item: string): string | undefined {
