@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { chartOptions, type ChartInfo, type DataSourceInfo, type ReportDefinition, type ReportObject } from '../src/crystal/model.ts';
+import { chartOptions, chartStyleTail, type ChartInfo, type DataSourceInfo, type ReportDefinition, type ReportObject } from '../src/crystal/model.ts';
 import { encodeString } from '../src/crystal/strings.ts';
 import { readCfb } from '../src/index.ts';
 import { convertDocumentToSsrs, reviewMarkdown } from '../src/ssrs/convert.ts';
@@ -456,6 +456,20 @@ describe('layout conversion', () => {
     const body = rdl.slice(rdl.indexOf('<Body>'), rdl.indexOf('</Body>'));
     assert.match(body, /<Rectangle Name="CSub">[\s\S]*<Top>0.02in<\/Top>\s*<Left>0in<\/Left>\s*<Height>0.01in<\/Height>/);
     assert.match(body, /<\/ReportItems>\s*<Height>0.03in<\/Height>\s*<Style \/>\s*$/);
+  });
+
+  it('starts a pie at Crystal\'s second colour unless its style record has the tail', () => {
+    const body = Uint8Array.from([0x03, 0x1f, ...encodeString('Title'), 0, 1, 2, ...encodeString(''), 1, 0, 1, 0, 0, 0, 0, 0]);
+    const tail = Uint8Array.from([...body, ...encodeString(''), 0, 0, 0, 0, 0]);
+    assert.equal(chartStyleTail(body), false);
+    assert.equal(chartStyleTail(tail), true);
+    const pie = (styleTail: boolean): ReportDefinition => ({ ...emptyDefinition(), layout: [{ name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 3000, objects: [
+      { kind: 'chart', name: 'Pie', position: { x: 0, y: 0 }, size: { width: 4000, height: 2800 }, chart: { family: 3, graphType: 31, styleTail, values: ['Sum of Orders.Amount'], onChangeOf: 'Orders.Region' } }] }] }] });
+    const firstColour = (rdl: string) => /<ChartCustomPaletteColor>([^<]*)<\/ChartCustomPaletteColor>/.exec(rdl)?.[1];
+    assert.equal(firstColour(convertToRdl(pie(false), source, { reportName: 'P' }).rdl), '#F0A04B');
+    assert.equal(firstColour(convertToRdl(pie(true), source, { reportName: 'P' }).rdl), '#3E6A9E');
+    // A slice worth 0 is not drawn (SSRS would show a sliver).
+    assert.match(convertToRdl(pie(false), source, { reportName: 'P' }).rdl, /<Y>=IIf\(CDbl\(IIf\(IsNothing\([^<]*\)\) = 0, Nothing, [^<]*<\/Y>/);
   });
 
   it('never starts a row a rounding step above the bottom of the row before it', () => {
@@ -1674,7 +1688,7 @@ describe('charts that summarise fields themselves', () => {
   it('draws a pie of one value per category', () => {
     const chart = { values: ['Average of usp_Tests;1.result'], onChangeOf: 'usp_Tests;1.test_name', family: 3, graphType: 31 };
     const { rdl } = convertToRdl({ ...emptyDefinition(), layout: layout(chart) }, source, { reportName: 'Tests', subreport: true });
-    assert.ok(rdl.includes('<Y>=Avg(Fields!result.Value)</Y>') && rdl.includes('<Type>Shape</Type>'));
+    assert.ok(rdl.includes('<Y>=IIf(CDbl(IIf(IsNothing(Avg(Fields!result.Value)), 0, Avg(Fields!result.Value))) = 0, Nothing, Avg(Fields!result.Value))</Y>') && rdl.includes('<Type>Shape</Type>'));
   });
 });
 

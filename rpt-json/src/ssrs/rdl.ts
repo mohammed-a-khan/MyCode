@@ -1622,7 +1622,8 @@ class RdlBuilder {
       const value = this.fieldObjectValue(v, 'row', item);
       return el('ChartSeries', { Name: this.itemNames.make(`${chartName}_Series${i + 1}`) },
         el('ChartDataPoints', el('ChartDataPoint',
-          el('ChartDataPointValues', el('Y', `=${value.expression}`)),
+          // Crystal draws no slice for 0 (SSRS would draw a sliver, pulled out on a 3D pie).
+          el('ChartDataPointValues', el('Y', isPie ? `=IIf(CDbl(IIf(IsNothing(${value.expression}), 0, ${value.expression})) = 0, Nothing, ${value.expression})` : `=${value.expression}`)),
           dataLabel(value.expression),
           // Crystal draws lines thick (SSRS takes a line's width from its data points).
           el('Style', barPerPoint ? el('Color', `=Code.CrPointColor(${vbString(chartName)}, ${categoryExpression})`) : null,
@@ -1687,7 +1688,9 @@ class RdlBuilder {
       chart.title ? el('ChartTitles', el('ChartTitle', { Name: 'Default' }, el('Caption', chart.title), el('Style', el('FontWeight', 'Bold')))) : null,
       // Crystal's chart colours, in its order.
       el('Palette', 'Custom'),
-      el('ChartCustomPaletteColors', ...(isPie ? CRYSTAL_PIE_PALETTE : isLine ? CRYSTAL_LINE_PALETTE : CRYSTAL_PALETTE).map((c) => el('ChartCustomPaletteColor', c))),
+      // A pie whose style record has no tail starts at Crystal's second colour (orange), as Crystal draws it.
+      el('ChartCustomPaletteColors', ...(isPie ? (chart.styleTail === false && chart.family === 3 ? [...CRYSTAL_PIE_PALETTE.slice(1), CRYSTAL_PIE_PALETTE[0]] : CRYSTAL_PIE_PALETTE)
+        : isLine ? CRYSTAL_LINE_PALETTE : CRYSTAL_PALETTE).map((c) => el('ChartCustomPaletteColor', c))),
       el('ChartBorderSkin', el('Style')),
       // Crystal prints nothing for a chart without data.
       el('ChartNoDataMessage', { Name: 'NoDataMessage' }, el('Caption', ''), el('Style')),
