@@ -490,10 +490,28 @@ describe('layout conversion', () => {
     assert.match(rdl, /<Rectangle Name="Middle_Place">[\s\S]*?<Hidden>=Not \([^<]*\)<\/Hidden>/);
     // A row of boxes under it keeps its own top border: a box a formula can hide does not draw the side they share.
     const under: ReportDefinition = { ...main, layout: [{ name: 'ReportFooterArea1', sections: [
-      { name: 'Row1', height: 300, objects: [{ ...subreport('Upper', 140, true), border: { sides: [1, 1, 1, 1], width: 20 } }] },
-      { name: 'Row2', height: 300, objects: [{ ...subreport('Lower', 140), border: { sides: [1, 1, 1, 1], width: 20 } }] }] }] };
+      { name: 'Row1', height: 300, objects: [{ ...subreport('Upper', 140, true), border: { sides: [1, 1, 1, 1] as [number, number, number, number], width: 20 } }] },
+      { name: 'Row2', height: 300, objects: [{ ...subreport('Lower', 140), border: { sides: [1, 1, 1, 1] as [number, number, number, number], width: 20 } }] }] }] };
     const stacked = convertToRdl(under, source, { reportName: 'Main', subreports: new Map([[1, { name: 'Sub1', links: [], definition: sub, dataSource: subSource }]]) }).rdl;
     assert.ok(stacked.includes('<Rectangle Name="Lower">') && !stacked.includes('<TopBorder>'), 'the lower box keeps its top border');
+  });
+
+  it('draws the empty frame of a bordered subreport its own formula hides', () => {
+    const subSource: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Customer', type: 'string' }] }] };
+    const sub: ReportDefinition = { ...emptyDefinition(), layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 3000, objects: [{ kind: 'text', name: 'Title', text: 'Title', position: { x: 60, y: 60 }, size: { width: 3000, height: 255 } }] }] }] };
+    const subreport = (name: string, x: number, hideable = false) => ({ kind: 'subreport' as const, name, subreport: { index: 1, onDemand: false }, position: { x, y: 40 }, size: { width: 4000, height: 215 },
+      border: { sides: [1, 1, 1, 1] as [number, number, number, number], width: 20 }, ...(hideable ? { conditions: { suppress: { name: 'Suppress', index: 1 } } } : {}) });
+    const main: ReportDefinition = { ...emptyDefinition(), page: { orientation: 'landscape', paperSize: 1 },
+      formulas: [{ name: 'Suppress', index: 1, kind: 'conditionalFormat', text: '{Orders.Amount} = 0', referencedFields: ['Orders.Amount'] }],
+      layout: [{ name: 'ReportFooterArea1', sections: [{ name: 'Row', height: 300, objects: [subreport('Left', 140), subreport('Middle', 4140, true), subreport('Right', 8140)] }] }] };
+    const { rdl } = convertToRdl(main, source, { reportName: 'Main', subreports: new Map([[1, { name: 'Sub1', links: [], definition: sub, dataSource: subSource }]]) });
+    const box = (name: string) => new RegExp(`<Rectangle Name="${name}">[\\s\\S]*?<KeepTogether>true</KeepTogether>\\s*<Top>([^<]*)</Top>\\s*<Left>([^<]*)</Left>\\s*<Height>([^<]*)</Height>\\s*<Width>([^<]*)</Width>`).exec(rdl)?.slice(1);
+    // The frame takes the subreport's box and shows just where the subreport is hidden.
+    assert.deepEqual(box('Middle_Frame'), box('Middle'));
+    assert.match(rdl, /<Rectangle Name="Middle_Frame">[\s\S]*?<Hidden>=Not \([^<]*Amount[^<]*\)<\/Hidden>[\s\S]*?<Border>\s*<Style>Solid<\/Style>/);
+    // One of the two always holds the place, so neither needs an empty rectangle holding it.
+    assert.ok(!rdl.includes('Middle_Place') && !rdl.includes('Left_Frame'));
   });
 
   it('draws a thick rule down from its place, as Crystal does', () => {
@@ -520,7 +538,7 @@ describe('layout conversion', () => {
     const subSource: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Customer', type: 'string' }] }] };
     const sub: ReportDefinition = { ...emptyDefinition(), layout: [
       { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 3975, objects: [{ kind: 'text', name: 'Title', text: 'Title', position: { x: 60, y: 60 }, size: { width: 3000, height: 255 } }] }] }] };
-    const subreport = (name: string, x: number, hideable = false) => ({ kind: 'subreport' as const, name, subreport: { index: 1, onDemand: false }, position: { x, y: 40 }, size: { width: 5000, height: 215 }, border: { sides: [1, 1, 1, 1], width: 20 },
+    const subreport = (name: string, x: number, hideable = false) => ({ kind: 'subreport' as const, name, subreport: { index: 1, onDemand: false }, position: { x, y: 40 }, size: { width: 5000, height: 215 }, border: { sides: [1, 1, 1, 1] as [number, number, number, number], width: 20 },
       ...(hideable ? { conditions: { suppress: { name: 'Suppress', index: 1 } } } : {}) });
     const items = (rdl: string) => {
       const body = parseXml(rdl.slice(rdl.indexOf('<Body>'), rdl.indexOf('</Body>') + 7));
