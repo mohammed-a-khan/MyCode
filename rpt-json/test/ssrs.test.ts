@@ -581,11 +581,14 @@ describe('layout conversion', () => {
       { name: 'Other', height: 240, newPageAfter: true, conditions: hideWhen(1), objects: [text('OtherText')] },
       { name: 'Next', height: 240, objects: [text('NextText')] }];
     const rdl = convertToRdl(definition(one), source, { reportName: 'B' }).rdl;
-    // It holds an empty text box: SSRS applies no page break of an empty rectangle.
-    assert.match(rdl, /<Rectangle Name="Other_Break">\s*<ReportItems>\s*<Textbox Name="Other_Break_Text">[\s\S]*?<\/ReportItems>\s*<PageBreak>\s*<BreakLocation>End<\/BreakLocation>\s*<Disabled>=Not \([^<]*Amount[^<]*\)<\/Disabled>/);
+    // The next section shown starts the new page (SSRS applies no break of an empty item), where the one above is hidden.
+    assert.match(rdl, /<Rectangle Name="Next_Owed_Page">\s*<ReportItems>[\s\S]*?NextText[\s\S]*?<\/ReportItems>\s*<PageBreak>\s*<BreakLocation>Start<\/BreakLocation>\s*<Disabled>=Not \(\([^<]*Amount[^<]*\)\)<\/Disabled>/);
     // Where a section shown there breaks the page already, the hidden one adds none.
     const two: SectionInfo[] = [one[0], { ...one[0], name: 'Chart2', newPageAfter: true, objects: [text('Chart2Text')] }, one[1], one[2]];
-    assert.ok(!convertToRdl(definition(two), source, { reportName: 'B' }).rdl.includes('Other_Break'));
+    // (The section above it, ticked too, passes its own break on where it is hidden; the second adds none of its own.)
+    const after = convertToRdl(definition(two), source, { reportName: 'B' }).rdl;
+    const nextOff = /<Rectangle Name="Next_Owed_Page">[\s\S]*?<\/ReportItems>\s*<PageBreak>\s*<BreakLocation>Start<\/BreakLocation>\s*<Disabled>([^<]*)<\/Disabled>/.exec(after)![1];
+    assert.match(nextOff, /^=Not \(\(\([^<]*&lt;&gt; 2\)\)\) AndAlso \([^<]*&lt;&gt; 1\)+$/);
   });
 
   it('draws a thick rule down from its place, as Crystal does', () => {
