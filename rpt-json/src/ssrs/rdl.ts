@@ -132,6 +132,8 @@ export interface RdlResult {
   review: ReviewNote[];
   /** Subreports ("Subdocument N" numbers) whose content was placed inline and that need no .rdl of their own. */
   inlinedOnly?: number[];
+  /** Subreports ("Subdocument N" numbers) the report refers to as subreports, each needing an .rdl of its own. */
+  referenced?: number[];
 }
 
 /** One detail column of a report laid out as a plain list (see buildBlock). */
@@ -3711,7 +3713,7 @@ class RdlBuilder {
     }
     const inlinedOnly = [...this.inlinedSubreports].filter((n) => !this.referencedSubreports.has(n));
     const rdl = this.withoutBodyPageNumbers(this.resolveShared(toXml(report)));
-    return { rdl, review: this.review, ...(inlinedOnly.length ? { inlinedOnly } : {}) };
+    return { rdl, review: this.review, ...(inlinedOnly.length ? { inlinedOnly } : {}), referenced: [...this.referencedSubreports] };
   }
 }
 
