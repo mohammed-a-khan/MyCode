@@ -1609,15 +1609,24 @@ class RdlBuilder {
       ? this.fieldObjectValue(values[0], 'row', item).expression : undefined;
     // Only a summary of a field's categories can be read for the whole chart.
     const single = barValue && /^(Sum|Avg|Min|Max|Count|CountDistinct)\(/.test(barValue) && /\bFields!/.test(categoryExpression ?? '') ? barValue : undefined;
+    // A bar chart's values, row by row: where the smallest is 0 Crystal starts the axis at 0 (SSRS would run below
+    // it), and where all are 0 it runs from -5 to 5 (-500% to 500%), a step of 1 apart.
+    const firstValue = style.type === 'Column' && values.length ? this.fieldObjectValue(values[0], 'row', item).expression : undefined;
+    const raw = firstValue && /^=?(?:Sum|Avg|Min|Max)\((Fields!\w+\.Value)\)$/.exec(firstValue)?.[1];
+    const lowest = raw && `CDbl(IIf(IsNothing(Min(${raw})), 1, Min(${raw})))`;
+    const highest = raw && `CDbl(IIf(IsNothing(Max(${raw})), 0, Max(${raw})))`;
+    // For the axis's minimum (0.4), maximum (1.6) and interval (0.2).
+    const fit = (factor: number) => !raw ? 'Double.NaN'
+      : `IIf(${lowest} = 0 AndAlso ${highest} = 0, ${{ 0.4: '-5', 1.6: '5' }[factor] ?? '1'}, ${factor === 0.4 ? `IIf(${lowest} = 0, 0, Double.NaN)` : 'Double.NaN'})`;
     const scaled = (factor: number) => single
-      ? `=IIf(CountDistinct(${categoryExpression}) = 1 AndAlso CDbl(IIf(IsNothing(${single}), 0, ${single})) > 0, CDbl(IIf(IsNothing(${single}), 0, ${single})) * ${factor}, Double.NaN)`
-      : 'NaN';
+      ? `=IIf(CountDistinct(${categoryExpression}) = 1 AndAlso CDbl(IIf(IsNothing(${single}), 0, ${single})) > 0, CDbl(IIf(IsNothing(${single}), 0, ${single})) * ${factor}, ${fit(factor)})`
+      : raw ? `=${fit(factor)}` : 'NaN';
     const axis = (title: string | undefined, kind: 'category' | 'value', format?: string) => el('ChartAxis', { Name: 'Primary' },
       // Crystal's axis text is small, as small as its data labels.
       el('Style', el('FontFamily', 'Arial'), el('FontSize', '5.5pt'), el('FontWeight', 'Normal'), format ? el('Format', format) : null),
       el('ChartAxisTitle', el('Caption', title ?? ''), el('Style', el('FontFamily', 'Arial'), el('FontSize', '5.5pt'), el('FontWeight', 'Normal'))),
       // Crystal's single bar: six steps from 0.4 to 1.6 times its value (every 20% for 100%).
-      kind === 'category' ? el('Interval', '1') : single && kind === 'value' ? el('Interval', scaled(0.2)) : null,
+      kind === 'category' ? el('Interval', '1') : (single || raw) && kind === 'value' ? el('Interval', scaled(0.2)) : null,
       // Crystal angles bar charts' category labels; a line chart's dates are staggered on two rows where they do
       // not fit on one (SSRS may offset them, but neither turn nor resize them).
       kind === 'category' && !isPie && !isLine ? el('Angle', '-45') : null,
@@ -3456,9 +3465,11 @@ class RdlBuilder {
         ? top - twipsToInches(original.position?.y ?? 0) + twipsToInches(span.section.height)
         : top + twipsToInches(original.size?.height ?? 0);
       const bottom = sectionBottom;
+      // Not what a section above it places (a section designed a hair high, a formula can hide, ends just above it).
+      const sectionTop = span.section ? top - twipsToInches(original.position?.y ?? 0) : top - 0.01;
       const inside = (item: XmlElement) => {
         const t = itemNumber(item, 'Top');
-        return t >= top - 0.01 && t < bottom && itemNumber(item, 'Left') >= l - 0.05 && itemRight(item) <= r + 0.05;
+        return t >= Math.max(top - 0.01, sectionTop - 0.002) && t < bottom && itemNumber(item, 'Left') >= l - 0.05 && itemRight(item) <= r + 0.05;
       };
       const enclosed = items.filter(inside);
       // Only subreports grow; around anything else the cut box is right as it is.
@@ -4270,8 +4281,11 @@ function joinBoxes(input: XmlElement[]): XmlElement[] {
       }
       const gapY = pb.top - pa.bottom;
       const overlap = Math.min(pa.right, pb.right) - Math.max(pa.left, pb.left);
+      // Something placed between them (a table that grows) keeps them apart: the lower box follows it.
+      const between = !inside && items.some((o) => o !== a && o !== b && itemNumber(o, 'Top') >= pa.bottom - 0.001 && itemNumber(o, 'Top') < pb.top
+        && itemNumber(o, 'Left') < pb.right && itemRight(o) > pb.left);
       // One under another: alike in place and width.
-      if (gapY > 0 && gapY <= 0.1 && Math.abs(pa.left - pb.left) <= 0.05 && Math.abs((pa.right - pa.left) - (pb.right - pb.left)) <= 0.1 && overlap > 0) {
+      if (!between && gapY > 0 && gapY <= 0.1 && Math.abs(pa.left - pb.left) <= 0.05 && Math.abs((pa.right - pa.left) - (pb.right - pb.left)) <= 0.1 && overlap > 0) {
         // It also takes the upper box's sides, so the lines between columns run straight on.
         const c = changes.get(b) ?? { sides: [] };
         changes.set(b, { ...c, top: final.bottom, left: final.left, right: final.right, sides: own ? c.sides : [...c.sides, 'TopBorder'] });
