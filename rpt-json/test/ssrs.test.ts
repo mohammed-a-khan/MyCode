@@ -496,6 +496,17 @@ describe('layout conversion', () => {
     assert.ok(stacked.includes('<Rectangle Name="Lower">') && !stacked.includes('<TopBorder>'), 'the lower box keeps its top border');
   });
 
+  it('draws a thick rule down from its place, as Crystal does', () => {
+    const header: ReportDefinition = { ...emptyDefinition(), layout: [
+      { name: 'PageHeaderArea1', sections: [{ name: 'PH', height: 1027, objects: [
+        { kind: 'text', name: 'Title', text: 'Title', position: { x: 0, y: 0 }, size: { width: 3000, height: 300 } },
+        { kind: 'line', name: 'Rule', position: { x: 0, y: 967 }, size: { width: 15000, height: 0 }, border: { sides: [0, 0, 1, 0], width: 60 } }] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [{ kind: 'field', name: 'F', field: 'Orders.Amount', position: { x: 0, y: 0 }, size: { width: 2000, height: 240 } }] }] }] };
+    const rdl = convertToRdl(header, source, { reportName: 'H' }).rdl;
+    // 60 twips wide at 967: SSRS draws it around its place, so it is placed at 997 (0.692in), meeting the header's foot.
+    assert.match(rdl, /<Line Name="Rule">\s*<Top>0\.692in<\/Top>/);
+  });
+
   it('scales a bar chart of a single bar as Crystal does', () => {
     const bars: ReportDefinition = { ...emptyDefinition(), layout: [{ name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 3000, objects: [
       { kind: 'chart', name: 'Bars', position: { x: 0, y: 0 }, size: { width: 4000, height: 2800 }, chart: { family: 0, graphType: 0, values: ['Sum of Orders.Amount'], onChangeOf: 'Orders.Region' } }] }] }] };
