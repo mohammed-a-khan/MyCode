@@ -3479,6 +3479,8 @@ class RdlBuilder {
       let contents = enclosed;
       for (const line of lines) {
         const lineObj = this.runOn.get(line.obj)!;
+        // Only a line of this box's own section (one already drawn with a box above it is not drawn again).
+        if (used.has(line) || line.box.top < top - 0.01 || line.box.top >= bottom) continue;
         if ((lineObj.size?.width ?? 0) > 30 || line.box.left < l - 0.05 || line.box.left > r + 0.05) continue;
         used.add(line);
         const x = line.box.left;
