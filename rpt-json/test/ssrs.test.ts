@@ -591,6 +591,31 @@ describe('layout conversion', () => {
     assert.match(nextOff, /^=Not \(\(\([^<]*&lt;&gt; 2\)\)\) AndAlso \([^<]*&lt;&gt; 1\)+$/);
   });
 
+  it('shows only the lines of a text that fit its height, as Crystal does', () => {
+    const title = (height: number): ReportObject => ({ kind: 'text', name: 'Title', text: 'Summary\nSummary', style: { size: 11 }, position: { x: 0, y: 0 }, size: { width: 3000, height } });
+    const rdl = (height: number) => convertToRdl({ ...emptyDefinition(), layout: [{ name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 600, objects: [title(height)] }] }] },
+      { connections: [], tables: [], links: [] }, { reportName: 'T' }).rdl;
+    // One line high: the second line is not shown; two lines high: both are.
+    assert.ok(rdl(280).includes('<Value>Summary</Value>'));
+    assert.ok(rdl(540).includes('<Value>="Summary" &amp; vbCrLf &amp; "Summary"</Value>'));
+  });
+
+  it('prints the sections under a constant group once, blank, where a table has no data, as Crystal does', () => {
+    const field = (name: string, f: string): ReportObject => ({ kind: 'field', name, field: f, position: { x: 120, y: 0 }, size: { width: 2000, height: 180 } });
+    const definition: ReportDefinition = { ...emptyDefinition(), groups: ['@Const', 'Orders.Name'],
+      formulas: [{ name: 'Const', index: 0, kind: 'formula', text: '"x"', referencedFields: [], valueType: 'string' }],
+      layout: [
+        { name: 'GroupHeaderArea1', sections: [{ name: 'GH1', height: 300, objects: [{ kind: 'text', name: 'Heading', text: 'Heading', position: { x: 120, y: 0 }, size: { width: 2000, height: 240 } }] }] },
+        { name: 'GroupHeaderArea2', sections: [{ name: 'GH2', height: 240, objects: [field('GroupName', 'Orders.Name')] }] },
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 195, objects: [field('Value', 'Orders.Amount')] }] }] };
+    const rdl = convertToRdl(definition, source, { reportName: 'N' }).rdl;
+    const hierarchy = rdl.slice(rdl.indexOf('<TablixRowHierarchy>'), rdl.indexOf('</TablixRowHierarchy>'));
+    // The inner group's header and the detail, again after the table's own rows, shown only without data.
+    assert.equal((hierarchy.match(/<Hidden>=CountRows\(\) &gt; 0<\/Hidden>/g) ?? []).length, 2);
+    const rows = rdl.slice(rdl.indexOf('<TablixRows>'), rdl.indexOf('</TablixRows>')).split('<TablixRow>').slice(1);
+    assert.deepEqual(rows.map((r) => /Textbox Name="([^"]*)"/.exec(r)?.[1]), ['Heading', 'GroupName', 'Value', 'GroupName_2', 'Value_2']);
+  });
+
   it('draws a thick rule down from its place, as Crystal does', () => {
     const header: ReportDefinition = { ...emptyDefinition(), layout: [
       { name: 'PageHeaderArea1', sections: [{ name: 'PH', height: 1027, objects: [
@@ -1330,7 +1355,7 @@ describe('header text extraction', () => {
   it('keeps line breaks of multi-line text in SSRS', () => {
     assert.equal(vbString('Amount\n(in $)'), '"Amount" & vbCrLf & "(in $)"');
     const { rdl } = convertToRdl({ ...emptyDefinition(), layout: [
-      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', objects: [text('Two', 'Line one\nLine two', 0, 0, 3000)] }] },
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', objects: [{ ...text('Two', 'Line one\nLine two', 0, 0, 3000), size: { width: 3000, height: 480 } }] }] },
     ] }, { connections: [], tables: [], links: [] }, { reportName: 'Lines' });
     assert.ok(rdl.includes('<Value>="Line one" &amp; vbCrLf &amp; "Line two"</Value>'));
   });
