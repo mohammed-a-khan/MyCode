@@ -614,6 +614,10 @@ describe('layout conversion', () => {
     assert.equal((hierarchy.match(/<Hidden>=CountRows\(\) &gt; 0<\/Hidden>/g) ?? []).length, 2);
     const rows = rdl.slice(rdl.indexOf('<TablixRows>'), rdl.indexOf('</TablixRows>')).split('<TablixRow>').slice(1);
     assert.deepEqual(rows.map((r) => /Textbox Name="([^"]*)"/.exec(r)?.[1]), ['Heading', 'GroupName', 'Value', 'GroupName_2', 'Value_2']);
+    // They are not counted in the table's height (a box or divider laid out around it follows its height with data).
+    const heights = rows.map((r) => Number(/<Height>([^<]*)in<\/Height>/.exec(r)![1]));
+    const tableHeight = Number(/<\/TablixRowHierarchy>[\s\S]*?<Height>([^<]*)in<\/Height>/.exec(rdl)![1]);
+    assert.ok(Math.abs(tableHeight - (heights[0] + heights[1] + heights[2])) < 0.002, `${tableHeight} vs ${heights}`);
   });
 
   it('draws a thick rule down from its place, as Crystal does', () => {
