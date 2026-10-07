@@ -494,6 +494,7 @@ describe('layout conversion', () => {
     const rdl = convertToRdl(bars, source, { reportName: 'B' }).rdl;
     assert.match(rdl, /<Minimum>=IIf\(CountDistinct\(Fields!Region\.Value\) = 1 [^<]* \* 0\.4, Double\.NaN\)<\/Minimum>/);
     assert.match(rdl, /<Maximum>=IIf\(CountDistinct\(Fields!Region\.Value\) = 1 [^<]* \* 1\.6, Double\.NaN\)<\/Maximum>/);
+    assert.match(rdl, /<Interval>=IIf\(CountDistinct\(Fields!Region\.Value\) = 1 [^<]* \* 0\.2, Double\.NaN\)<\/Interval>/);
   });
 
   it('never starts a row a rounding step above the bottom of the row before it', () => {
@@ -651,7 +652,8 @@ describe('layout conversion', () => {
     ] }] };
     assert.match(convertToRdl(hiddenToo, source, { reportName: 'H' }).rdl, /<BreakLocation>End<\/BreakLocation>\s*<Disabled>=\(\(CountRows\("DataSet1"\) &gt; 0\) AndAlso [^<]*\) OrElse \(/);
     // A count that is empty (not 0) on the record gives the condition no result, as in Crystal: the section prints.
-    assert.match(convertToRdl(followed, source, { reportName: 'F' }).rdl, /<Disabled>=[^<]*Not IsNothing\(First\(Fields!Amount\.Value, "DataSet1"\)\) AndAlso \(+First\(Fields!Amount\.Value, "DataSet1"\) = 0\)[^<]*<\/Disabled>/);
+    // A report footer reads the last record, as Crystal does.
+    assert.match(convertToRdl(followed, source, { reportName: 'F' }).rdl, /<Disabled>=[^<]*Not IsNothing\(Last\(Fields!Amount\.Value, "DataSet1"\)\) AndAlso \(+Last\(Fields!Amount\.Value, "DataSet1"\) = 0\)[^<]*<\/Disabled>/);
   });
 
   it('keeps a group together when its record says so', () => {
