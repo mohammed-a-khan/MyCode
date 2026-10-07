@@ -512,6 +512,11 @@ describe('layout conversion', () => {
     assert.match(rdl, /<Rectangle Name="Middle_Frame">[\s\S]*?<Hidden>=Not \([^<]*Amount[^<]*\)<\/Hidden>[\s\S]*?<Border>\s*<Style>Solid<\/Style>/);
     // One of the two always holds the place, so neither needs an empty rectangle holding it.
     assert.ok(!rdl.includes('Middle_Place') && !rdl.includes('Left_Frame'));
+    // Subreports sharing a column are alternatives: the ones that do not show leave no frame.
+    const shared: ReportDefinition = { ...main, layout: [{ name: 'ReportFooterArea1', sections: [{ name: 'Row', height: 2000, objects: [
+      subreport('First', 140, true), subreport('Second', 140, true), { ...subreport('Third', 140, true), position: { x: 140, y: 1700 } }] }] }] };
+    const alternatives = convertToRdl(shared, source, { reportName: 'Main', subreports: new Map([[1, { name: 'Sub1', links: [], definition: sub, dataSource: subSource }]]) }).rdl;
+    assert.ok(!alternatives.includes('_Frame'));
   });
 
   it('draws a thick rule down from its place, as Crystal does', () => {

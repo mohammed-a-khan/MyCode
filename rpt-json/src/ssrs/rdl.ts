@@ -1112,9 +1112,13 @@ class RdlBuilder {
         const room = collapsible ? MIN_DESIGN_HEIGHT : section.height !== undefined ? twipsToInches(section.height) - (box.top - top) : undefined;
         const inline = this.inlineSubreport(obj, box, area, both, scope === 'page' || pageLike ? 'page' : 'body', room);
         if (inline) items.push(inline.item);
-        // Crystal still draws the frame of a bordered subreport its own formula hides (its section shown): an empty
-        // box at its place, shown just where the subreport is hidden.
-        if (inline && own && own !== '=True' && obj.border?.sides.some((side) => side > 0)) {
+        // Crystal still draws the frame of a bordered subreport its own formula hides (its section shown), in a column
+        // of its own: an empty box at its place, shown just where the subreport is hidden. Subreports sharing a column
+        // are alternatives (one shows in place of the others), and those that do not show leave nothing.
+        const x = obj.position?.x ?? 0;
+        const right = x + (obj.size?.width ?? 0);
+        const ownColumn = !section.objects.some((o) => o !== obj && (o.position?.x ?? 0) < right && (o.position?.x ?? 0) + (o.size?.width ?? 0) > x);
+        if (inline && own && own !== '=True' && ownColumn && obj.border?.sides.some((side) => side > 0)) {
           const name = inline.item.attributes.Name ?? obj.name;
           const frame = el('Rectangle', { Name: this.itemNames.make(`${name}_Frame`) },
             el('KeepTogether', 'true'),
