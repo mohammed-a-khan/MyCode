@@ -3394,6 +3394,7 @@ class RdlBuilder {
     }
     const footerTop = top;
     this.lastRecord = true;
+    let justBroken: string | undefined;
     for (const [i, original] of areas.reportFooter.entries()) {
       // Crystal prints no page after the report's last section: New Page After there breaks no page. Followed only
       // by sections a formula can hide, it breaks none where they are all hidden.
@@ -3411,6 +3412,26 @@ class RdlBuilder {
       }
       const placed = this.placeSection(section, top, 'body', 'Report Footer', false, afterOff);
       items.push(...placed.items);
+      // Crystal breaks the page after a section ticked New Page After even where its formula hides it, unless the
+      // page was just broken there (no empty page): a break of its own, on where the section is hidden.
+      const hidden = section.newPageAfter && !section.suppressed && section.conditions?.suppress
+        ? this.conditionExpression(section.conditions.suppress, false, `Section ${section.name}`, 'body') : undefined;
+      if (hidden && hidden !== '=True' && justBroken !== 'True') {
+        const off = [`Not (${hidden.slice(1)})`, ...(justBroken ? [`(${justBroken})`] : []), ...(afterOff ? [`(${afterOff})`] : [])].join(' OrElse ');
+        items.push(el('Rectangle', { Name: this.itemNames.make(`${section.name || 'Section'}_Break`) },
+          el('PageBreak', el('BreakLocation', 'End'), el('Disabled', `=${off}`)),
+          el('KeepTogether', 'true'),
+          el('Top', inches(top)), el('Left', '0in'), el('Height', inches(MIN_DESIGN_HEIGHT)), el('Width', inches(MIN_DESIGN_HEIGHT)),
+          el('Style', el('Border', el('Style', 'None')))));
+      }
+      // Whether the page has just been broken here: after a section ticked New Page After (shown or hidden), and
+      // still after sections below it that are hidden.
+      const printsHere = !section.suppressed && (section.objects.length > 0 || (section.height ?? 0) > 0);
+      if (section.newPageAfter && !section.suppressed) justBroken = 'True';
+      else if (printsHere) {
+        const own = section.conditions?.suppress ? this.conditionExpression(section.conditions.suppress, false, `Section ${section.name}`, 'body') : undefined;
+        justBroken = own && justBroken ? (justBroken === 'True' ? `(${own.slice(1)})` : `(${own.slice(1)}) AndAlso ${justBroken}`) : undefined;
+      }
       top += placed.height;
     }
     this.lastRecord = false;

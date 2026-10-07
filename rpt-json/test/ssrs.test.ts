@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { chartOptions, chartStyleTail, type ChartInfo, type DataSourceInfo, type ReportDefinition, type ReportObject } from '../src/crystal/model.ts';
+import { chartOptions, chartStyleTail, type ChartInfo, type DataSourceInfo, type ReportDefinition, type ReportObject, type SectionInfo } from '../src/crystal/model.ts';
 import { encodeString } from '../src/crystal/strings.ts';
 import { readCfb } from '../src/index.ts';
 import { convertDocumentToSsrs, reviewMarkdown } from '../src/ssrs/convert.ts';
@@ -567,6 +567,24 @@ describe('layout conversion', () => {
     const lowerTop = own('Lower', 'Top');
     const between = [own('Between', 'Top'), own('Between', 'Height')];
     assert.ok(lowerTop >= between[0] + between[1] - 0.0005, 'the lower box starts below the table, so it is pushed down as the table grows');
+  });
+
+  it('breaks the page after a section ticked New Page After where its formula hides it, but adds no empty page', () => {
+    const text = (name: string) => ({ kind: 'text' as const, name, text: name, position: { x: 0, y: 0 }, size: { width: 3000, height: 240 } });
+    const hideWhen = (index: number) => ({ suppress: { name: `Hide${index}`, index } });
+    const definition = (sections: SectionInfo[]): ReportDefinition => ({ ...emptyDefinition(),
+      formulas: [1, 2].map((i) => ({ name: `Hide${i}`, index: i, kind: 'conditionalFormat' as const, text: `{Orders.Amount} <> ${i}`, referencedFields: ['Orders.Amount'] })),
+      layout: [{ name: 'ReportFooterArea1', sections }] });
+    // Shown where Amount is 2, then a section shown where it is 1 that breaks the page after it.
+    const one: SectionInfo[] = [
+      { name: 'Chart', height: 275, conditions: hideWhen(2), objects: [text('ChartText')] },
+      { name: 'Other', height: 240, newPageAfter: true, conditions: hideWhen(1), objects: [text('OtherText')] },
+      { name: 'Next', height: 240, objects: [text('NextText')] }];
+    const rdl = convertToRdl(definition(one), source, { reportName: 'B' }).rdl;
+    assert.match(rdl, /<Rectangle Name="Other_Break">\s*<PageBreak>\s*<BreakLocation>End<\/BreakLocation>\s*<Disabled>=Not \([^<]*Amount[^<]*\)<\/Disabled>/);
+    // Where a section shown there breaks the page already, the hidden one adds none.
+    const two: SectionInfo[] = [one[0], { ...one[0], name: 'Chart2', newPageAfter: true, objects: [text('Chart2Text')] }, one[1], one[2]];
+    assert.ok(!convertToRdl(definition(two), source, { reportName: 'B' }).rdl.includes('Other_Break'));
   });
 
   it('draws a thick rule down from its place, as Crystal does', () => {
