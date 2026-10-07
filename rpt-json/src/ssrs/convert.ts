@@ -65,7 +65,7 @@ export function convertDocumentToSsrs(doc: CfbDocument, baseName: string, option
         review: [{ item: 'Report', message: `could not be decoded: ${(model.errors ?? []).join('; ')}` }],
       };
     }
-    const { rdl, review, inlinedOnly } = convertToRdl(model.definition, model.dataSource, {
+    const { rdl, review, referenced } = convertToRdl(model.definition, model.dataSource, {
       reportName,
       connectionString: options.connectionString,
       sharedDataSource: options.sharedDataSource,
@@ -77,13 +77,15 @@ export function convertDocumentToSsrs(doc: CfbDocument, baseName: string, option
       subreport: Boolean(model.storage),
       images: embeddedImages(storageAt(doc.root, model.storage)),
     });
-    return { fileName: `${reportName}.rdl`, storage: model.storage, rdl, review, inlinedOnly };
+    return { fileName: `${reportName}.rdl`, storage: model.storage, rdl, review, referenced };
   });
-  // Subreports placed entirely inside the main report (page header/footer) need no .rdl of their own.
-  const inlined = new Set(results.find((r) => !r.storage)?.inlinedOnly ?? []);
+  // Only the subreports the main report refers to need an .rdl of their own: those placed inside it need none, nor
+  // those it never prints (in a section always suppressed). All are kept where the main report could not be converted.
+  const main = results.find((r) => !r.storage);
+  const used = main?.referenced ? new Set(main.referenced) : undefined;
   return results
-    .filter((r) => !inlined.has(Number(/^Subdocument (\d+)$/.exec(r.storage)?.[1])))
-    .map(({ inlinedOnly: _, ...r }) => r);
+    .filter((r) => !r.storage || !used || used.has(Number(/^Subdocument (\d+)$/.exec(r.storage)?.[1])))
+    .map(({ referenced: _, ...r }) => r);
 }
 
 function storageAt(root: CfbStorage, path: string): CfbStorage | undefined {

@@ -519,6 +519,19 @@ describe('layout conversion', () => {
     assert.ok(!alternatives.includes('_Frame'));
   });
 
+  it('refers only to the subreports it prints, so no .rdl is written for one in a section always suppressed', () => {
+    const subSource: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Customer', type: 'string' }] }] };
+    const sub: ReportDefinition = { ...emptyDefinition(), layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 3000, objects: [{ kind: 'text', name: 'Title', text: 'Title', position: { x: 60, y: 60 }, size: { width: 3000, height: 255 } }] }] }] };
+    const subreport = (name: string, index: number) => ({ kind: 'subreport' as const, name, subreport: { index, onDemand: false }, position: { x: 140, y: 40 }, size: { width: 4000, height: 215 } });
+    const main: ReportDefinition = { ...emptyDefinition(), layout: [{ name: 'ReportFooterArea1', sections: [
+      { name: 'Shown', height: 300, objects: [subreport('Printed', 1)] },
+      { name: 'Never', height: 300, suppressed: true, objects: [subreport('Unprinted', 2)] }] }] };
+    const subreports = new Map([1, 2].map((i) => [i, { name: `Sub${i}`, links: [], definition: sub, dataSource: subSource }]));
+    assert.deepEqual(convertToRdl(main, source, { reportName: 'Main', subreports, embedSubreports: false }).referenced, [1]);
+    assert.deepEqual(convertToRdl(main, source, { reportName: 'Main', subreports }).referenced, []);
+  });
+
   it('draws a thick rule down from its place, as Crystal does', () => {
     const header: ReportDefinition = { ...emptyDefinition(), layout: [
       { name: 'PageHeaderArea1', sections: [{ name: 'PH', height: 1027, objects: [
