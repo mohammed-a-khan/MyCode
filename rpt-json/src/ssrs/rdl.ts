@@ -3634,7 +3634,7 @@ class RdlBuilder {
           el('rd:DataSourceID', reportId(`${this.options.reportName}/${d.name}`))))),
       el('DataSets', this.datasetElement(this.dataSourceName), ...this.extraDataSets),
       el('ReportSections', el('ReportSection',
-        el('Body', el('ReportItems', ...fitInside(joinBoxes(clearLineOverlaps(bodyItems)))), el('Height', inches(top > 0 ? top : DEFAULT_HEIGHT)), el('Style')),
+        el('Body', el('ReportItems', ...clearRoundingOverlaps(fitInside(joinBoxes(clearLineOverlaps(bodyItems))))), el('Height', inches(top > 0 ? top : DEFAULT_HEIGHT)), el('Style')),
         el('Width', inches(Math.max(width, 1))),
         el('Page',
           header.items.length ? el('PageHeader', el('Height', inches(header.height)), el('PrintOnFirstPage', 'true'), el('PrintOnLastPage', 'true'), el('ReportItems', ...clearLineOverlaps(header.items)), el('Style')) : null,
@@ -4034,6 +4034,27 @@ function flattenRectangle(item: XmlElement): XmlElement[] {
  * title, overlapping it by a few twips) ends at the line: SSRS moves or drops items that overlap, and the rule
  * would be lost.
  */
+/**
+ * Items that start a rounding step (up to 0.002in) above the bottom of an item above them start at its bottom
+ * instead: SSRS keeps an item that overlaps the one above it at its place beside that one (it is not pushed down
+ * when the one above grows or moves to a new page), so rows meant to follow each other would be drawn over each other.
+ */
+function clearRoundingOverlaps(items: XmlElement[]): XmlElement[] {
+  const out = [...items];
+  const order = out.map((item, i) => i).sort((a, b) => itemNumber(out[a], 'Top') - itemNumber(out[b], 'Top'));
+  for (const [n, i] of order.entries()) {
+    const top = itemNumber(out[i], 'Top');
+    let push = 0;
+    for (const j of order.slice(0, n)) {
+      const above = out[j];
+      const bottom = itemNumber(above, 'Top') + itemNumber(above, 'Height');
+      if (itemNumber(above, 'Top') < top && bottom > top && bottom - top <= 0.002 + 1e-9) push = Math.max(push, bottom - top);
+    }
+    if (push > 0) out[i] = moveItem(out[i], push, 0);
+  }
+  return out;
+}
+
 function clearLineOverlaps(items: XmlElement[]): XmlElement[] {
   // A line across a box that sticks out past its side by a hair (Crystal draws it a few twips too wide) is cut
   // to the box: SSRS moves an item that sticks out of a rectangle it overlaps, and the line would land elsewhere.

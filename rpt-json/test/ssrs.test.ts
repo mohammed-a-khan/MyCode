@@ -458,6 +458,34 @@ describe('layout conversion', () => {
     assert.match(body, /<\/ReportItems>\s*<Height>0.03in<\/Height>\s*<Style \/>\s*$/);
   });
 
+  it('never starts a row a rounding step above the bottom of the row before it', () => {
+    const subSource: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Customer', type: 'string' }] }] };
+    const sub: ReportDefinition = { ...emptyDefinition(), layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 3975, objects: [{ kind: 'text', name: 'Title', text: 'Title', position: { x: 60, y: 60 }, size: { width: 3000, height: 255 } }] }] }] };
+    const subreport = (name: string, x: number, hideable = false) => ({ kind: 'subreport' as const, name, subreport: { index: 1, onDemand: false }, position: { x, y: 40 }, size: { width: 5000, height: 215 }, border: { sides: [1, 1, 1, 1], width: 20 },
+      ...(hideable ? { conditions: { suppress: { name: 'Suppress', index: 1 } } } : {}) });
+    const items = (rdl: string) => {
+      const body = parseXml(rdl.slice(rdl.indexOf('<Body>'), rdl.indexOf('</Body>') + 7));
+      return childElements(child(body, 'ReportItems')!).map((e) => ({ name: e.attributes.Name, top: parseFloat(textOf(child(e, 'Top')!)), height: parseFloat(textOf(child(e, 'Height')!)) }));
+    };
+    // Rows of framed subreports in sections that follow each other, the first starting a new page and each of its subreports
+    // hidden by a formula, at many offsets.
+    for (let above = 33300; above < 33420; above++) {
+      const main: ReportDefinition = { ...emptyDefinition(), page: { orientation: 'landscape', paperSize: 1 },
+        formulas: [{ name: 'Suppress', index: 1, kind: 'conditionalFormat', text: '{Orders.Amount} = 0', referencedFields: ['Orders.Amount'] }],
+        layout: [{ name: 'ReportFooterArea1', sections: [
+          { name: 'Notes', height: above, objects: [{ kind: 'text', name: 'Note', text: 'Note', position: { x: 0, y: 0 }, size: { width: 1000, height: 200 } }] },
+          { name: 'Row1', height: 300, newPageBefore: true, objects: [subreport('A', 140, true), subreport('B', 5520, true)] },
+          { name: 'Row2', height: 288, objects: [subreport('C', 140), subreport('D', 5520, true)] }] }] };
+      const placed = items(convertToRdl(main, source, { reportName: 'Main', subreports: new Map([[1, { name: 'Sub1', links: [], definition: sub, dataSource: subSource }]]) }).rdl);
+      const row1 = placed.find((i) => i.name === 'Row1_Page')!;
+      for (const row2 of placed.filter((i) => i.name === 'C' || i.name === 'D')) {
+        // SSRS keeps an item overlapping the one above it beside that one: across a page break, both rows land together.
+        assert.ok(row2.top >= row1.top + row1.height - 1e-9, `${row2.name} starts at ${row2.top}in, inside the row above (ending ${row1.top + row1.height}in) at ${above} twips`);
+      }
+    }
+  });
+
   it('narrows and moves a subreport by its width and X position formulas', () => {
     const fields = [{ name: 'Customer', type: 'string' as const }, ...[1, 2, 3, 4].map((i) => ({ name: `V${i}`, type: 'number' as const }))];
     const subSource: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields }] };
