@@ -3418,7 +3418,14 @@ class RdlBuilder {
         ? this.conditionExpression(section.conditions.suppress, false, `Section ${section.name}`, 'body') : undefined;
       if (hidden && hidden !== '=True' && justBroken !== 'True') {
         const off = [`Not (${hidden.slice(1)})`, ...(justBroken ? [`(${justBroken})`] : []), ...(afterOff ? [`(${afterOff})`] : [])].join(' OrElse ');
-        items.push(el('Rectangle', { Name: this.itemNames.make(`${section.name || 'Section'}_Break`) },
+        // SSRS applies no page break of an empty rectangle: it holds an empty text box.
+        const name = this.itemNames.make(`${section.name || 'Section'}_Break`);
+        items.push(el('Rectangle', { Name: name },
+          el('ReportItems', el('Textbox', { Name: this.itemNames.make(`${name}_Text`) },
+            el('CanGrow', 'false'), el('KeepTogether', 'true'),
+            el('Paragraphs', el('Paragraph', el('TextRuns', el('TextRun', el('Value', ''), el('Style'))), el('Style'))),
+            el('Top', '0in'), el('Left', '0in'), el('Height', inches(MIN_DESIGN_HEIGHT)), el('Width', inches(MIN_DESIGN_HEIGHT)),
+            el('Style', el('Border', el('Style', 'None'))))),
           el('PageBreak', el('BreakLocation', 'End'), el('Disabled', `=${off}`)),
           el('KeepTogether', 'true'),
           el('Top', inches(top)), el('Left', '0in'), el('Height', inches(MIN_DESIGN_HEIGHT)), el('Width', inches(MIN_DESIGN_HEIGHT)),
