@@ -2457,7 +2457,6 @@ class RdlBuilder {
         })
       : [];
     const emptyRows = rows.splice(rowsBefore);
-    const emptyHeight = height - heightBefore;
     height = heightBefore;
 
     // Sorting: record sorts go on the details; group sorts / Top N go on their group.
@@ -2517,8 +2516,9 @@ class RdlBuilder {
         // A group on a constant holds every record: its header and footer are the table's own rows, printed (as in
         // Crystal) even when there is no data, where a group's rows are not.
         outer = [...headerMembers[0], member, ...footerMembers[0], ...emptyMembers];
+        // Not counted in the table's height: they show only where it has no data (what is laid out around the
+        // table, a box or a divider down it, follows its height with data).
         rows.push(...emptyRows);
-        height += emptyHeight;
         continue;
       }
       member = el('TablixMember',
