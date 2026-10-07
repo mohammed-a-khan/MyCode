@@ -185,6 +185,8 @@ export interface ChartInfo {
   layoutCode?: number;
   /** Raw chart style code: the family byte and the graph type byte together. */
   styleCode?: number;
+  /** Whether the chart's style record ends with an empty text and five zero bytes (some charts' records do, others not). */
+  styleTail?: boolean;
   /** Chart family, in the order of Crystal's Chart Expert (0 bar, 1 line, 2 area, 3 pie, 4 doughnut, ...). */
   family?: number;
   /** Crystal graph type (CrGraphType: 0 side-by-side bar, 1 stacked bar, 30 pie, 31 3D pie, 40 doughnut, ...). */
@@ -760,6 +762,12 @@ function readValueFormat(record: RecordNode, format: ValueFormat): void {
  * Chart options from the chart's text record (after its style code): the first binary run after the titles
  * holds the legend (byte 1 shown, byte 2 position); a later run starts with the data-label kind and number format.
  */
+/** Whether a chart's style record ends with an empty text and five zero bytes. */
+export function chartStyleTail(bytes: Uint8Array): boolean {
+  const [text, last] = tokenize(bytes).slice(-2);
+  return !!text && 'text' in text && text.text === '' && !!last && 'bytes' in last && last.bytes.length === 5 && last.bytes.every((x) => x === 0);
+}
+
 export function chartOptions(bytes: Uint8Array): Pick<ChartInfo, 'legend' | 'dataLabels'> {
   const runs = tokenize(bytes).filter((t): t is { bytes: Uint8Array } => 'bytes' in t);
   const out: Pick<ChartInfo, 'legend' | 'dataLabels'> = {};
@@ -1053,6 +1061,7 @@ function buildLayout(records: RecordNode[]): AreaInfo[] {
         chartField = undefined;
         Object.assign(object.chart, chartOptions(b.subarray(2)));
         object.chart.styleCode = u16(b, 0);
+        object.chart.styleTail = chartStyleTail(b);
         if (b.length >= 2) {
           object.chart.family = b[0];
           object.chart.graphType = b[1];
