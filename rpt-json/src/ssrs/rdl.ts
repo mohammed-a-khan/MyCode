@@ -387,6 +387,8 @@ class RdlBuilder {
   private readonly itemNames = new NameSet();
   /** Placing the report footer: conditions read the last record, as in Crystal. */
   private lastRecord = false;
+  /** Subreports drawn with an empty frame where their own formula hides them: they hold their own place. */
+  private readonly framed = new Set<string>();
   private readonly fieldNames = new NameSet();
   private readonly imageNames = new NameSet();
   private readonly fields = new Map<string, DatasetField>();
@@ -1110,6 +1112,19 @@ class RdlBuilder {
         const room = collapsible ? MIN_DESIGN_HEIGHT : section.height !== undefined ? twipsToInches(section.height) - (box.top - top) : undefined;
         const inline = this.inlineSubreport(obj, box, area, both, scope === 'page' || pageLike ? 'page' : 'body', room);
         if (inline) items.push(inline.item);
+        // Crystal still draws the frame of a bordered subreport its own formula hides (its section shown): an empty
+        // box at its place, shown just where the subreport is hidden.
+        if (inline && own && own !== '=True' && obj.border?.sides.some((side) => side > 0)) {
+          const name = inline.item.attributes.Name ?? obj.name;
+          const frame = el('Rectangle', { Name: this.itemNames.make(`${name}_Frame`) },
+            el('KeepTogether', 'true'),
+            el('Top', inches(itemNumber(inline.item, 'Top'))), el('Left', inches(itemNumber(inline.item, 'Left'))),
+            el('Height', inches(itemNumber(inline.item, 'Height'))), el('Width', inches(itemNumber(inline.item, 'Width'))),
+            el('Visibility', el('Hidden', hidden ? `=(${hidden.slice(1)}) OrElse Not (${own.slice(1)})` : `=Not (${own.slice(1)})`)),
+            el('Style', ...this.borderStyle(obj.border)));
+          items.push(frame);
+          this.framed.add(name).add(frame.attributes.Name);
+        }
         bottom = Math.max(bottom, box.top - top + (inline?.height ?? box.height));
         continue;
       }
@@ -3666,7 +3681,7 @@ class RdlBuilder {
           el('rd:DataSourceID', reportId(`${this.options.reportName}/${d.name}`))))),
       el('DataSets', this.datasetElement(this.dataSourceName), ...this.extraDataSets),
       el('ReportSections', el('ReportSection',
-        el('Body', el('ReportItems', ...holdPlaces(clearRoundingOverlaps(fitInside(joinBoxes(clearLineOverlaps(bodyItems)))), this.itemNames)), el('Height', inches(top > 0 ? top : DEFAULT_HEIGHT)), el('Style')),
+        el('Body', el('ReportItems', ...holdPlaces(clearRoundingOverlaps(fitInside(joinBoxes(clearLineOverlaps(bodyItems)))), this.itemNames, this.framed)), el('Height', inches(top > 0 ? top : DEFAULT_HEIGHT)), el('Style')),
         el('Width', inches(Math.max(width, 1))),
         el('Page',
           header.items.length ? el('PageHeader', el('Height', inches(header.height)), el('PrintOnFirstPage', 'true'), el('PrintOnLastPage', 'true'), el('ReportItems', ...clearLineOverlaps(header.items)), el('Style')) : null,
@@ -4071,7 +4086,7 @@ function flattenRectangle(item: XmlElement): XmlElement[] {
  * a hair high (taking up no room down the page), shown where the item is hidden: SSRS moves the items to the right of
  * a hidden item into its room, where Crystal leaves the room empty.
  */
-function holdPlaces(items: XmlElement[], names: { make(name: string): string }): XmlElement[] {
+function holdPlaces(items: XmlElement[], names: { make(name: string): string }, framed: Set<string> = new Set()): XmlElement[] {
   const hiddenBy = (item: XmlElement) => {
     const visibility = item.children.find((c): c is XmlElement => typeof c === 'object' && c !== null && (c as XmlElement).name === 'Visibility');
     const hidden = visibility?.children.find((c): c is XmlElement => typeof c === 'object' && c !== null && (c as XmlElement).name === 'Hidden');
@@ -4083,12 +4098,13 @@ function holdPlaces(items: XmlElement[], names: { make(name: string): string }):
     // A section's page rectangle: the same within it.
     if (item.name === 'Rectangle' && /_Page$/.test(item.attributes.Name ?? '')) {
       item = { ...item, children: item.children.map((c) => (typeof c === 'object' && c !== null && (c as XmlElement).name === 'ReportItems'
-        ? { ...(c as XmlElement), children: holdPlaces((c as XmlElement).children.filter((x): x is XmlElement => typeof x === 'object' && x !== null), names) } : c)) };
+        ? { ...(c as XmlElement), children: holdPlaces((c as XmlElement).children.filter((x): x is XmlElement => typeof x === 'object' && x !== null), names, framed) } : c)) };
     }
     const top = itemNumber(item, 'Top');
     const bottom = top + itemNumber(item, 'Height');
     const right = itemRight(item);
-    const hidden = hiddenBy(item);
+    // A framed subreport and its frame: one of them shows wherever their section does.
+    const hidden = framed.has(item.attributes.Name ?? '') ? undefined : hiddenBy(item);
     const beside = !!hidden && items.some((other) => other !== item && itemNumber(other, 'Left') >= right - 0.01
       && itemNumber(other, 'Top') < bottom && itemNumber(other, 'Top') + itemNumber(other, 'Height') > top);
     if (beside) {
