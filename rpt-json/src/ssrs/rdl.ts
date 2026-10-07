@@ -4066,14 +4066,15 @@ function flattenRectangle(item: XmlElement): XmlElement[] {
  */
 /**
  * An item a formula can hide, with items beside it to its right, gets an empty rectangle as wide as it at its top,
- * a hair high (taking up no room down the page): SSRS moves the items to the right of a hidden item into its room,
- * where Crystal leaves the room empty.
+ * a hair high (taking up no room down the page), shown where the item is hidden: SSRS moves the items to the right of
+ * a hidden item into its room, where Crystal leaves the room empty.
  */
 function holdPlaces(items: XmlElement[], names: { make(name: string): string }): XmlElement[] {
-  const hideable = (item: XmlElement) => {
+  const hiddenBy = (item: XmlElement) => {
     const visibility = item.children.find((c): c is XmlElement => typeof c === 'object' && c !== null && (c as XmlElement).name === 'Visibility');
     const hidden = visibility?.children.find((c): c is XmlElement => typeof c === 'object' && c !== null && (c as XmlElement).name === 'Hidden');
-    return !!hidden && String(hidden.children[0] ?? '').startsWith('=');
+    const expression = String(hidden?.children[0] ?? '');
+    return expression.startsWith('=') ? expression : undefined;
   };
   const out: XmlElement[] = [];
   for (let item of items) {
@@ -4085,13 +4086,16 @@ function holdPlaces(items: XmlElement[], names: { make(name: string): string }):
     const top = itemNumber(item, 'Top');
     const bottom = top + itemNumber(item, 'Height');
     const right = itemRight(item);
-    const beside = hideable(item) && items.some((other) => other !== item && itemNumber(other, 'Left') >= right - 0.01
+    const hidden = hiddenBy(item);
+    const beside = !!hidden && items.some((other) => other !== item && itemNumber(other, 'Left') >= right - 0.01
       && itemNumber(other, 'Top') < bottom && itemNumber(other, 'Top') + itemNumber(other, 'Height') > top);
     if (beside) {
       out.push(el('Rectangle', { Name: names.make(`${item.attributes.Name ?? 'Item'}_Place`) },
         el('KeepTogether', 'true'),
         el('Top', inches(top)), el('Left', inches(itemNumber(item, 'Left'))), el('Height', inches(MIN_DESIGN_HEIGHT)),
         el('Width', inches(right - itemNumber(item, 'Left'))),
+        // Only where the item is hidden: over a shown item it would cover its border.
+        el('Visibility', el('Hidden', `=Not (${hidden!.slice(1)})`)),
         el('Style', el('Border', el('Style', 'None')))));
     }
     out.push(item);
