@@ -532,6 +532,40 @@ describe('layout conversion', () => {
     assert.deepEqual(convertToRdl(main, source, { reportName: 'Main', subreports }).referenced, []);
   });
 
+  it('keeps a table between two boxes out of the lower box, which follows it', () => {
+    const subSource: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Customer', type: 'string' }] }] };
+    const sub: ReportDefinition = { ...emptyDefinition(), layout: [
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [{ kind: 'field', name: 'F', field: 'T.Customer', position: { x: 0, y: 0 }, size: { width: 3000, height: 240 } }] }] }] };
+    const subreport = (name: string, x: number, y: number, width: number, height: number, hideable = false) => ({ kind: 'subreport' as const, name, subreport: { index: 1, onDemand: false },
+      position: { x, y }, size: { width, height }, ...(hideable ? { conditions: { suppress: { name: 'Suppress', index: 1 } } } : {}) });
+    const box = (name: string, y: number, height: number) => ({ kind: 'box' as const, name, position: { x: 145, y }, size: { width: 14880, height }, border: { sides: [1, 1, 1, 1] as [number, number, number, number], width: 20 } });
+    const main: ReportDefinition = { ...emptyDefinition(), page: { orientation: 'landscape', paperSize: 1 },
+      formulas: [{ name: 'Suppress', index: 1, kind: 'conditionalFormat', text: '{Orders.Amount} = 0', referencedFields: ['Orders.Amount'] }],
+      layout: [{ name: 'ReportFooterArea1', sections: [
+        { name: 'Summary', height: 630, objects: [box('Upper', 60, 719), subreport('Inner', 170, 425, 9040, 205)] },
+        // A table its section can hide, designed as low as it goes, between the boxes.
+        { name: 'Table', height: 195, conditions: { suppress: { name: 'Suppress', index: 1 } }, objects: [subreport('Between', 125, 0, 14955, 195, true)] },
+        { name: 'Charts', height: 2797, objects: [subreport('Left', 240, 40, 3865, 60), box('Lower', 0, 2870)] }] }] };
+    const { rdl } = convertToRdl(main, source, { reportName: 'Main', subreports: new Map([[1, { name: 'Sub1', links: [], definition: sub, dataSource: subSource }]]) });
+    const lower = rdl.slice(rdl.indexOf('<Rectangle Name="Lower">'));
+    const inLower = lower.slice(0, lower.indexOf('</ReportItems>'));
+    assert.ok(!inLower.includes('Name="Between"'), 'the table is not drawn inside the lower box');
+    // An item's own Top and Height (not those of the items inside it).
+    const own = (name: string, tag: string) => {
+      const tags = /<(\/?)ReportItems>|<(Top|Height)>([^<]*)in<\/(?:Top|Height)>/g;
+      tags.lastIndex = rdl.indexOf(`<Rectangle Name="${name}">`);
+      let depth = 0;
+      for (let m = tags.exec(rdl); m; m = tags.exec(rdl)) {
+        if (m[2] === undefined) depth += m[1] ? -1 : 1;
+        else if (depth === 0 && m[2] === tag) return Number(m[3]);
+      }
+      return NaN;
+    };
+    const lowerTop = own('Lower', 'Top');
+    const between = [own('Between', 'Top'), own('Between', 'Height')];
+    assert.ok(lowerTop >= between[0] + between[1] - 0.0005, 'the lower box starts below the table, so it is pushed down as the table grows');
+  });
+
   it('draws a thick rule down from its place, as Crystal does', () => {
     const header: ReportDefinition = { ...emptyDefinition(), layout: [
       { name: 'PageHeaderArea1', sections: [{ name: 'PH', height: 1027, objects: [
@@ -547,9 +581,22 @@ describe('layout conversion', () => {
     const bars: ReportDefinition = { ...emptyDefinition(), layout: [{ name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 3000, objects: [
       { kind: 'chart', name: 'Bars', position: { x: 0, y: 0 }, size: { width: 4000, height: 2800 }, chart: { family: 0, graphType: 0, values: ['Sum of Orders.Amount'], onChangeOf: 'Orders.Region' } }] }] }] };
     const rdl = convertToRdl(bars, source, { reportName: 'B' }).rdl;
-    assert.match(rdl, /<Minimum>=IIf\(CountDistinct\(Fields!Region\.Value\) = 1 [^<]* \* 0\.4, Double\.NaN\)<\/Minimum>/);
-    assert.match(rdl, /<Maximum>=IIf\(CountDistinct\(Fields!Region\.Value\) = 1 [^<]* \* 1\.6, Double\.NaN\)<\/Maximum>/);
-    assert.match(rdl, /<Interval>=IIf\(CountDistinct\(Fields!Region\.Value\) = 1 [^<]* \* 0\.2, Double\.NaN\)<\/Interval>/);
+    assert.match(rdl, /<Minimum>=IIf\(CountDistinct\(Fields!Region\.Value\) = 1 [^<]* \* 0\.4, IIf\([^<]*\)<\/Minimum>/);
+    assert.match(rdl, /<Maximum>=IIf\(CountDistinct\(Fields!Region\.Value\) = 1 [^<]* \* 1\.6, IIf\([^<]*\)<\/Maximum>/);
+    assert.match(rdl, /<Interval>=IIf\(CountDistinct\(Fields!Region\.Value\) = 1 [^<]* \* 0\.2, IIf\([^<]*\)<\/Interval>/);
+  });
+
+  it('starts a bar chart\'s axis at 0 where its smallest value is 0, and runs it from -5 to 5 where all are 0', () => {
+    const bars: ReportDefinition = { ...emptyDefinition(), layout: [{ name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 3000, objects: [
+      { kind: 'chart', name: 'Bars', position: { x: 0, y: 0 }, size: { width: 4000, height: 2800 }, chart: { family: 0, graphType: 0, values: ['Sum of Orders.Amount'], onChangeOf: 'Orders.Region' } }] }] }] };
+    const rdl = convertToRdl(bars, source, { reportName: 'B' }).rdl;
+    const lowest = 'CDbl\\(IIf\\(IsNothing\\(Min\\(Fields!Amount\\.Value\\)\\), 1, Min\\(Fields!Amount\\.Value\\)\\)\\)';
+    // The value axis's (the category axis comes first).
+    const last = (tag: string) => [...rdl.matchAll(new RegExp(`<${tag}>([^<]*)</${tag}>`, 'g'))].at(-1)![1];
+    const minimum = last('Minimum');
+    assert.match(minimum, new RegExp(`IIf\\(${lowest} = 0 AndAlso .*? = 0, -5, IIf\\(${lowest} = 0, 0, Double\\.NaN\\)\\)\\)$`));
+    assert.match(last('Maximum'), /\) = 0, 5, Double\.NaN\)\)$/);
+    assert.match(last('Interval'), /\) = 0, 1, Double\.NaN\)\)$/);
   });
 
   it('never starts a row a rounding step above the bottom of the row before it', () => {
