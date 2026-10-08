@@ -543,13 +543,16 @@ export function applyHouseStyle(rdl: string, style: HouseStyle): string {
     }).sort((x, y) => area(x) - area(y))[0];
   };
   // What lies in a frame moves with the frame (keeping its distance from the frame's side); what lies in none
-  // reaches the rule itself. Nothing ends past the rule.
+  // (or in a rectangle without a border) reaches the rule itself. Nothing ends past the rule.
   const grows = new Map<XmlElement, number>();
   const order = placed.filter((e) => edgeItem(e) && !besides(e)).sort((x, y) => area(y) - area(x));
   for (const e of order) {
     const b = boxes.get(e)!;
     if (b.left < ruleLeft - 2 || b.right >= end - 0.5) continue;
-    const outer = encloser(e);
+    // A rectangle drawn without a border (a subreport without a frame, a section's holder) lying in no frame is none:
+    // what is in it reaches the rule as what lies in none does.
+    const framedAround = (r: XmlElement | undefined): boolean => !!r && (isFrame(r) || framedAround(encloser(r)));
+    const outer = [encloser(e)].find(framedAround);
     let grow: number;
     if (outer) {
       const frameGrow = grows.get(outer);
@@ -691,7 +694,8 @@ export function applyHouseStyle(rdl: string, style: HouseStyle): string {
       const own = ownStyle(tb);
       const room = (width - (points(textOf(child(own, 'PaddingLeft'))) ?? 2) - (points(textOf(child(own, 'PaddingRight'))) ?? 2)) * 0.96;
       const lines = fixedLines(tb).filter((l) => l.trim());
-      // Its height too: the lines as tall as the box allows (or as Crystal's were, where they already filled it).
+      // Its height too: the lines as tall as the box allows (or as Crystal's one line was, where it already filled it;
+      // SSRS clips a second line overflowing the box, even where Crystal's own lines did).
       const height = cellHeight(tb);
       const tall = height === undefined ? Infinity
         : (height - (points(textOf(child(own, 'PaddingTop'))) ?? 2) - (points(textOf(child(own, 'PaddingBottom'))) ?? 2)) * 0.97;
@@ -705,7 +709,7 @@ export function applyHouseStyle(rdl: string, style: HouseStyle): string {
           linesAfter += after.lines;
           return after.lines <= before.lines && (!after.broken || before.broken);
         });
-        const allowed = Math.max(tall, linesBefore * size * lineHeight(old.font));
+        const allowed = linesAfter > 1 ? tall : Math.max(tall, linesBefore * size * lineHeight(old.font));
         return wraps && linesAfter * size * f * lineHeight(now.font) <= allowed + 0.01;
       };
       factor = 1;

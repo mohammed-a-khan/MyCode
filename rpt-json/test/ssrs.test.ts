@@ -563,6 +563,9 @@ describe('layout conversion', () => {
     const height = (name: string) => /<Rectangle Name="NAME">[\s\S]*?<KeepTogether>true<\/KeepTogether>\s*<Top>[^<]*<\/Top>\s*<Left>[^<]*<\/Left>\s*<Height>([^<]*)<\/Height>/.exec(rdl.replace(`"${name}"`, '"NAME"'))![1];
     // The right one's sections may not print (a chart without data): its frame still reaches the row's foot.
     assert.equal(height('Right'), height('Left'));
+    // SSRS would give up the space of its hidden items: an empty mark at the row's foot keeps it.
+    const foot = /<Line Name="Right_RowFoot">\s*<Top>([\d.]+)in<\/Top>/.exec(rdl);
+    assert.ok(foot && Math.abs(Number(foot[1]) + 0.01 - parseFloat(height('Left'))) < 0.002);
   });
 
   it('draws the empty frame of a bordered subreport its own formula hides', () => {
@@ -2048,9 +2051,9 @@ describe('chart options', () => {
     const rdl = (chart: ChartInfo) => convertToRdl(chartReport(chart), source, { reportName: 'C', subreport: true }).rdl;
     const flat = rdl({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', series: 'T.Label', family: 0, graphType: 0, look: 2, dataLabels: { kind: 2, format: 7 } } as ChartInfo);
     const angled = rdl({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', series: 'T.Label', family: 0, graphType: 0, look: 1, dataLabels: { kind: 2, format: 7 } } as ChartInfo);
-    assert.ok(!flat.includes('<Angle>-45</Angle>') && flat.includes('<AllowLabelRotation>Rotate90</AllowLabelRotation>') && flat.includes('<PreventFontShrink>true</PreventFontShrink>'), 'flat, turned only where they do not fit, at their size');
+    assert.ok(!flat.includes('<Angle>-45</Angle>') && /<Angle>=IIf\(Max\(Len\(CStr\(Fields!Label\.Value\)\)\) \* 0\.04 \+ 0\.04 &lt;= [\d.]+ \/ IIf\(CountDistinct\(Fields!Label\.Value\) &lt; 1, 1, CountDistinct\(Fields!Label\.Value\)\), 0, IIf\([^<]*&gt;= 0\.13, -45, -90\)\)<\/Angle>/.test(flat), 'flat where they fit, angled, or upright where they would overlap');
     const line = rdl({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 1, graphType: 13, look: 3 } as ChartInfo);
-    assert.ok(line.includes('<AllowLabelRotation>None</AllowLabelRotation>') && line.includes('<MinFontSize>4pt</MinFontSize>'), 'a line chart\'s dates on one row, smaller where they do not fit');
+    assert.ok(line.includes('<AllowLabelRotation>None</AllowLabelRotation>') && line.includes('<MinFontSize>5pt</MinFontSize>'), 'a line chart\'s dates on one row, smaller where they do not fit');
     assert.ok(angled.includes('<Angle>-45</Angle>'));
     assert.ok(flat.includes('#VALY{0.00%}') && !/<Position>Center<\/Position>/.test(flat), 'as its format says, above the bars');
     assert.ok(angled.includes('#VALY{0%}') && /<Label>#VALY\{0%\}<\/Label>\s*<Position>Center<\/Position>/.test(angled), 'whole, inside the bars');
@@ -2058,6 +2061,9 @@ describe('chart options', () => {
     assert.ok(/<Format>0\.00%<\/Format>/.test(angled));
     const own = rdl({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 0, graphType: 0, look: 2, dataLabels: { kind: 2, format: -1, custom: '#,##0' } } as ChartInfo);
     assert.ok(own.includes('#VALY{#,##0}') && /<Format>#,##0\.00<\/Format>/.test(own));
+    // One .NET cannot read as a number (no digit placeholder) would print in place of each value.
+    const odd = rdl({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 0, graphType: 0, look: 2, dataLabels: { kind: 2, format: -1, custom: 'N9' } } as ChartInfo);
+    assert.ok(odd.includes('#VALY{#,##0}') && !odd.includes('N9') && /<Format>#,##0<\/Format>/.test(odd));
   });
   it('scales a chart of a formula worked out row by row as Crystal does', () => {
     const report = chartReport({ values: ['Sum of @Share100'], onChangeOf: 'T.Label', family: 1, graphType: 13 });

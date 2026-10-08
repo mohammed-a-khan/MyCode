@@ -1155,6 +1155,13 @@ class RdlBuilder {
       for (const target of frame ? [item, frame] : [item]) {
         target.children = target.children.map((c) => (typeof c === 'object' && c !== null && (c as XmlElement).name === 'Height' ? el('Height', inches(tallest)) : c));
       }
+      // SSRS gives up the space of items hidden at a rectangle's foot: an empty mark there keeps the row's height.
+      const foot = el('Line', { Name: this.itemNames.make(`${item.attributes.Name}_RowFoot`) },
+        el('Top', inches(Math.max(0, tallest - 0.01))), el('Left', '0in'), el('Height', '0in'), el('Width', '0.01in'),
+        el('Style', el('Border', el('Style', 'None'))));
+      const holder = child(item, 'ReportItems');
+      if (holder) holder.children.push(foot);
+      else item.children.unshift(el('ReportItems', foot));
       bottom = Math.max(bottom, itemNumber(item, 'Top') - top + tallest);
     }
     // Crystal's New Page Before: the section's items in a rectangle that starts a new page (hidden with the
@@ -1670,6 +1677,16 @@ class RdlBuilder {
       : raw ? `=${fit(factor)}` : 'NaN';
     const angled = style.type !== 'Shape' && !isLine && chart.look === 1;
     const flat = style.type !== 'Shape' && !angled;
+    // Crystal lays a bar chart's category labels flat where they fit side by side, angles them where each still has
+    // room at 45 degrees, and turns them upright where even that would overlap (about 0.04in a character, 0.13in a
+    // label at 45 degrees, at 5.5pt, over the plot without its value axis).
+    const turned = flat && style.type === 'Column' && categoryExpression && categoryExpression !== 'Nothing'
+      ? (() => {
+        const n = `CountDistinct(${categoryExpression})`;
+        const slot = `${Math.max(0.5, box.width - 0.6).toFixed(2)} / IIf(${n} < 1, 1, ${n})`;
+        return `=IIf(Max(Len(CStr(${categoryExpression}))) * 0.04 + 0.04 <= ${slot}, 0, IIf(${slot} >= 0.13, -45, -90))`;
+      })()
+      : undefined;
     const axis = (title: string | undefined, kind: 'category' | 'value', format?: string) => el('ChartAxis', { Name: 'Primary' },
       // Crystal's axis text is small, as small as its data labels.
       el('Style', el('FontFamily', 'Arial'), el('FontSize', '5.5pt'), el('FontWeight', 'Normal'), format ? el('Format', format) : null),
@@ -1681,10 +1698,11 @@ class RdlBuilder {
       // As the chart's look has them: angled; or flat where they fit side by side. A bar chart's are turned (up to
       // upright, for long names) where they do not, at their size; a line chart's dates stay on one row, made smaller.
       kind === 'category' && angled ? el('Angle', '-45') : null,
-      ...(kind === 'category' && flat ? [el('PreventFontGrow', 'true'), el('PreventLabelOffset', 'true'), el('PreventWordWrap', 'true'),
-        ...(isLine ? [el('AllowLabelRotation', 'None'), el('MinFontSize', '4pt')] : [el('PreventFontShrink', 'true'), el('AllowLabelRotation', 'Rotate90')])] : []),
+      kind === 'category' && turned ? el('Angle', turned) : null,
+      ...(kind === 'category' && flat && !turned ? [el('PreventFontGrow', 'true'), el('PreventLabelOffset', 'true'), el('PreventWordWrap', 'true'),
+        ...(isLine ? [el('AllowLabelRotation', 'None'), el('MinFontSize', '5pt')] : [el('PreventFontShrink', 'true'), el('AllowLabelRotation', 'Rotate90')])] : []),
       // SSRS would otherwise resize axis text to fit (up to 10pt); Crystal keeps its size.
-      el('LabelsAutoFitDisabled', kind === 'category' && flat ? 'false' : 'true'),
+      el('LabelsAutoFitDisabled', kind === 'category' && flat && !turned ? 'false' : 'true'),
       el('ChartMajorGridLines', el('Enabled', kind === 'value' ? 'True' : 'False'), el('Style', el('Border', el('Color', 'Black'), el('Width', '0.5pt')))),
       el('ChartMinorGridLines', el('Style')),
       el('ChartMinorTickMarks', el('Length', '0.5')),
@@ -1704,12 +1722,16 @@ class RdlBuilder {
     // Data labels as Crystal shows them: the category, the value (in the chart's number format), or both.
     // A bar chart of the angled look prints its percentages whole, inside the bars (otherwise as its format says, above).
     const insideBars = style.type === 'Column' && chart.look === 1 && [5, 6, 7].includes(chart.dataLabels?.format ?? 0);
-    const custom = chart.dataLabels?.custom;
+    // A format of the chart's own that .NET cannot read as a number (no digit in it) would print as it is, in place of
+    // the value: whole numbers with thousands separators, as Crystal shows them.
+    const ownFormat = chart.dataLabels?.custom;
+    const unreadable = ownFormat !== undefined && !/[0#]/.test(ownFormat);
+    const custom = unreadable ? '#,##0' : ownFormat;
     // The list's formats (its first, read where the marker places it, is a plain number to three places: 49.000).
     const listFormat = chart.dataLabels ? (chart.dataLabels.format === 0 && chart.dataLabels.listed ? '0.000' : CHART_NUMBER_FORMATS[chart.dataLabels.format]) : undefined;
     const labelFormat = chart.dataLabels ? (custom ?? (insideBars ? '0%' : listFormat)) : undefined;
     // The value axis: in the labels' list format; with a format of the chart's own, Crystal's plain number (1,000.00).
-    const axisFormat = custom ? (custom.includes('%') ? custom : '#,##0.00') : listFormat;
+    const axisFormat = custom ? (custom.includes('%') || unreadable ? custom : '#,##0.00') : listFormat;
     const valueKeyword = labelFormat ? `#VALY{${labelFormat}}` : '#VALY';
     // #AXISLABEL is the category's text (#VALX would give its position for text categories).
     // Both: the category over the value, on two lines, as Crystal prints them.
