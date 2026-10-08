@@ -1955,6 +1955,15 @@ describe('chart options', () => {
     const { rdl } = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 1, graphType: 13,
       legend: { visible: true, position: 2 }, dataLabels: { kind: 0, format: 0 } }), source, { reportName: 'C', subreport: true });
     assert.ok(rdl.includes('<Position>BottomCenter</Position>') && !rdl.includes('#VALY'));
+    assert.ok(rdl.includes('<TextWrapThreshold>0</TextWrapThreshold>'), 'each legend entry on one line');
+  });
+  it('frames a flat chart\'s plot on all four sides, and a pie not at all', () => {
+    const framed = (family: number, graphType: number) => {
+      const { rdl } = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family, graphType }), source, { reportName: 'C', subreport: true });
+      return (rdl.match(/<ChartAxis Name="Secondary">\s*<Visible>True<\/Visible>[\s\S]*?<Location>Opposite<\/Location>\s*<HideLabels>true<\/HideLabels>/g) ?? []).length;
+    };
+    assert.equal(framed(0, 0), 2, 'the category and value axes repeated opposite, unlabelled');
+    assert.equal(framed(3, 31), 0);
   });
 });
 

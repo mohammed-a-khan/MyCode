@@ -256,12 +256,13 @@ const GAP = 2;
 const STRIP = 3;
 const inches = (pt: number) => `${Math.round((pt / 72) * 1000) / 1000}in`;
 
-/** An item's left edge from the left of the page's body, through the rectangles it sits in. */
-function offsetOf(item: XmlElement, parents: Map<XmlElement, XmlElement>): number {
-  let left = lengthInPoints(textOf(child(item, 'Left'))) ?? 0;
-  for (let up = parents.get(item); up; up = parents.get(up)) if (up.name === 'Rectangle') left += lengthInPoints(textOf(child(up, 'Left'))) ?? 0;
-  return left;
+/** An item's left (or top) edge from the page's body, through the rectangles it sits in. */
+function offsetOf(item: XmlElement, parents: Map<XmlElement, XmlElement>, side: 'Left' | 'Top' = 'Left'): number {
+  let at = lengthInPoints(textOf(child(item, side))) ?? 0;
+  for (let up = parents.get(item); up; up = parents.get(up)) if (up.name === 'Rectangle') at += lengthInPoints(textOf(child(up, side))) ?? 0;
+  return at;
 }
+const ITEMS = new Set(['Rectangle', 'Textbox', 'Line', 'Chart', 'Tablix', 'Subreport', 'Image']);
 
 type RowKind = 'heading' | 'groupHeading' | 'detail' | 'total' | 'noData';
 
@@ -448,47 +449,115 @@ export function applyHouseStyle(rdl: string, style: HouseStyle): string {
     }
   }
 
-  // Tables a little short of a rule across the page: as wide as the rule.
+  // What is a little short of a rule across the page, at its right: as wide as the rule (a box with what is in it).
   const inCell = (e: XmlElement) => {
     for (let up = parents.get(e); up; up = parents.get(up)) if (up.name === 'CellContents') return true;
     return false;
   };
-  const rules = all.filter((e) => e.name === 'Line' && !inCell(e)).map((line) => {
-    const left = offsetOf(line, parents);
-    const width = lengthInPoints(textOf(child(line, 'Width'))) ?? 0;
-    return { left, right: left + width, flat: Math.abs(lengthInPoints(textOf(child(line, 'Height'))) ?? 0) < 1 };
-  }).filter((r) => r.flat && r.right - r.left > 144);
-  for (const tablix of all.filter((e) => e.name === 'Tablix' && !inCell(e))) {
-    const left = offsetOf(tablix, parents);
-    const width = lengthInPoints(textOf(child(tablix, 'Width'))) ?? 0;
-    const right = left + width;
-    const rule = rules.filter((r) => r.left <= left + 2 && r.right > right + 0.5 && r.right - right <= 54 && width >= (r.right - r.left) * 0.6)
-      .sort((a, b) => b.right - a.right)[0];
-    if (!rule) continue;
-    const grow = rule.right - right;
-    // Nothing beside it, to the right, in its own container.
-    const top = lengthInPoints(textOf(child(tablix, 'Top'))) ?? 0;
-    const bottom = top + (lengthInPoints(textOf(child(tablix, 'Height'))) ?? 0);
-    const siblings = childElements(parents.get(tablix) ?? el('ReportItems')).filter((e) => e !== tablix);
-    if (siblings.some((e) => {
-      const l = lengthInPoints(textOf(child(e, 'Left'))) ?? 0;
-      const t = lengthInPoints(textOf(child(e, 'Top'))) ?? 0;
-      const b = t + (lengthInPoints(textOf(child(e, 'Height'))) ?? 0);
-      return l >= (lengthInPoints(textOf(child(tablix, 'Left'))) ?? 0) + width - 0.5 && t < bottom && b > top;
-    })) continue;
-    const columns = childElements(child(tablix, 'TablixBody/TablixColumns') ?? el('TablixColumns'), 'TablixColumn');
-    const last = columns[columns.length - 1];
-    if (!last) continue;
-    setChild(last, 'Width', inches((lengthInPoints(textOf(child(last, 'Width'))) ?? 0) + grow));
-    setChild(tablix, 'Width', inches(width + grow));
+  const len = (e: XmlElement, name: string) => lengthInPoints(textOf(child(e, name))) ?? 0;
+  const placed = all.filter((e) => ITEMS.has(e.name) && !inCell(e) && parents.get(e)?.name === 'ReportItems');
+  const boxOf = (e: XmlElement) => {
+    const left = offsetOf(e, parents, 'Left');
+    const top = offsetOf(e, parents, 'Top');
+    return { left, top, right: left + len(e, 'Width'), bottom: top + len(e, 'Height') };
+  };
+  const boxes = new Map(placed.map((e) => [e, boxOf(e)]));
+  const isFrame = (e: XmlElement) => e.name === 'Rectangle' && !/^none$/i.test(textOf(child(e, 'Style/Border/Style')) || 'None');
+  const painted = (e: XmlElement) => {
+    const fill = textOf(child(ownStyle(e), 'BackgroundColor'));
+    return !!fill && !/^transparent$/i.test(fill);
+  };
+  const rules = placed.filter((e) => e.name === 'Line' && Math.abs(len(e, 'Height')) < 1).map((e) => boxes.get(e)!).filter((r) => r.right - r.left > 144);
+  const end = Math.max(...rules.map((r) => r.right), 0);
+  const ruleLeft = Math.min(...rules.filter((r) => r.right === end).map((r) => r.left));
+  const thin = (e: XmlElement) => e.name === 'Line' && Math.abs(len(e, 'Width')) < 1;
+  const stretchable = (e: XmlElement) => {
+    const b = boxes.get(e)!;
+    // Plain text stays where it is (only a band or a framed text is part of the layout's edge).
+    const framed = !/^(none)?$/i.test(textOf(child(ownStyle(e), 'Border/Style')));
+    if (thin(e) || e.name === 'Image' || (e.name === 'Textbox' && !painted(e) && !framed)) return false;
+    return b.left >= ruleLeft - 2 && b.right < end - 0.5 && b.right >= end - 54;
+  };
+  const besides = (e: XmlElement) => {
+    const b = boxes.get(e)!;
+    return childElements(parents.get(e)!).some((o) => {
+      if (o === e || !boxes.has(o) || thin(o)) return false;
+      const ob = boxes.get(o)!;
+      return ob.left >= b.right - 0.5 && ob.top < b.bottom && ob.bottom > b.top;
+    });
+  };
+  const grows = new Map<XmlElement, number>();
+  const candidates = placed.filter((e) => stretchable(e) && !besides(e));
+  // Frames first (the largest first): what is in one keeps its distance from the frame's right side.
+  const area = (e: XmlElement) => { const b = boxes.get(e)!; return (b.right - b.left) * (b.bottom - b.top); };
+  candidates.sort((x, y) => Number(isFrame(y)) - Number(isFrame(x)) || area(y) - area(x));
+  const within = (inner: { left: number; top: number; right: number; bottom: number }, outer: { left: number; top: number; right: number; bottom: number }) =>
+    inner.left >= outer.left - 1 && inner.right <= outer.right + 1 && inner.top >= outer.top - 1 && inner.bottom <= outer.bottom + 1;
+  // A frame holds what lies on it (beside it in its container) or in it.
+  const holds = (frame: XmlElement, e: XmlElement) => {
+    if (parents.get(frame) === parents.get(e)) return true;
+    for (let up = parents.get(e); up; up = parents.get(up)) if (up === frame) return true;
+    return false;
+  };
+  for (const e of candidates) {
+    const b = boxes.get(e)!;
+    const frame = [...grows.keys()].find((f) => f.name === 'Rectangle' && f !== e && holds(f, e) && within(b, boxes.get(f)!));
+    const grow = Math.min(frame ? grows.get(frame)! : end - b.right, end - b.right);
+    if (grow > 0.5) grows.set(e, grow);
+  }
+  // Lines down a frame's right side move with it.
+  for (const e of placed.filter(thin)) {
+    const b = boxes.get(e)!;
+    const moved = [...grows.entries()].find(([f]) => holds(f, e) && Math.abs(boxes.get(f)!.right - b.left) <= 3 && b.top >= boxes.get(f)!.top - 1 && b.bottom <= boxes.get(f)!.bottom + 1);
+    if (moved) setChild(e, 'Left', inches(len(e, 'Left') + moved[1]));
+  }
+  for (const [e, grow] of grows) {
+    const width = len(e, 'Width');
+    if (e.name === 'Tablix') {
+      const columns = childElements(child(e, 'TablixBody/TablixColumns') ?? el('TablixColumns'), 'TablixColumn');
+      const last = columns[columns.length - 1];
+      if (!last) continue;
+      setChild(last, 'Width', inches(len(last, 'Width') + grow));
+    }
+    setChild(e, 'Width', inches(width + grow));
     // Its containers widened with it where they would now cut it off.
-    let end = (lengthInPoints(textOf(child(tablix, 'Left'))) ?? 0) + width + grow;
-    for (let up = parents.get(tablix); up; up = parents.get(up)) {
+    let right = len(e, 'Left') + width + grow;
+    for (let up = parents.get(e); up; up = parents.get(up)) {
       if (up.name !== 'Rectangle' && up.name !== 'ReportSection') continue;
-      const w = lengthInPoints(textOf(child(up, 'Width'))) ?? 0;
-      if (w < end) setChild(up, 'Width', inches(end));
+      const w = len(up, 'Width');
+      if (w < right) setChild(up, 'Width', inches(right));
       if (up.name === 'ReportSection') break;
-      end = (lengthInPoints(textOf(child(up, 'Left'))) ?? 0) + Math.max(w, end);
+      right = len(up, 'Left') + Math.max(w, right);
+    }
+  }
+
+  // A painted title along a frame's top: across the frame, side to side.
+  const bands = placed.filter((e) => e.name === 'Textbox' && painted(e) && isFixed(e));
+  for (const band of bands) {
+    const b = boxOf(band);
+    const frame = placed.filter((f) => isFrame(f) && parents.get(f) === parents.get(band) && within(b, boxOf(f)))
+      .map((f) => ({ f, fb: boxOf(f) }))
+      .filter(({ fb }) => b.top - fb.top <= 36 && b.left - fb.left <= 25 && fb.right - b.right <= 25 && (b.right - b.left) >= (fb.right - fb.left) * 0.6)
+      .sort((x, y) => (x.fb.right - x.fb.left) - (y.fb.right - y.fb.left))[0];
+    if (!frame) continue;
+    setChild(band, 'Left', textOf(child(frame.f, 'Left')));
+    setChild(band, 'Width', textOf(child(frame.f, 'Width')));
+  }
+  // Painted titles side by side (a row of charts' titles): on one line, at the lowest one's place.
+  const rowsOf: XmlElement[][] = [];
+  for (const band of bands.filter((e) => (textSize(e) ?? 10) < usual + 6)) {
+    const t = len(band, 'Top');
+    const row = rowsOf.find((r) => parents.get(r[0]) === parents.get(band) && r.every((o) => Math.abs(len(o, 'Top') - t) <= 14
+      && (len(o, 'Left') + len(o, 'Width') <= len(band, 'Left') + 1 || len(band, 'Left') + len(band, 'Width') <= len(o, 'Left') + 1)));
+    if (row) row.push(band);
+    else rowsOf.push([band]);
+  }
+  for (const row of rowsOf.filter((r) => r.length > 1)) {
+    const top = Math.max(...row.map((e) => len(e, 'Top')));
+    const bottom = Math.max(...row.map((e) => len(e, 'Top') + len(e, 'Height')));
+    for (const e of row) {
+      setChild(e, 'Top', inches(top));
+      setChild(e, 'Height', inches(bottom - top));
     }
   }
 
