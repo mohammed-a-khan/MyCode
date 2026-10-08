@@ -175,6 +175,10 @@ describe('house style', () => {
     const nested = applyHouseStyle(page(inner('Holder', 5.05, table('Inner', 0))), style);
     assert.equal(right(nested, 'Rectangle', 'Holder'), 7.45, 'what holds a table moves with the frame');
     assert.equal(right(nested, 'Tablix', 'Inner'), 2.35, 'and the table with what holds it');
+    // A holder without a border lying in no frame (a subreport placed without one) is no frame: what is in it reaches the rule.
+    const loose = applyHouseStyle(page('').replace('<Rectangle Name="Frame">', '<Rectangle Name="Other">').replace(/<Rectangle Name="Other">[\s\S]*?<\/Rectangle>/, '')
+      .replace('<ReportItems></ReportItems>', `<ReportItems>${inner('Loose', 0.1, `<Rectangle Name="Box">${at(0, 0, 1, 7.1)}<Style><Border><Style>Solid</Style></Border></Style></Rectangle>`).replace('2.2in</Width>', '7.2in</Width>')}</ReportItems>`), style);
+    assert.equal(right(loose, 'Rectangle', 'Box'), 7.4);
   });
 
   it('starts a chart below a painted title over its top, and colours a rule drawn as a bar in the house\'s line colour', () => {
