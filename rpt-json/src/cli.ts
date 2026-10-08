@@ -21,14 +21,16 @@ Usage:
   rpt-json to-rpt  <input.json> <output.rpt> [--no-verify] [--cfb-version 3|4]
   rpt-json to-rdl  <input.rpt|input.json|folder> [output-dir] [--connection "<connection string>"]
                    [--shared-datasource <name>] [--template <house.rdl>] [--separate-subreports]
-                   [--page-number] [--parameter name=value]... [--chart-axis-format <format>]
+                   [--page-number] [--parameter name=value]... [--chart-axis-format <format>] [--house <style.json>]
                                             Convert to SSRS .rdl files (+ subreports) and a review checklist;
                                             --template lays each report out in the style of an existing .rdl;
                                             --page-number adds "Page N" at the right of the page footer;
                                             --parameter converts for that parameter value: what its suppress
                                             formulas hide is left out (repeat for more parameters);
                                             --chart-axis-format sets the value-axis format of charts whose
-                                            format the .rpt does not show, e.g. "0.00%"
+                                            format the .rpt does not show, e.g. "0.00%";
+                                            --house keeps the Crystal layout in a house style: fonts, title and
+                                            heading bands, border and chart colours from a JSON file
   rpt-json to-rdl  --template <house.rdl> --combine <output.rdl> <input.rpt|folder>...
                                             Combine several reports into one .rdl, one block per report
   rpt-json headers <input.rpt|input.json|folder> [output-file] [--json | --csv] [--all]
@@ -158,7 +160,27 @@ async function main(argv: string[]): Promise<number> {
       if (eq < 1) throw new Error('--parameter needs name=value');
       parameterValues = { ...parameterValues, [p.slice(0, eq).trim()]: p.slice(eq + 1) };
     }
+    const housePath = takeOption(args, '--house');
+    let restyle: ((rdl: string) => string) | undefined;
+    if (housePath) {
+      // The house style module is optional: loaded only where it is installed.
+      const modulePath = './ssrs/brand.ts';
+      let house: { readHouseStyle(json: string): unknown; applyHouseStyle(rdl: string, style: unknown): string };
+      try {
+        house = await import(modulePath);
+      } catch {
+        throw new Error('to-rdl: --house needs the house style module (src/ssrs/brand.ts), which is not installed');
+      }
+      let style: unknown;
+      try {
+        style = house.readHouseStyle((await readFile(housePath)).toString('utf8'));
+      } catch (err) {
+        throw new Error(`house style ${housePath}: ${(err as Error).message}`);
+      }
+      restyle = (rdl) => house.applyHouseStyle(rdl, style);
+    }
     const templatePath = takeOption(args, '--template');
+    if (housePath && templatePath) throw new Error('to-rdl: --house keeps the Crystal layout and --template replaces it; use one or the other');
     const combine = takeOption(args, '--combine');
     let template: HouseTemplate | undefined;
     if (templatePath) {
@@ -212,7 +234,7 @@ async function main(argv: string[]): Promise<number> {
         let base = original;
         const convert = (name: string) => (template
           ? [convertDocumentsWithTemplate(template, [{ doc, name: original }], name)]
-          : convertDocumentToSsrs(doc, name, { connectionString, sharedDataSource, separateSubreports, pageNumber, parameterValues, chartAxisFormat }));
+          : convertDocumentToSsrs(doc, name, { connectionString, sharedDataSource, separateSubreports, pageNumber, parameterValues, chartAxisFormat, restyle }));
         let reports = convert(base);
         // Two inputs whose names clean up to the same file name ("A B" and "A_B") get a numbered suffix.
         for (let n = 2; reports.some((r) => written.has(r.fileName.toLowerCase())); n++) {
