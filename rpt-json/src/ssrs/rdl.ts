@@ -1697,6 +1697,12 @@ class RdlBuilder {
         // Labels may sit outside the plot area (not cut short to fit beside a small pie).
         el('ChartSmartLabel', el('AllowOutSidePlotArea', 'True'), el('CalloutLineColor', 'Black'), el('MinMovingDistance', '0pt')));
     });
+    // Crystal frames a flat chart's plot on all four sides: the axes' lines repeated opposite them, unlabelled.
+    const frame = isPie || style.threeD ? null : el('ChartAxis', { Name: 'Secondary' },
+      el('Visible', 'True'), el('Style', el('FontSize', '5.5pt')), el('ChartAxisTitle', el('Caption', ''), el('Style')),
+      el('ChartMajorGridLines', el('Enabled', 'False'), el('Style')), el('ChartMinorGridLines', el('Style')),
+      el('ChartMajorTickMarks', el('Enabled', 'False'), el('Style')), el('ChartMinorTickMarks', el('Style')),
+      el('CrossAt', 'NaN'), el('Location', 'Opposite'), el('HideLabels', 'true'), el('ChartAxisScaleBreak', el('Style')));
     return el('Chart', { Name: chartName },
       el('ChartCategoryHierarchy', el('ChartMembers', categoryExpression
         ? el('ChartMember',
@@ -1712,8 +1718,8 @@ class RdlBuilder {
       el('ChartSeriesHierarchy', el('ChartMembers', ...seriesHierarchy)),
       el('ChartData', el('ChartSeriesCollection', ...series)),
       el('ChartAreas', el('ChartArea', { Name: 'Default' },
-        el('ChartCategoryAxes', axis(chart.categoryTitle, 'category')),
-        el('ChartValueAxes', axis(chart.valueTitle, 'value', labelFormat ?? (isPie ? undefined : this.options.chartAxisFormat))),
+        el('ChartCategoryAxes', axis(chart.categoryTitle, 'category'), frame),
+        el('ChartValueAxes', axis(chart.valueTitle, 'value', labelFormat ?? (isPie ? undefined : this.options.chartAxisFormat)), frame),
         // Crystal's 3D pies are tilted well back, with a thick edge.
         style.threeD ? el('ChartThreeDProperties', el('Enabled', 'true'),
           el('Rotation', isPie ? '0' : '20'), el('Inclination', isPie ? '50' : '20'),
@@ -1731,7 +1737,9 @@ class RdlBuilder {
         // Crystal frames its legend with a thin line.
         el('Style', el('Border', el('Color', 'Black'), el('Style', 'Solid'), el('Width', '0.5pt')), el('FontFamily', 'Arial'), el('FontSize', '5.5pt'), el('FontWeight', 'Normal')),
         el('Position', LEGEND_POSITIONS[chart.legend?.position ?? 0] ?? 'RightCenter'),
-        el('AutoFitTextDisabled', 'true'))),
+        el('AutoFitTextDisabled', 'true'),
+        // Each entry on one line, as Crystal prints it (SSRS leaves a wrapped entry's last line against the frame).
+        el('TextWrapThreshold', '0'))),
       chart.title ? el('ChartTitles', el('ChartTitle', { Name: 'Default' }, el('Caption', chart.title), el('Style', el('FontWeight', 'Bold')))) : null,
       // Crystal's chart colours, in its order.
       el('Palette', 'Custom'),

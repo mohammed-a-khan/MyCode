@@ -124,6 +124,29 @@ describe('house style', () => {
     assert.ok(width(plain) < 6400 / 1440 - 0.1 && Math.abs(width(styled) - 6400 / 1440) < 0.01, 'the table reaches the end of the rule');
   });
 
+  it('takes a row of framed charts to the rule\'s end, their titles across their frames and on one line', () => {
+    const at = (t: number, l: number, h: number, w: number) => `<Top>${t}in</Top><Left>${l}in</Left><Height>${h}in</Height><Width>${w}in</Width>`;
+    const frame = (n: string, l: number, w: number) => `<Rectangle Name="${n}">${at(1, l, 2, w)}<Style><Border><Style>Solid</Style></Border></Style></Rectangle>`;
+    const title = (n: string, t: number, l: number, w: number) => `<Textbox Name="${n}"><Paragraphs><Paragraph><TextRuns><TextRun><Value>${n}</Value><Style /></TextRun></TextRuns></Paragraph></Paragraphs>${at(t, l, 0.2, w)}<Style><BackgroundColor>#336699</BackgroundColor></Style></Textbox>`;
+    const chart = (n: string, l: number, w: number) => `<Chart Name="${n}">${at(1.3, l, 1.6, w)}</Chart>`;
+    const rdl = `<Report><ReportSections><ReportSection><Body><ReportItems>
+      ${frame('FrameA', 0, 3)}${title('TitleA', 1.05, 0.1, 2.8)}${chart('ChartA', 0.1, 2.8)}
+      ${frame('FrameB', 3, 3.2)}${title('TitleB', 1, 3.2, 2.8)}${chart('ChartB', 3.1, 3)}
+      ${frame('Outer', 0, 6.2)}</ReportItems><Height>3in</Height></Body><Width>6.5in</Width>
+      <Page><PageHeader><Height>0.5in</Height><ReportItems><Line Name="Rule">${at(0.4, 0, 0, 6.5)}<Style /></Line></ReportItems></PageHeader></Page></ReportSection></ReportSections></Report>`;
+    const styled = applyHouseStyle(rdl, readHouseStyle(JSON.stringify({ font: 'Tahoma' })));
+    const place = (kind: string, name: string) => {
+      const x = item(styled, kind, name);
+      const n = (tag: string) => Number(new RegExp(`<${tag}>([\\d.]+)in`).exec(x)![1]);
+      return { top: n('Top'), left: n('Left'), right: Math.round((n('Left') + n('Width')) * 1000) / 1000 };
+    };
+    assert.equal(place('Rectangle', 'FrameB').right, 6.5, 'the last frame reaches the rule');
+    assert.equal(place('Chart', 'ChartB').right, 6.4, 'its chart keeps its distance from the frame');
+    assert.equal(place('Rectangle', 'FrameA').right, 3, 'a frame with another beside it stays');
+    assert.equal(place('Rectangle', 'Outer').right, 6.5, 'a frame round the whole row reaches it too');
+    assert.deepEqual([place('Textbox', 'TitleA'), place('Textbox', 'TitleB')], [{ top: 1.05, left: 0, right: 3 }, { top: 1.05, left: 3, right: 6.5 }]);
+  });
+
   it('styles group headings, totals, alternate rows, red figures, links and chart titles', () => {
     const definition: ReportDefinition = { ...emptyDefinition(), groups: ['Orders.Name'], layout: [
       { name: 'PageHeaderArea1', sections: [{ name: 'PH', height: 240, objects: [text('Heading', 'Amount', 0)] }] },
