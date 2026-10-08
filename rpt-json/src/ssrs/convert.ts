@@ -27,6 +27,8 @@ export interface SsrsOptions {
   parameterValues?: Record<string, string>;
   /** Number format for chart value axes the .rpt does not show (e.g. "0.00%"). */
   chartAxisFormat?: string;
+  /** A last step over each report's RDL (a house style laid over the Crystal layout, ...). */
+  restyle?: (rdl: string) => string;
 }
 
 const safeFileName = (name: string) => name.replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'Report';
@@ -77,7 +79,7 @@ export function convertDocumentToSsrs(doc: CfbDocument, baseName: string, option
       subreport: Boolean(model.storage),
       images: embeddedImages(storageAt(doc.root, model.storage)),
     });
-    return { fileName: `${reportName}.rdl`, storage: model.storage, rdl, review, referenced };
+    return { fileName: `${reportName}.rdl`, storage: model.storage, rdl: rdl && options.restyle ? options.restyle(rdl) : rdl, review, referenced };
   });
   // Only the subreports the main report refers to need an .rdl of their own: those placed inside it need none, nor
   // those it never prints (in a section always suppressed). All are kept where the main report could not be converted.
