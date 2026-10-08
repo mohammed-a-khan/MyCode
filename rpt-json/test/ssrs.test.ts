@@ -123,6 +123,13 @@ const detailLayout = (...fields: string[]) => [{
   sections: [{ name: 'DetailSection1', objects: fields.map((f, i) => ({ kind: 'field', name: `F${i}`, field: f, position: { x: i * 1440, y: 0 } })) }],
 }];
 
+describe('formula datasets', () => {
+  it('counts the formula\'s own dataset for OnLastRecord (a subreport placed inside another has its own)', () => {
+    assert.equal(translateFormula('OnLastRecord', ctx).expression, '=(RowNumber(Nothing) = CountRows("DataSet1"))');
+    assert.equal(translateFormula('OnLastRecord', { ...ctx, dataset: () => 'DataSet_Sub1' }).expression, '=(RowNumber(Nothing) = CountRows("DataSet_Sub1"))');
+  });
+});
+
 describe('RDL generation', () => {
   it('builds a joined SELECT for direct table access with a SQL Server connection', () => {
     const source: DataSourceInfo = {
@@ -496,6 +503,68 @@ describe('layout conversion', () => {
     assert.ok(stacked.includes('<Rectangle Name="Lower">') && !stacked.includes('<TopBorder>'), 'the lower box keeps its top border');
   });
 
+  it('makes the page header hold the whole of a thick rule at its foot', () => {
+    const main: ReportDefinition = { ...emptyDefinition(), layout: [
+      { name: 'PageHeaderArea1', sections: [{ name: 'PH', height: 400, objects: [
+        { kind: 'text', name: 'AsOf', text: 'As of', position: { x: 6000, y: 160 }, size: { width: 1000, height: 180 } },
+        { kind: 'line', name: 'Rule', position: { x: 0, y: 370 }, size: { width: 9000, height: 0 }, border: { sides: [0, 0, 1, 0], width: 60 } }] }] },
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF', height: 300, objects: [{ kind: 'text', name: 'Note', text: 'Note', position: { x: 0, y: 0 }, size: { width: 3000, height: 200 } }] }] }] };
+    const { rdl } = convertToRdl(main, source, { reportName: 'Main' });
+    const height = Number(/<PageHeader>\s*<Height>([\d.]+)in/.exec(rdl)![1]);
+    const bar = /<Rectangle Name="Rule">\s*<KeepTogether>true<\/KeepTogether>\s*<Top>([\d.]+)in<\/Top>\s*<Left>[^<]*<\/Left>\s*<Height>([\d.]+)in/.exec(rdl)!;
+    // 3pt wide: a bar 0.042in high, all of it in the header, filled in the line's colour.
+    assert.ok(height >= Number(bar[1]) + Number(bar[2]) - 0.0005, `the header (${height}in) holds the rule, ${bar[1]}in down and ${bar[2]}in high`);
+    assert.match(rdl, /<Rectangle Name="Rule">[\s\S]*?<BackgroundColor>Black<\/BackgroundColor>/);
+  });
+
+  it('gives a subreport a formula can hide no more room than its section, so what follows is not pushed down', () => {
+    const subSource: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Customer', type: 'string' }] }] };
+    const sub: ReportDefinition = { ...emptyDefinition(), layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 3000, objects: [{ kind: 'text', name: 'Title', text: 'Title', position: { x: 60, y: 60 }, size: { width: 3000, height: 255 } }] }] }] };
+    const subreport = (name: string, x: number, y: number, hideable = false) => ({ kind: 'subreport' as const, name, subreport: { index: 1, onDemand: false }, position: { x, y }, size: { width: 4000, height: 215 },
+      ...(hideable ? { conditions: { suppress: { name: 'Suppress', index: 1 } } } : {}) });
+    const main: ReportDefinition = { ...emptyDefinition(),
+      formulas: [{ name: 'Suppress', index: 1, kind: 'conditionalFormat', text: '{Orders.Amount} = 0', referencedFields: ['Orders.Amount'] }],
+      layout: [{ name: 'ReportFooterArea1', sections: [
+        { name: 'Charts', height: 2800, objects: [subreport('Shown', 240, 40), subreport('Optional', 4440, 1800, true)] },
+        { name: 'Note', height: 240, objects: [{ kind: 'text', name: 'Footnote', text: 'Note', position: { x: 120, y: 0 }, size: { width: 6000, height: 220 } }] }] }] };
+    const { rdl } = convertToRdl(main, source, { reportName: 'Main', subreports: new Map([[1, { name: 'Sub1', links: [], definition: sub, dataSource: subSource }]]) });
+    const top = (kind: string, name: string) => Number(new RegExp(`<${kind} Name="${name}">[\\s\\S]*?${kind === 'Rectangle' ? '<KeepTogether>true</KeepTogether>\\s*' : ''}<Top>([\\d.]+)in</Top>`).exec(rdl)![1]);
+    const height = Number(/<Rectangle Name="Optional">[\s\S]*?<KeepTogether>true<\/KeepTogether>\s*<Top>[^<]*<\/Top>\s*<Left>[^<]*<\/Left>\s*<Height>([\d.]+)in/.exec(rdl)![1]);
+    // The shown one grows to its own sections (3000 twips from 40); the one that may be hidden ends with the section.
+    assert.ok(Math.abs(top('Textbox', 'Footnote') - (top('Rectangle', 'Shown') + 3000 / 1440)) < 0.01, 'the note follows the shown subreport');
+    assert.ok(Math.abs(top('Rectangle', 'Optional') + height - top('Rectangle', 'Shown') - 2760 / 1440) < 0.01, 'the one a formula hides ends with its section');
+    assert.match(rdl, /<Rectangle Name="Optional">[\s\S]*?<Line Name="Optional_Foot">\s*<Top>2\.07\d*in/, 'shown, it still grows to its own sections');
+  });
+
+  it('prints a group\'s blank section as blank space (a gap after its last row), unless it is suppressed where blank', () => {
+    const grouped = (blankFlags?: string): ReportDefinition => ({ ...emptyDefinition(), groups: ['Orders.Name'], layout: [
+      { name: 'GroupHeaderArea1', sections: [{ name: 'GH', height: 240, objects: [{ kind: 'field', name: 'GroupName', field: 'Orders.Name', position: { x: 0, y: 0 }, size: { width: 3000, height: 240 } }] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [{ kind: 'field', name: 'Value', field: 'Orders.Amount', position: { x: 0, y: 0 }, size: { width: 3000, height: 240 } }] }] },
+      { name: 'GroupFooterArea1', sections: [{ name: 'GF', height: 220, objects: [], ...(blankFlags ? { formatFlags: blankFlags } : {}) }] }] });
+    const rows = (rdl: string) => (rdl.match(/<TablixRow>/g) ?? []).length;
+    const printed = convertToRdl(grouped(), source, { reportName: 'G' }).rdl;
+    const suppressed = convertToRdl(grouped('0300010001000100010000000000010001000000000000ff'), source, { reportName: 'G' }).rdl;
+    assert.equal(rows(printed), rows(suppressed) + 1, 'a blank row after each group');
+    assert.match(printed, /<TablixRow>\s*<Height>0\.153in<\/Height>/);
+  });
+
+  it('draws framed subreports side by side as tall as the tallest of them', () => {
+    const subSource: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Customer', type: 'string' }] }] };
+    const sub = (shown: boolean): ReportDefinition => ({ ...emptyDefinition(),
+      formulas: [{ name: 'Empty', index: 1, kind: 'conditionalFormat', text: '{T.Customer} = ""', referencedFields: ['T.Customer'] }],
+      layout: [{ name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 3000, ...(shown ? {} : { conditions: { suppress: { name: 'Empty', index: 1 } } }),
+        objects: [{ kind: 'text', name: 'Title', text: 'Title', position: { x: 60, y: 60 }, size: { width: 3000, height: 255 } }] }] }] });
+    const framed = (name: string, index: number, x: number) => ({ kind: 'subreport' as const, name, subreport: { index, onDemand: false }, position: { x, y: 40 }, size: { width: 4000, height: 195 },
+      border: { sides: [1, 1, 1, 1] as [number, number, number, number], width: 20 } });
+    const main: ReportDefinition = { ...emptyDefinition(), layout: [{ name: 'ReportFooterArea1', sections: [{ name: 'Row', height: 275, objects: [framed('Left', 1, 175), framed('Right', 2, 4300)] }] }] };
+    const subreports = new Map([[1, { name: 'Sub1', links: [], definition: sub(true), dataSource: subSource }], [2, { name: 'Sub2', links: [], definition: sub(false), dataSource: subSource }]]);
+    const { rdl } = convertToRdl(main, source, { reportName: 'Main', subreports });
+    const height = (name: string) => /<Rectangle Name="NAME">[\s\S]*?<KeepTogether>true<\/KeepTogether>\s*<Top>[^<]*<\/Top>\s*<Left>[^<]*<\/Left>\s*<Height>([^<]*)<\/Height>/.exec(rdl.replace(`"${name}"`, '"NAME"'))![1];
+    // The right one's sections may not print (a chart without data): its frame still reaches the row's foot.
+    assert.equal(height('Right'), height('Left'));
+  });
+
   it('draws the empty frame of a bordered subreport its own formula hides', () => {
     const subSource: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Customer', type: 'string' }] }] };
     const sub: ReportDefinition = { ...emptyDefinition(), layout: [
@@ -627,8 +696,9 @@ describe('layout conversion', () => {
         { kind: 'line', name: 'Rule', position: { x: 0, y: 967 }, size: { width: 15000, height: 0 }, border: { sides: [0, 0, 1, 0], width: 60 } }] }] },
       { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [{ kind: 'field', name: 'F', field: 'Orders.Amount', position: { x: 0, y: 0 }, size: { width: 2000, height: 240 } }] }] }] };
     const rdl = convertToRdl(header, source, { reportName: 'H' }).rdl;
-    // 60 twips wide at 967: SSRS draws it around its place, so it is placed at 997 (0.692in), meeting the header's foot.
-    assert.match(rdl, /<Line Name="Rule">\s*<Top>0\.692in<\/Top>/);
+    // 60 twips wide at 967: Crystal draws it from 967 to 1027 (0.672in to 0.713in), meeting the header's foot. In a page
+    // header it is a bar over just that band.
+    assert.match(rdl, /<Rectangle Name="Rule">\s*<KeepTogether>true<\/KeepTogether>\s*<Top>0\.67[12]in<\/Top>\s*<Left>[^<]*<\/Left>\s*<Height>0\.042in<\/Height>/);
   });
 
   it('scales a bar chart of a single bar as Crystal does', () => {
@@ -648,9 +718,12 @@ describe('layout conversion', () => {
     // The value axis's (the category axis comes first).
     const last = (tag: string) => [...rdl.matchAll(new RegExp(`<${tag}>([^<]*)</${tag}>`, 'g'))].at(-1)![1];
     const minimum = last('Minimum');
-    assert.match(minimum, new RegExp(`IIf\\(${lowest} = 0 AndAlso .*? = 0, -5, IIf\\(${lowest} = 0, 0, Double\\.NaN\\)\\)\\)$`));
-    assert.match(last('Maximum'), /\) = 0, 5, Double\.NaN\)\)$/);
-    assert.match(last('Interval'), /\) = 0, 1, Double\.NaN\)\)$/);
+    // Where each row is a bar, Crystal's own scale (Code.CrAxis); otherwise from 0 where the smallest value is 0.
+    const perBar = 'IIf\\(CountRows\\(\\) = CountDistinct\\(CStr\\(Fields!Region\\.Value\\) &amp; "\\|" &amp; CStr\\(""\\)\\), Code\\.CrAxis\\([^<]*?, ';
+    assert.match(minimum, new RegExp(`IIf\\(${lowest} = 0 AndAlso .*? = 0, -5, ${perBar}0\\), IIf\\(${lowest} = 0, 0, Double\\.NaN\\)\\)\\)\\)$`));
+    assert.match(last('Maximum'), new RegExp(`\\) = 0, 5, ${perBar}1\\), Double\\.NaN\\)\\)\\)$`));
+    assert.match(last('Interval'), new RegExp(`\\) = 0, 1, ${perBar}2\\), Double\\.NaN\\)\\)\\)$`));
+    assert.ok(rdl.includes('Public Function CrAxis('));
   });
 
   it('never starts a row a rounding step above the bottom of the row before it', () => {
@@ -1879,12 +1952,18 @@ describe('chart options', () => {
   it('reads the legend and the data labels from the chart text record', () => {
     // Titles, then the options run (legend shown at the bottom), then the data labels: value and category, format 7.
     const record = bytes('Title', '', '', '', '', '', '', '', 'A', 'B', [0, 1, 2, 0, 1, 3, 2, 1, 0, 0, 2, 0], '', [0, 0, 1], '', [3, 7, 0, 0, 1, 0x8a]);
-    assert.deepEqual(chartOptions(record), { legend: { visible: true, position: 2 }, dataLabels: { kind: 3, format: 7 } });
+    assert.deepEqual(chartOptions(record), { legend: { visible: true, position: 2 }, look: 3, dataLabels: { kind: 3, format: 7, listed: true } });
     // The marker and one 00 byte in the same run as the labels (value only, format 7).
     const merged = bytes('Title', [0, 0, 0, 0, 1, 2, 2, 1, 0, 0, 2, 0], '', [0, 0, 1, 0, 2, 7, 0, 0, 2, 1]);
-    assert.deepEqual(chartOptions(merged).dataLabels, { kind: 2, format: 7 });
+    assert.deepEqual(chartOptions(merged).dataLabels, { kind: 2, format: 7, listed: true });
     const plain = bytes('Title', [0, 0, 3, 0, 1, 3, 2, 1, 0, 0, 2, 3], '', [0, 0, 0, 0, 0, 0x10, 0, 0]);
-    assert.deepEqual(chartOptions(plain), { legend: { visible: false, position: 3 }, dataLabels: { kind: 0, format: 0 } });
+    assert.deepEqual(chartOptions(plain), { legend: { visible: false, position: 3 }, look: 3, dataLabels: { kind: 0, format: 0 } });
+    // A format of its own: the marker and the kind, then the format as a text.
+    const own = bytes('Title', [0, 1, 2, 0, 1, 2, 2, 1, 0, 0, 2, 0], '', [0, 0, 1, 0, 2], '#,##0', [0, 0, 0, 0, 0, 0, 0, 0]);
+    assert.deepEqual(chartOptions(own), { legend: { visible: true, position: 2 }, look: 2, dataLabels: { kind: 2, format: -1, custom: '#,##0' } });
+    // No labels, but a format of its own (for the axis): a lone 00, then the format.
+    const lone = bytes('Title', [0, 1, 2, 0, 1, 3, 2, 9, 0, 0, 2, 0], '', [0], '0.00%', [0, 0, 0, 0, 0, 0, 0, 0]);
+    assert.deepEqual(chartOptions(lone).dataLabels, { kind: 0, format: -1, custom: '0.00%' });
   });
   const source: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Label', type: 'string' }, { name: 'Share', type: 'number' }] }] };
   const chartReport = (chart: ChartInfo): ReportDefinition => ({ ...emptyDefinition(), layout: [
@@ -1964,6 +2043,42 @@ describe('chart options', () => {
     };
     assert.equal(framed(0, 0), 2, 'the category and value axes repeated opposite, unlabelled');
     assert.equal(framed(3, 31), 0);
+  });
+  it('draws a chart as its look says: angled categories, slim bars labelled inside in whole numbers; or flat, wider, above', () => {
+    const rdl = (chart: ChartInfo) => convertToRdl(chartReport(chart), source, { reportName: 'C', subreport: true }).rdl;
+    const flat = rdl({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', series: 'T.Label', family: 0, graphType: 0, look: 2, dataLabels: { kind: 2, format: 7 } } as ChartInfo);
+    const angled = rdl({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', series: 'T.Label', family: 0, graphType: 0, look: 1, dataLabels: { kind: 2, format: 7 } } as ChartInfo);
+    assert.ok(!flat.includes('<Angle>-45</Angle>') && flat.includes('<AllowLabelRotation>Rotate90</AllowLabelRotation>') && flat.includes('<PreventFontShrink>true</PreventFontShrink>'), 'flat, turned only where they do not fit, at their size');
+    const line = rdl({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 1, graphType: 13, look: 3 } as ChartInfo);
+    assert.ok(line.includes('<AllowLabelRotation>None</AllowLabelRotation>') && line.includes('<MinFontSize>4pt</MinFontSize>'), 'a line chart\'s dates on one row, smaller where they do not fit');
+    assert.ok(angled.includes('<Angle>-45</Angle>'));
+    assert.ok(flat.includes('#VALY{0.00%}') && !/<Position>Center<\/Position>/.test(flat), 'as its format says, above the bars');
+    assert.ok(angled.includes('#VALY{0%}') && /<Label>#VALY\{0%\}<\/Label>\s*<Position>Center<\/Position>/.test(angled), 'whole, inside the bars');
+    // The value axis keeps the list format (0.00%) for both; a format of the chart's own labels the values, the axis plain.
+    assert.ok(/<Format>0\.00%<\/Format>/.test(angled));
+    const own = rdl({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 0, graphType: 0, look: 2, dataLabels: { kind: 2, format: -1, custom: '#,##0' } } as ChartInfo);
+    assert.ok(own.includes('#VALY{#,##0}') && /<Format>#,##0\.00<\/Format>/.test(own));
+  });
+  it('scales a chart of a formula worked out row by row as Crystal does', () => {
+    const report = chartReport({ values: ['Sum of @Share100'], onChangeOf: 'T.Label', family: 1, graphType: 13 });
+    report.formulas = [{ name: 'Share100', index: 1, kind: 'formula', text: '{T.Share} * 100', referencedFields: ['T.Share'] }];
+    const rdl = convertToRdl(report, source, { reportName: 'C', subreport: true }).rdl;
+    // The formula is a field of the dataset: its values, row by row, give the scale.
+    assert.match(rdl, /Code\.CrAxis\(CDbl\(IIf\(IsNothing\(Min\(Fields!F_Share100\.Value\)\)/);
+  });
+  it('names several values by their fields, scales them together, and gives the list\'s first format three places', () => {
+    const src: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Label', type: 'string' }, { name: 'unit_price', type: 'number' }, { name: 'reorder_level', type: 'number' }] }] };
+    const rdl = convertToRdl(chartReport({ values: ['Average of T.unit_price', 'Average of T.reorder_level'], onChangeOf: 'T.Label', family: 1, graphType: 13,
+      legend: { visible: true, position: 0 }, dataLabels: { kind: 0, format: 0, listed: true } } as ChartInfo), src, { reportName: 'C', subreport: true, chartAxisFormat: '0.00%' }).rdl;
+    assert.ok(rdl.includes('<Label>Unit Price</Label>') && rdl.includes('<Label>Reorder Level</Label>'));
+    assert.match(rdl, /Code\.CrAxis\(Math\.Min\(CDbl\(IIf\(IsNothing\(Min\(Fields!unit_price\.Value\)\)[^<]*Min\(Fields!reorder_level\.Value\)/);
+    assert.ok(/<Format>0\.000<\/Format>/.test(rdl) && !/<Format>0\.00%<\/Format>/.test(rdl), 'its own format, not the one given for charts without one');
+  });
+  it('draws bars as slim as Crystal: half their category\'s width, two fifths in the angled look', () => {
+    const width = (chart: ChartInfo) => /<Name>PointWidth<\/Name>\s*<Value>([\d.]+)<\/Value>/.exec(convertToRdl(chartReport(chart), source, { reportName: 'C', subreport: true }).rdl)?.[1];
+    assert.equal(width({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 0, graphType: 0, look: 2 } as ChartInfo), '0.5');
+    assert.equal(width({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', series: 'T.Label', family: 0, graphType: 0, look: 1 } as ChartInfo), '0.4');
+    assert.equal(width({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 3, graphType: 31 }), undefined);
   });
 });
 
@@ -2159,9 +2274,16 @@ describe('a page header that differs on page 1', () => {
     const { rdl } = convertToRdl(definition, source, { reportName: 'H' });
     const body = rdl.slice(rdl.indexOf('<Body>'), rdl.indexOf('</Body>'));
     const header = rdl.slice(rdl.indexOf('<PageHeader>'), rdl.indexOf('</PageHeader>'));
-    const hiddenOf = (name: string) => { const at = header.indexOf(`<Textbox Name="${name}">`); return /<Hidden>([^<]*)<\/Hidden>/.exec(header.slice(at, header.indexOf('</Textbox>', at)))?.[1]; };
-    assert.equal(hiddenOf('Short'), '=Globals!PageNumber = 1', 'the other pages\' version is hidden on page 1');
-    assert.equal(hiddenOf('Address'), '=Globals!PageNumber &gt; 1', 'page 1\'s version is hidden after page 1');
+    // Each version in a rectangle of its own from the header's top (hiding one never moves the other's items).
+    const version = (name: string) => {
+      const at = header.indexOf(`<Rectangle Name="${name}">`);
+      const xml = header.slice(at, header.indexOf('</Style>\n', header.indexOf('<Visibility>', at)));
+      return { xml, hidden: /<\/ReportItems>[\s\S]*?<Hidden>([^<]*)<\/Hidden>/.exec(xml)?.[1], top: /<\/ReportItems>\s*<KeepTogether>true<\/KeepTogether>\s*<Top>([^<]*)<\/Top>/.exec(xml)?.[1] };
+    };
+    const others = version('PageHeaderOtherPages');
+    const first = version('PageHeaderPage1');
+    assert.ok(others.xml.includes('<Textbox Name="Short">') && others.hidden === '=Globals!PageNumber = 1' && others.top === '0in', 'the other pages\' version is hidden on page 1');
+    assert.ok(first.xml.includes('<Textbox Name="Address">') && first.hidden === '=Globals!PageNumber &gt; 1' && first.top === '0in', 'page 1\'s version is hidden after page 1');
     assert.ok(header.includes('<PrintOnFirstPage>true</PrintOnFirstPage>'));
     assert.ok(body.includes('>Below<') && !header.includes('>Below<'), 'what lies below the page header\'s height starts page 1\'s body');
   });
