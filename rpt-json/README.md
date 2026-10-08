@@ -122,24 +122,40 @@ style over it. Every entry is optional; what the file leaves out keeps the Cryst
   "font": "Segoe UI",
   "textColor": "#222222",
   "border": "#5B6770",
-  "title":   { "fill": "#1F4E79", "color": "#FFFFFF", "bold": true },
-  "heading": { "fill": "#DDE6F0", "color": "#1F4E79", "bold": true },
-  "chart":   { "palette": ["#1F4E79", "#F2A541", "#5B9BD5", "#70AD47"], "plotBackground": "#FFFFFF" }
+  "title":        { "fill": "#1F4E79", "color": "#FFFFFF", "weight": "SemiBold", "font": "Georgia" },
+  "heading":      { "fill": "#DDE6F0", "color": "#1F4E79", "weight": "Bold" },
+  "groupHeading": { "color": "#1F4E79", "weight": "SemiBold" },
+  "total":        { "fill": "#F2F2F2", "weight": "SemiBold" },
+  "rowBands":     { "odd": "#FFFFFF", "even": "#F2F2F2" },
+  "red": "#C00000",
+  "link": "#2F5597",
+  "chart": { "palette": ["#1F4E79", "#F2A541", "#5B9BD5", "#70AD47"], "plotBackground": "#FFFFFF",
+             "font": "Segoe UI", "textColor": "#222222", "title": { "fill": "#1F4E79", "color": "#FFFFFF" } }
 }
 ```
 
 | Entry | What it styles |
 |-------|----------------|
-| `font` | Every text, charts included (sizes, bold and italic stay as in Crystal) |
+| `font` | Every text, charts included |
 | `textColor` | Text Crystal prints in black |
 | `border` | Lines, boxes and borders Crystal draws in black |
 | `title` | Section titles: fixed text 2 points or more larger than the report's usual text |
 | `heading` | A table's column headings: its rows above the first row of data |
-| `chart` | Chart colours, in order (bars coloured one by one too), and the plot's background |
+| `groupHeading` | The rows a group opens with |
+| `total` | The rows a group, or the table, closes with |
+| `rowBands` | Alternate fills of the rows of data |
+| `red` | Text Crystal prints in red (a failed test, a negative figure), in colour formulas too |
+| `link` | Text with a hyperlink |
+| `chart` | Chart colours in order (bars coloured one by one too), the plot's background, the charts' text and their titles |
 
-Text and lines Crystal colours itself (a figure turning red, a coloured rule) keep their colour. Colours are written
-as `#RRGGBB` or a colour name (`Navy`). The text may take a little more or less room in another font: check that
-long labels still fit. `--house` cannot be combined with `--template`, which replaces the layout.
+A band (`title`, `heading`, `groupHeading`, `total`, `chart.title`) has a `fill`, a text `color`, a `weight` (Thin,
+Light, Normal, Medium, SemiBold, Bold, ExtraBold, Heavy, or `"bold": true`) and a `font` of its own. Colours are
+`#RRGGBB` or a colour name (`Navy`). Other colours Crystal sets itself keep their colour.
+
+Font sizes stay as in Crystal. Where the house font or weight is wider than Crystal's, text is made just small
+enough to fit where Crystal put it, so a heading does not wrap where Crystal's did not. `--house` cannot be combined
+with `--template`, which replaces the layout. The house style module is optional: where `src/ssrs/brand.ts` is not
+installed, `--house` says so.
 
 ### House templates
 
