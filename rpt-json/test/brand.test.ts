@@ -103,6 +103,27 @@ describe('house style', () => {
     assert.equal(size('Short'), 8, 'a short heading keeps its size');
   });
 
+  it('keeps two lines of a heading inside its box in a taller font, off the rows under its band, as wide as the rule', () => {
+    const bold = { size: 8, bold: true };
+    const definition: ReportDefinition = { ...emptyDefinition(), layout: [
+      { name: 'PageHeaderArea1', sections: [{ name: 'PH', height: 900, objects: [
+        { kind: 'line', name: 'Rule', position: { x: 0, y: 100 }, size: { width: 6400, height: 0 }, border: { sides: [0, 0, 1, 0], width: 20 } },
+        { ...text('Wide', 'Name', 0, 8), style: bold, font: 'Times New Roman', position: { x: 0, y: 400 }, size: { width: 4000, height: 500 } },
+        { ...text('TwoLines', 'Monthly Shipment Summary', 4000, 8), style: bold, font: 'Times New Roman', position: { x: 4000, y: 400 }, size: { width: 1400, height: 380 } }] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [
+        { kind: 'field', name: 'NameValue', field: 'Orders.Name', style: { size: 8 }, position: { x: 0, y: 0 }, size: { width: 4000, height: 240 } },
+        { kind: 'field', name: 'AmountValue', field: 'Orders.Amount', style: { size: 8 }, position: { x: 4000, y: 0 }, size: { width: 1400, height: 240 } }] }] }] };
+    const plain = convertToRdl(definition, source, { reportName: 'H' }).rdl;
+    const styled = applyHouseStyle(plain, readHouseStyle(JSON.stringify({ font: 'Tahoma', heading: { fill: '#203040', weight: 'SemiBold' } })));
+    const heading = item(styled, 'Textbox', 'TwoLines');
+    const size = Number(/<FontSize>([\d.]+)pt<\/FontSize>/.exec(heading)![1]);
+    const row = Number(/<TablixRow>\s*<Height>([\d.]+)in/.exec(styled)![1]) * 72;
+    assert.ok(size < 8 && 2 * size * 1.21 <= row, 'two lines of the heading fit the row');
+    assert.match(item(styled, 'Textbox', 'Wide'), /<BottomBorder>\s*<Color>White<\/Color>\s*<Style>Solid<\/Style>/, 'a white strip keeps the band off the rows under it');
+    const width = (rdl: string) => Number(/<Tablix Name="[^"]+">[\s\S]*?<\/TablixBody>[\s\S]*?<Width>([\d.]+)in/.exec(rdl)![1]);
+    assert.ok(width(plain) < 6400 / 1440 - 0.1 && Math.abs(width(styled) - 6400 / 1440) < 0.01, 'the table reaches the end of the rule');
+  });
+
   it('styles group headings, totals, alternate rows, red figures, links and chart titles', () => {
     const definition: ReportDefinition = { ...emptyDefinition(), groups: ['Orders.Name'], layout: [
       { name: 'PageHeaderArea1', sections: [{ name: 'PH', height: 240, objects: [text('Heading', 'Amount', 0)] }] },

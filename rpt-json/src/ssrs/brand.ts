@@ -225,6 +225,12 @@ function weightScale(font: string, weight: string): number {
     default: return 1;
   }
 }
+/** A line's height, in ems: the font's ascent and descent as Windows lays its lines out. */
+const LINE_HEIGHT: Record<string, number> = {
+  arial: 1.15, helvetica: 1.15, tahoma: 1.21, verdana: 1.22, 'segoe ui': 1.33, calibri: 1.22, 'times new roman': 1.15, times: 1.15,
+  georgia: 1.14, cambria: 1.17, garamond: 1.12, 'courier new': 1.13, 'arial narrow': 1.15, 'trebuchet ms': 1.16, 'century gothic': 1.18,
+};
+const lineHeight = (font: string) => LINE_HEIGHT[font.toLowerCase()] ?? 1.2;
 /** A text's width, in points, at a size, font and weight. */
 const textWidth = (text: string, font: string, weight: string, size: number) =>
   [...text].reduce((w, c) => w + charWidth(c), 0) * (FONT_SCALE[font.toLowerCase()] ?? 1) * weightScale(font, weight) * size;
@@ -242,6 +248,19 @@ function wrapLines(text: string, room: number, width: (t: string) => number): { 
     } else line = next;
   }
   return { lines, broken };
+}
+
+/** The space kept between a painted heading band and the text under it, in points. */
+const GAP = 2;
+/** The white strip drawn along a heading band's foot to keep it off the rows under it, in points. */
+const STRIP = 3;
+const inches = (pt: number) => `${Math.round((pt / 72) * 1000) / 1000}in`;
+
+/** An item's left edge from the left of the page's body, through the rectangles it sits in. */
+function offsetOf(item: XmlElement, parents: Map<XmlElement, XmlElement>): number {
+  let left = lengthInPoints(textOf(child(item, 'Left'))) ?? 0;
+  for (let up = parents.get(item); up; up = parents.get(up)) if (up.name === 'Rectangle') left += lengthInPoints(textOf(child(up, 'Left'))) ?? 0;
+  return left;
 }
 
 type RowKind = 'heading' | 'groupHeading' | 'detail' | 'total' | 'noData';
@@ -429,6 +448,50 @@ export function applyHouseStyle(rdl: string, style: HouseStyle): string {
     }
   }
 
+  // Tables a little short of a rule across the page: as wide as the rule.
+  const inCell = (e: XmlElement) => {
+    for (let up = parents.get(e); up; up = parents.get(up)) if (up.name === 'CellContents') return true;
+    return false;
+  };
+  const rules = all.filter((e) => e.name === 'Line' && !inCell(e)).map((line) => {
+    const left = offsetOf(line, parents);
+    const width = lengthInPoints(textOf(child(line, 'Width'))) ?? 0;
+    return { left, right: left + width, flat: Math.abs(lengthInPoints(textOf(child(line, 'Height'))) ?? 0) < 1 };
+  }).filter((r) => r.flat && r.right - r.left > 144);
+  for (const tablix of all.filter((e) => e.name === 'Tablix' && !inCell(e))) {
+    const left = offsetOf(tablix, parents);
+    const width = lengthInPoints(textOf(child(tablix, 'Width'))) ?? 0;
+    const right = left + width;
+    const rule = rules.filter((r) => r.left <= left + 2 && r.right > right + 0.5 && r.right - right <= 54 && width >= (r.right - r.left) * 0.6)
+      .sort((a, b) => b.right - a.right)[0];
+    if (!rule) continue;
+    const grow = rule.right - right;
+    // Nothing beside it, to the right, in its own container.
+    const top = lengthInPoints(textOf(child(tablix, 'Top'))) ?? 0;
+    const bottom = top + (lengthInPoints(textOf(child(tablix, 'Height'))) ?? 0);
+    const siblings = childElements(parents.get(tablix) ?? el('ReportItems')).filter((e) => e !== tablix);
+    if (siblings.some((e) => {
+      const l = lengthInPoints(textOf(child(e, 'Left'))) ?? 0;
+      const t = lengthInPoints(textOf(child(e, 'Top'))) ?? 0;
+      const b = t + (lengthInPoints(textOf(child(e, 'Height'))) ?? 0);
+      return l >= (lengthInPoints(textOf(child(tablix, 'Left'))) ?? 0) + width - 0.5 && t < bottom && b > top;
+    })) continue;
+    const columns = childElements(child(tablix, 'TablixBody/TablixColumns') ?? el('TablixColumns'), 'TablixColumn');
+    const last = columns[columns.length - 1];
+    if (!last) continue;
+    setChild(last, 'Width', inches((lengthInPoints(textOf(child(last, 'Width'))) ?? 0) + grow));
+    setChild(tablix, 'Width', inches(width + grow));
+    // Its containers widened with it where they would now cut it off.
+    let end = (lengthInPoints(textOf(child(tablix, 'Left'))) ?? 0) + width + grow;
+    for (let up = parents.get(tablix); up; up = parents.get(up)) {
+      if (up.name !== 'Rectangle' && up.name !== 'ReportSection') continue;
+      const w = lengthInPoints(textOf(child(up, 'Width'))) ?? 0;
+      if (w < end) setChild(up, 'Width', inches(end));
+      if (up.name === 'ReportSection') break;
+      end = (lengthInPoints(textOf(child(up, 'Left'))) ?? 0) + Math.max(w, end);
+    }
+  }
+
   // Text in a wider font or weight than Crystal's: made just small enough to fit where Crystal put it.
   const cellWidth = (tb: XmlElement): number | undefined => {
     const own = lengthInPoints(textOf(child(tb, 'Width')));
@@ -447,6 +510,13 @@ export function applyHouseStyle(rdl: string, style: HouseStyle): string {
     }
     return undefined;
   };
+  const cellHeight = (tb: XmlElement): number | undefined => {
+    const own = lengthInPoints(textOf(child(tb, 'Height')));
+    if (own !== undefined) return own;
+    let row: XmlElement | undefined = tb;
+    while (row && row.name !== 'TablixRow') row = parents.get(row);
+    return row && lengthInPoints(textOf(child(row, 'Height')));
+  };
   for (const tb of textboxes) {
     const styles = runStyles(tb);
     const s = styles[0];
@@ -464,11 +534,23 @@ export function applyHouseStyle(rdl: string, style: HouseStyle): string {
       const own = ownStyle(tb);
       const room = (width - (points(textOf(child(own, 'PaddingLeft'))) ?? 2) - (points(textOf(child(own, 'PaddingRight'))) ?? 2)) * 0.96;
       const lines = fixedLines(tb).filter((l) => l.trim());
-      const fits = (f: number) => lines.every((line) => {
-        const before = wrapLines(line, room, (t) => textWidth(t, old.font, old.weight, size));
-        const after = wrapLines(line, room, (t) => textWidth(t, now.font, now.weight, size * f));
-        return after.lines <= before.lines && (!after.broken || before.broken);
-      });
+      // Its height too: the lines as tall as the box allows (or as Crystal's were, where they already filled it).
+      const height = cellHeight(tb);
+      const tall = height === undefined ? Infinity
+        : (height - (points(textOf(child(own, 'PaddingTop'))) ?? 2) - (points(textOf(child(own, 'PaddingBottom'))) ?? 2)) * 0.97;
+      const fits = (f: number) => {
+        let linesBefore = 0;
+        let linesAfter = 0;
+        const wraps = lines.every((line) => {
+          const before = wrapLines(line, room, (t) => textWidth(t, old.font, old.weight, size));
+          const after = wrapLines(line, room, (t) => textWidth(t, now.font, now.weight, size * f));
+          linesBefore += before.lines;
+          linesAfter += after.lines;
+          return after.lines <= before.lines && (!after.broken || before.broken);
+        });
+        const allowed = Math.max(tall, linesBefore * size * lineHeight(old.font));
+        return wraps && linesAfter * size * f * lineHeight(now.font) <= allowed + 0.01;
+      };
       factor = 1;
       while (factor > 0.6 && !fits(factor)) factor -= 0.02;
     }
@@ -478,6 +560,60 @@ export function applyHouseStyle(rdl: string, style: HouseStyle): string {
       setChild(st, 'FontSize', `${Math.max(5, Math.floor(own * factor * 10) / 10)}pt`);
     }
   }
+
+  // Rows under a painted heading: their text a little way off the band (as far as each row has room to spare).
+  const fontOf = (st: XmlElement) => textOf(child(st, 'FontFamily')) || defaultFont;
+  const slackOf = (tb: XmlElement, height: number) => {
+    const own = ownStyle(tb);
+    const lines = isFixed(tb) ? fixedLines(tb).length : 1;
+    const text = Math.max(...runStyles(tb).map((st) => (points(textOf(child(st, 'FontSize'))) ?? 10) * lineHeight(fontOf(st))), 0) * lines;
+    return height - text - (points(textOf(child(own, 'PaddingTop'))) ?? 2) - (points(textOf(child(own, 'PaddingBottom'))) ?? 2);
+  };
+  for (const tablix of all.filter((e) => e.name === 'Tablix')) {
+    const rows = childElements(child(tablix, 'TablixBody/TablixRows') ?? el('TablixRows'), 'TablixRow');
+    const kinds = rowKinds(tablix);
+    const painted = rows.some((_, i) => kinds[i] === 'heading' && (style.heading?.fill || style.title?.fill));
+    if (!painted) continue;
+    // The band's last row: a strip of white along its foot, where its text leaves room for one.
+    const last = kinds.lastIndexOf('heading');
+    const foot = rows[last];
+    const footHeight = foot && lengthInPoints(textOf(child(foot, 'Height')));
+    const footCells = foot ? descendants(foot).filter((e) => e.name === 'CellContents').flatMap((c) => childElements(c)).filter((e) => e.name === 'Textbox' || e.name === 'Rectangle') : [];
+    if (footHeight && footCells.length && footCells.every((c) => {
+      const border = child(ownStyle(c), 'BottomBorder/Style') ?? child(ownStyle(c), 'Border/Style');
+      return (!border || /^none$/i.test(textOf(border))) && (c.name !== 'Textbox' || slackOf(c, footHeight) >= STRIP + 1);
+    })) {
+      for (const c of footCells) {
+        const own = ownStyle(c);
+        setChild(own, 'BottomBorder', '');
+        const border = child(own, 'BottomBorder')!;
+        border.children = [el('Color', 'White'), el('Style', 'Solid'), el('Width', `${STRIP}pt`)];
+        if (c.name === 'Textbox') setChild(own, 'PaddingBottom', `${(points(textOf(child(own, 'PaddingBottom'))) ?? 2) + STRIP}pt`);
+      }
+      continue;
+    }
+    rows.forEach((row, i) => {
+      if (kinds[i] === 'heading' || kinds[i] === 'noData') return;
+      const height = lengthInPoints(textOf(child(row, 'Height')));
+      const cells = descendants(row).filter((e) => e.name === 'CellContents').flatMap((c) => childElements(c, 'Textbox'));
+      if (!height || !cells.length) return;
+      const tops = cells.map((tb) => points(textOf(child(ownStyle(tb), 'PaddingTop'))) ?? 2);
+      const shift = Math.min(GAP - Math.min(...tops), ...cells.map((tb) => slackOf(tb, height) / 2));
+      if (shift < 0.5) return;
+      const move = Math.floor(shift * 10) / 10;
+      cells.forEach((tb, j) => setChild(ownStyle(tb), 'PaddingTop', `${Math.round((tops[j] + move) * 10) / 10}pt`));
+    });
+  }
+
+  // A title over a band: in the middle of its box (as far off the band as off what is above it).
+  for (const tb of textboxes) {
+    if (!banded.has(tb) || !isTitle(tb) || child(ownStyle(tb), 'VerticalAlign')) continue;
+    const height = lengthInPoints(textOf(child(tb, 'Height')));
+    if (height === undefined || parents.get(tb)?.name === 'CellContents') continue;
+    const slack = slackOf(tb, height);
+    if (slack > 0.5 && slack < height / 2) setChild(ownStyle(tb), 'VerticalAlign', 'Middle');
+  }
+
   return toXml(root);
 }
 
