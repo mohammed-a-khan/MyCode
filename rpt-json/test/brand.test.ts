@@ -89,6 +89,20 @@ describe('house style', () => {
     assert.match(item(styled, 'Textbox', 'Narrow'), /<FontWeight>SemiBold<\/FontWeight>/);
   });
 
+  it('keeps wrapped headings to their lines and long titles on one line', () => {
+    const bold = { size: 8, bold: true };
+    const definition: ReportDefinition = { ...emptyDefinition(), layout: [
+      { name: 'PageHeaderArea1', sections: [{ name: 'PH', height: 480, objects: [
+        { ...text('TwoLines', 'Min/Max Threshold', 0, 8), style: bold, font: 'Times New Roman', size: { width: 760, height: 480 } },
+        { ...text('OneLine', 'Monthly Shipment Summary', 900, 8), style: bold, font: 'Times New Roman', size: { width: 2200, height: 240 } },
+        { ...text('Short', 'Name', 3100, 8), style: bold, font: 'Times New Roman', size: { width: 2200, height: 240 } }] }] }] };
+    const styled = applyHouseStyle(convertToRdl(definition, source, { reportName: 'W' }).rdl, readHouseStyle(JSON.stringify({ font: 'Tahoma', heading: { weight: 'SemiBold' } })));
+    const size = (name: string) => Number(/<FontSize>([\d.]+)pt<\/FontSize>/.exec(item(styled, 'Textbox', name))?.[1] ?? 10);
+    assert.ok(size('TwoLines') < 7.5, 'the longest word still fits its line');
+    assert.ok(size('OneLine') < 8, 'a title that filled its line is made smaller to stay on it');
+    assert.equal(size('Short'), 8, 'a short heading keeps its size');
+  });
+
   it('styles group headings, totals, alternate rows, red figures, links and chart titles', () => {
     const definition: ReportDefinition = { ...emptyDefinition(), groups: ['Orders.Name'], layout: [
       { name: 'PageHeaderArea1', sections: [{ name: 'PH', height: 240, objects: [text('Heading', 'Amount', 0)] }] },

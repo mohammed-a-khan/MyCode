@@ -194,16 +194,55 @@ function textSize(textbox: XmlElement): number | undefined {
 }
 
 /**
- * Average character widths, in ems, of mixed text in common fonts (unknown fonts count as Arial), and how much wider
- * a weight makes them: enough to tell whether text set in another font still fits.
+ * Text widths, roughly: each character's width in ems in Arial, scaled for other fonts and for weight (a font with no
+ * semi-bold of its own draws SemiBold as Bold). Enough to tell whether text set in another font still fits.
  */
-const FONT_WIDTHS: Record<string, number> = {
-  'times new roman': 0.44, times: 0.44, garamond: 0.42, 'book antiqua': 0.46, cambria: 0.47, georgia: 0.51,
-  arial: 0.5, helvetica: 0.5, 'arial narrow': 0.41, tahoma: 0.5, verdana: 0.58, 'segoe ui': 0.49, calibri: 0.45,
-  'trebuchet ms': 0.49, 'century gothic': 0.55, 'microsoft sans serif': 0.5, 'ms sans serif': 0.5, 'courier new': 0.6,
+const charWidth = (c: string): number => {
+  if (/[iljI|!.,:;'`]/.test(c)) return 0.28;
+  if (c === ' ') return 0.28;
+  if (/[ftr()[\]\/\-]/.test(c)) return 0.34;
+  if (/[mwMW%@]/.test(c)) return 0.86;
+  if (/[A-Z]/.test(c)) return 0.68;
+  if (/[0-9]/.test(c)) return 0.56;
+  return 0.53;
 };
-const WEIGHT_WIDTHS: Record<string, number> = { thin: 0.95, extralight: 0.96, light: 0.97, normal: 1, medium: 1.02, semibold: 1.05, bold: 1.09, extrabold: 1.11, heavy: 1.12 };
-const widthOf = (font: string, weight: string) => (FONT_WIDTHS[font.toLowerCase()] ?? 0.5) * (WEIGHT_WIDTHS[weight.toLowerCase()] ?? 1);
+const FONT_SCALE: Record<string, number> = {
+  arial: 1, helvetica: 1, tahoma: 0.98, verdana: 1.13, 'segoe ui': 0.97, calibri: 0.88, 'times new roman': 0.9, times: 0.9,
+  georgia: 1, cambria: 0.93, garamond: 0.85, 'book antiqua': 0.92, 'courier new': 1.15, 'arial narrow': 0.82, 'trebuchet ms': 0.97,
+  'century gothic': 1.08, 'microsoft sans serif': 1, 'ms sans serif': 1,
+};
+const BOLD_SCALE: Record<string, number> = { tahoma: 1.19, verdana: 1.12, 'times new roman': 1.08, times: 1.08, 'segoe ui': 1.07 };
+const HAS_SEMIBOLD = new Set(['segoe ui', 'calibri', 'open sans', 'source sans pro']);
+function weightScale(font: string, weight: string): number {
+  const f = font.toLowerCase();
+  const bold = BOLD_SCALE[f] ?? 1.1;
+  switch (weight.toLowerCase()) {
+    case 'thin': case 'extralight': case 'light': return 0.97;
+    case 'medium': return 1.02;
+    case 'semibold': return HAS_SEMIBOLD.has(f) ? 1 + (bold - 1) / 2 : bold;
+    case 'bold': return bold;
+    case 'extrabold': case 'heavy': return bold + 0.03;
+    default: return 1;
+  }
+}
+/** A text's width, in points, at a size, font and weight. */
+const textWidth = (text: string, font: string, weight: string, size: number) =>
+  [...text].reduce((w, c) => w + charWidth(c), 0) * (FONT_SCALE[font.toLowerCase()] ?? 1) * weightScale(font, weight) * size;
+/** How many lines a text takes in a width (wrapped at spaces), and whether a word is broken. */
+function wrapLines(text: string, room: number, width: (t: string) => number): { lines: number; broken: boolean } {
+  let lines = 1;
+  let line = '';
+  let broken = false;
+  for (const word of text.split(/ +/)) {
+    if (width(word) > room) broken = true;
+    const next = line ? `${line} ${word}` : word;
+    if (line && width(next) > room) {
+      lines++;
+      line = word;
+    } else line = next;
+  }
+  return { lines, broken };
+}
 
 type RowKind = 'heading' | 'groupHeading' | 'detail' | 'total' | 'noData';
 
@@ -410,31 +449,33 @@ export function applyHouseStyle(rdl: string, style: HouseStyle): string {
   };
   for (const tb of textboxes) {
     const styles = runStyles(tb);
-    const changes = styles.map((s) => {
-      const old = before.get(s);
-      const now = { font: textOf(child(s, 'FontFamily')) || defaultFont, weight: textOf(child(s, 'FontWeight')) || 'Normal' };
-      return old && !now.weight.startsWith('=') ? widthOf(now.font, now.weight) / widthOf(old.font, old.weight) : 1;
-    });
-    const growth = Math.max(...changes, 1);
-    if (growth <= 1.001) continue;
-    let factor = 1 / growth;
-    // Fixed text: only as much as it needs to fit its box (it may have room to spare).
+    const s = styles[0];
+    const old = s && before.get(s);
+    if (!old) continue;
+    const now = { font: textOf(child(s, 'FontFamily')) || defaultFont, weight: textOf(child(s, 'FontWeight')) || 'Normal' };
+    if (now.weight.startsWith('=') || (now.font === old.font && now.weight === old.weight)) continue;
+    const size = points(textOf(child(s, 'FontSize'))) ?? 10;
+    const sample = 'Sample Text 1,234.56';
+    const growth = textWidth(sample, now.font, now.weight, size) / textWidth(sample, old.font, old.weight, size);
+    let factor = Math.min(1, 1 / growth);
+    // Fixed text: only as much as it needs to wrap no more than in Crystal, no word broken (it may have room to spare).
     const width = cellWidth(tb);
     if (isFixed(tb) && width) {
       const own = ownStyle(tb);
-      const room = width - (points(textOf(child(own, 'PaddingLeft'))) ?? 2) - (points(textOf(child(own, 'PaddingRight'))) ?? 2);
-      const s = styles[0];
-      const size = points(textOf(child(s, 'FontSize'))) ?? 10;
-      const old = before.get(s)!;
-      const longest = Math.max(...fixedLines(tb).map((l) => l.length));
-      const oldWidth = longest * widthOf(old.font, old.weight) * size;
-      const newWidth = oldWidth * growth;
-      factor = Math.min(1, Math.max(room, oldWidth) / newWidth);
+      const room = (width - (points(textOf(child(own, 'PaddingLeft'))) ?? 2) - (points(textOf(child(own, 'PaddingRight'))) ?? 2)) * 0.96;
+      const lines = fixedLines(tb).filter((l) => l.trim());
+      const fits = (f: number) => lines.every((line) => {
+        const before = wrapLines(line, room, (t) => textWidth(t, old.font, old.weight, size));
+        const after = wrapLines(line, room, (t) => textWidth(t, now.font, now.weight, size * f));
+        return after.lines <= before.lines && (!after.broken || before.broken);
+      });
+      factor = 1;
+      while (factor > 0.6 && !fits(factor)) factor -= 0.02;
     }
     if (factor >= 0.999) continue;
-    for (const s of styles) {
-      const size = points(textOf(child(s, 'FontSize'))) ?? 10;
-      setChild(s, 'FontSize', `${Math.max(5, Math.floor(size * factor * 10) / 10)}pt`);
+    for (const st of styles) {
+      const own = points(textOf(child(st, 'FontSize'))) ?? 10;
+      setChild(st, 'FontSize', `${Math.max(5, Math.floor(own * factor * 10) / 10)}pt`);
     }
   }
   return toXml(root);
