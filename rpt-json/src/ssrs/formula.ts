@@ -34,6 +34,8 @@ export interface FormulaContext {
    * shared with subreports), so a subreport placed inside another report keeps its own copies.
    */
   memberPrefix?: string;
+  /** The dataset the formula reads (a subreport placed inside another report has its own), for OnLastRecord's count. */
+  dataset?(): string;
 }
 
 export interface Translation {
@@ -1840,6 +1842,15 @@ export interface TranslateOptions {
 }
 
 export function translateFormula(source: string, ctx: FormulaContext, options: TranslateOptions = {}): Translation {
+  const translation = translateFormulaIn(source, ctx, options);
+  // OnLastRecord counts the rows of the formula's own dataset.
+  const dataset = ctx.dataset?.();
+  if (!dataset || dataset === 'DataSet1') return translation;
+  const own = (text: string) => text.split('CountRows("DataSet1")').join(`CountRows(${JSON.stringify(dataset)})`);
+  return { ...translation, expression: own(translation.expression), ...(translation.code ? { code: own(translation.code) } : {}) };
+}
+
+function translateFormulaIn(source: string, ctx: FormulaContext, options: TranslateOptions = {}): Translation {
   const issues: string[] = [];
   if (isBasicSyntax(source)) {
     if (options.codeName) return translateBasic(source, ctx, options.codeName);

@@ -198,8 +198,13 @@ export interface ChartInfo {
   seriesOrder?: number;
   /** Whether the legend shows, and where (0 right, 1 left, 2 bottom, 3 top). */
   legend?: { visible: boolean; position: number };
-  /** What each data point is labelled with (0 nothing, 1 its category, 2 its value, 3 both) and the label's number format (Chart Expert list index). */
-  dataLabels?: { kind: number; format: number };
+  /** What each data point is labelled with (0 nothing, 1 its category, 2 its value, 3 both) and the label's number format (Chart Expert list index, or a format of its own). */
+  dataLabels?: { kind: number; format: number; custom?: string; listed?: boolean };
+  /**
+   * How the chart is drawn (the options' sixth byte): 1 angles the category labels and draws slim bars labelled
+   * inside, in whole numbers; 2 and 3 keep the labels flat, the bars half their category's width, labelled above.
+   */
+  look?: number;
 }
 
 /** A number format of a field (Crystal's Format Editor, Number tab). */
@@ -768,17 +773,33 @@ export function chartStyleTail(bytes: Uint8Array): boolean {
   return !!text && 'text' in text && text.text === '' && !!last && 'bytes' in last && last.bytes.length === 5 && last.bytes.every((x) => x === 0);
 }
 
-export function chartOptions(bytes: Uint8Array): Pick<ChartInfo, 'legend' | 'dataLabels'> {
-  const runs = tokenize(bytes).filter((t): t is { bytes: Uint8Array } => 'bytes' in t);
-  const out: Pick<ChartInfo, 'legend' | 'dataLabels'> = {};
+export function chartOptions(bytes: Uint8Array): Pick<ChartInfo, 'legend' | 'dataLabels' | 'look'> {
+  const tokens = tokenize(bytes);
+  const runs = tokens.filter((t): t is { bytes: Uint8Array } => 'bytes' in t);
+  const out: Pick<ChartInfo, 'legend' | 'dataLabels' | 'look'> = {};
   const options = runs[0]?.bytes;
   if (!options || options.length < 3) return out;
   out.legend = { visible: options[1] === 1, position: options[2] };
-  // The data labels: the next run of six or more bytes. Some charts put a 00 00 01 marker and an empty string
-  // before it (the marker is then a run of its own); others put the marker and one 00 byte in the same run.
+  if (options.length > 5) out.look = options[5];
+  // The data labels follow the options (after an empty text): the 00 00 01 marker, the kind and the list format. A
+  // format of the chart's own follows as a text: after the marker and the kind, or after a lone 00 (no labels).
+  const first = tokens.findIndex((t) => 'bytes' in t);
+  let next = first + 1;
+  while (next < tokens.length && 'text' in tokens[next] && !(tokens[next] as { text: string }).text) next++;
+  const labelRun = tokens[next] && 'bytes' in tokens[next] ? (tokens[next] as { bytes: Uint8Array }).bytes : undefined;
+  const after = tokens[next + 1];
+  const marked = (r: Uint8Array) => r[0] === 0 && r[1] === 0 && r[2] === 1;
+  if (labelRun && labelRun.length < 6 && after && 'text' in after && after.text) {
+    const kind = labelRun.length >= 5 && marked(labelRun) && labelRun[4] <= 3 ? labelRun[4] : 0;
+    out.dataLabels = { kind, format: -1, custom: after.text };
+    return out;
+  }
+  // Some charts put the marker and one 00 byte in the same run; others the marker as a run of its own.
   const run = runs.slice(1).find((r) => r.bytes.length >= 6)?.bytes;
-  const at = run && run[0] === 0 && run[1] === 0 && run[2] === 1 ? 4 : 0;
-  if (run && run.length >= at + 2 && run[at] <= 3) out.dataLabels = { kind: run[at], format: run[at + 1] };
+  const at = run && marked(run) ? 4 : 0;
+  // (listed: the format is the list's, read where the marker says where it is.)
+  const listed = !!at || (!!labelRun && labelRun.length === 3 && marked(labelRun));
+  if (run && run.length >= at + 2 && run[at] <= 3) out.dataLabels = { kind: run[at], format: run[at + 1], ...(listed ? { listed: true } : {}) };
   return out;
 }
 

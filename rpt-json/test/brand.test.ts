@@ -76,7 +76,7 @@ describe('house style', () => {
     // Narrow headings in Times New Roman, the house font wider and semi-bold.
     const definition: ReportDefinition = { ...emptyDefinition(), layout: [
       { name: 'PageHeaderArea1', sections: [{ name: 'PH', height: 240, objects: [
-        { ...text('Narrow', 'Threshold', 0, 8), font: 'Times New Roman', size: { width: 700, height: 240 } },
+        { ...text('Narrow', 'Quantities', 0, 8), font: 'Times New Roman', size: { width: 700, height: 240 } },
         { ...text('Roomy', 'Min', 700, 8), font: 'Times New Roman', size: { width: 3000, height: 240 } }] }] },
       { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [
         { kind: 'field', name: 'AmountValue', field: 'Orders.Amount', font: 'Times New Roman', style: { size: 8 }, position: { x: 0, y: 0 }, size: { width: 700, height: 240 } },
@@ -93,7 +93,7 @@ describe('house style', () => {
     const bold = { size: 8, bold: true };
     const definition: ReportDefinition = { ...emptyDefinition(), layout: [
       { name: 'PageHeaderArea1', sections: [{ name: 'PH', height: 480, objects: [
-        { ...text('TwoLines', 'Min/Max Threshold', 0, 8), style: bold, font: 'Times New Roman', size: { width: 760, height: 480 } },
+        { ...text('TwoLines', 'Low/High Quantities', 0, 8), style: bold, font: 'Times New Roman', size: { width: 760, height: 480 } },
         { ...text('OneLine', 'Monthly Shipment Summary', 900, 8), style: bold, font: 'Times New Roman', size: { width: 2200, height: 240 } },
         { ...text('Short', 'Name', 3100, 8), style: bold, font: 'Times New Roman', size: { width: 2200, height: 240 } }] }] }] };
     const styled = applyHouseStyle(convertToRdl(definition, source, { reportName: 'W' }).rdl, readHouseStyle(JSON.stringify({ font: 'Tahoma', heading: { weight: 'SemiBold' } })));
@@ -144,7 +144,68 @@ describe('house style', () => {
     assert.equal(place('Chart', 'ChartB').right, 6.4, 'its chart keeps its distance from the frame');
     assert.equal(place('Rectangle', 'FrameA').right, 3, 'a frame with another beside it stays');
     assert.equal(place('Rectangle', 'Outer').right, 6.5, 'a frame round the whole row reaches it too');
-    assert.deepEqual([place('Textbox', 'TitleA'), place('Textbox', 'TitleB')], [{ top: 1.05, left: 0, right: 3 }, { top: 1.05, left: 3, right: 6.5 }]);
+    assert.deepEqual([place('Textbox', 'TitleA'), place('Textbox', 'TitleB')], [{ top: 1, left: 0, right: 3 }, { top: 1, left: 3, right: 6.5 }]);
+    // A title in a bordered rectangle (a subreport's frame): across it, from its top.
+    const boxed = applyHouseStyle(rdl.replace(frame('FrameA', 0, 3), `<Rectangle Name="Boxed"><ReportItems>${title('TitleC', 0.08, 0.12, 2.7)}</ReportItems>${at(1, 0, 2, 3)}<Style><Border><Style>Solid</Style></Border></Style></Rectangle>`)
+      .replace(title('TitleA', 1.05, 0.1, 2.8), ''), readHouseStyle(JSON.stringify({ font: 'Tahoma' })));
+    const inner = item(boxed, 'Textbox', 'TitleC');
+    assert.deepEqual(['Top', 'Left', 'Width'].map((tag) => new RegExp(`<${tag}>([\\d.]+)in`).exec(inner)![1]), ['0', '0', '3']);
+  });
+
+  it('moves what lies in a frame with the frame, as wide as it is drawn, never past the rule', () => {
+    const at = (t: number, l: number, h: number, w: number) => `<Top>${t}in</Top><Left>${l}in</Left><Height>${h}in</Height><Width>${w}in</Width>`;
+    const line = (n: string, l: number) => `<Line Name="${n}">${at(0, l, 1.5, 0)}<Style /></Line>`;
+    // Its columns are wider than its Width says, as SSRS draws it.
+    const table = (n: string, l: number) => `<Tablix Name="${n}"><TablixBody><TablixColumns><TablixColumn><Width>1.2in</Width></TablixColumn><TablixColumn><Width>0.95in</Width></TablixColumn></TablixColumns><TablixRows /></TablixBody>${at(0.05, l, 1, 2.1)}</Tablix>`;
+    const inner = (n: string, l: number, content: string) => `<Rectangle Name="${n}"><ReportItems>${content}</ReportItems>${at(0.05, l, 1.2, 2.2)}<Style /></Rectangle>`;
+    const page = (body: string) => `<Report><ReportSections><ReportSection><Body><ReportItems><Rectangle Name="Frame">${at(0, 0.1, 1.5, 7.2)}<Style><Border><Style>Solid</Style></Border></Style></Rectangle>${body}</ReportItems><Height>2in</Height></Body><Width>7.6in</Width>
+      <Page><PageHeader><Height>0.5in</Height><ReportItems><Line Name="Rule">${at(0.4, 0.1, 0, 7.4)}<Style /></Line></ReportItems></PageHeader></Page></ReportSection></ReportSections></Report>`;
+    const style = readHouseStyle(JSON.stringify({ font: 'Tahoma' }));
+    const right = (rdl: string, kind: string, name: string) => {
+      const x = item(rdl, kind, name);
+      const tail = x.slice(x.lastIndexOf('<Top>'));
+      return Math.round((Number(/<Left>([\d.]+)in/.exec(tail)![1]) + Number(/<Width>([\d.]+)in/.exec(tail)![1])) * 1000) / 1000;
+    };
+    const beside = applyHouseStyle(page(line('Divider', 5) + line('Edge', 7.3) + table('Grid', 5.05)), style);
+    assert.equal(right(beside, 'Rectangle', 'Frame'), 7.5, 'the frame reaches the rule');
+    assert.equal(right(beside, 'Line', 'Edge'), 7.5, 'the line down its right side moves with it');
+    assert.equal(right(beside, 'Line', 'Divider'), 5, 'a line inside it stays');
+    const columns = [...item(beside, 'Tablix', 'Grid').matchAll(/<TablixColumn>\s*<Width>([\d.]+)in/g)].reduce((sum, m) => sum + Number(m[1]), 0);
+    assert.equal(Math.round((5.05 + columns) * 1000) / 1000, 7.4, 'the table keeps its distance from the frame\'s side');
+    const nested = applyHouseStyle(page(inner('Holder', 5.05, table('Inner', 0))), style);
+    assert.equal(right(nested, 'Rectangle', 'Holder'), 7.45, 'what holds a table moves with the frame');
+    assert.equal(right(nested, 'Tablix', 'Inner'), 2.35, 'and the table with what holds it');
+  });
+
+  it('starts a chart below a painted title over its top, and colours a rule drawn as a bar in the house\'s line colour', () => {
+    const at = (t: number, l: number, h: number, w: number) => `<Top>${t}in</Top><Left>${l}in</Left><Height>${h}in</Height><Width>${w}in</Width>`;
+    const rdl = `<Report><ReportSections><ReportSection><Body><ReportItems>
+      <Rectangle Name="Frame"><ReportItems><Chart Name="Lines">${at(0.05, 0.05, 2, 5.9)}</Chart>
+      <Textbox Name="Heading"><Paragraphs><Paragraph><TextRuns><TextRun><Value>=Fields!Name.Value</Value><Style /></TextRun></TextRuns></Paragraph></Paragraphs>${at(0.02, 0.1, 0.2, 5.8)}<Style><BackgroundColor>#336699</BackgroundColor></Style></Textbox>
+      </ReportItems>${at(0, 0, 2.2, 6)}<Style><Border><Style>Solid</Style></Border></Style></Rectangle></ReportItems><Height>3in</Height></Body><Width>6.5in</Width>
+      <Page><PageHeader><Height>0.5in</Height><ReportItems><Rectangle Name="Rule"><KeepTogether>true</KeepTogether>${at(0.4, 0, 0.042, 6)}<Style><Border><Style>None</Style></Border><BackgroundColor>Black</BackgroundColor></Style></Rectangle></ReportItems></PageHeader></Page></ReportSection></ReportSections></Report>`;
+    const styled = applyHouseStyle(rdl, readHouseStyle(JSON.stringify({ font: 'Tahoma', border: '#5B6770' })));
+    const value = (kind: string, name: string, tag: string) => new RegExp(`<${tag}>([^<]*)</${tag}>`).exec(item(styled, kind, name))![1];
+    assert.deepEqual([value('Textbox', 'Heading', 'Top'), value('Textbox', 'Heading', 'Left'), value('Textbox', 'Heading', 'Width')], ['0in', '0in', '6in'], 'a title worked out by a formula reaches its frame too');
+    assert.equal(value('Chart', 'Lines', 'Top'), '0.283in', 'the chart starts 6pt below the title');
+    assert.equal(value('Chart', 'Lines', 'Height'), '1.767in');
+    assert.equal(value('Rectangle', 'Rule', 'BackgroundColor'), '#5B6770');
+    // A title worked out when the report runs is painted only where it has text.
+    const titled = applyHouseStyle(rdl.replace('<BackgroundColor>#336699</BackgroundColor>', ''), readHouseStyle(JSON.stringify({ font: 'Tahoma', chart: { title: { fill: '#336699' } } })));
+    assert.match(item(titled, 'Textbox', 'Heading'), /<BackgroundColor>=IIf\(Trim\(CStr\(Fields!Name\.Value\)\) = "", "Transparent", "#336699"\)<\/BackgroundColor>/);
+  });
+
+  it('leaves a heading that wraps onto two lines all its room (no strip under its band)', () => {
+    const heading = (name: string, value: string, x: number, width: number) => ({ ...text(name, value, x, 8), style: { size: 8, bold: true }, font: 'Times New Roman', size: { width, height: 400 } });
+    const definition: ReportDefinition = { ...emptyDefinition(), layout: [
+      { name: 'PageHeaderArea1', sections: [{ name: 'PH', height: 420, objects: [heading('Short', 'Name', 0, 2000), heading('Wrapped', 'Monthly Shipment Totals Per Region', 2000, 1500)] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 200, objects: [
+        { kind: 'field', name: 'NameValue', field: 'Orders.Name', style: { size: 7 }, position: { x: 0, y: 0 }, size: { width: 2000, height: 200 } },
+        { kind: 'field', name: 'AmountValue', field: 'Orders.Amount', style: { size: 7 }, position: { x: 2000, y: 0 }, size: { width: 1500, height: 200 } }] }] }] };
+    const styled = applyHouseStyle(convertToRdl(definition, source, { reportName: 'W' }).rdl, readHouseStyle(JSON.stringify({ font: 'Tahoma', heading: { fill: '#203040', weight: 'SemiBold' } })));
+    const wrapped = item(styled, 'Textbox', 'Wrapped');
+    assert.ok(!wrapped.includes('<Color>White</Color>'), 'no white strip over its second line');
+    assert.match(wrapped, /<PaddingBottom>0pt<\/PaddingBottom>/);
   });
 
   it('styles group headings, totals, alternate rows, red figures, links and chart titles', () => {

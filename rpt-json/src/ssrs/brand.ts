@@ -254,6 +254,8 @@ function wrapLines(text: string, room: number, width: (t: string) => number): { 
 const GAP = 2;
 /** The white strip drawn along a heading band's foot to keep it off the rows under it, in points. */
 const STRIP = 3;
+/** The space kept between a painted title band and the chart under it, in points. */
+const CHART_GAP = 6;
 const inches = (pt: number) => `${Math.round((pt / 72) * 1000) / 1000}in`;
 
 /** An item's left (or top) edge from the page's body, through the rectangles it sits in. */
@@ -261,6 +263,26 @@ function offsetOf(item: XmlElement, parents: Map<XmlElement, XmlElement>, side: 
   let at = lengthInPoints(textOf(child(item, side))) ?? 0;
   for (let up = parents.get(item); up; up = parents.get(up)) if (up.name === 'Rectangle') at += lengthInPoints(textOf(child(up, side))) ?? 0;
   return at;
+}
+/**
+ * A band's fill for a title: where its text is worked out when the report runs, only where there is text (an empty
+ * title, such as a chart's in a frame left blank, leaves no coloured band).
+ */
+function fillWhenText(textbox: XmlElement, fill: string): string {
+  const values = descendants(textbox).filter((e) => e.name === 'Value').map(textOf);
+  if (!values.length || !values.every((v) => v.startsWith('=')) || isFixed(textbox)) return fill;
+  const text = values.map((v) => `CStr(${v.slice(1)})`).join(' & ');
+  return `=IIf(Trim(${text}) = "", "Transparent", "${fill}")`;
+}
+
+/** A thick rule drawn as a bar: a filled rectangle with nothing in it, no taller than a few points, at least 2in long. */
+function isRuleBar(e: XmlElement): boolean {
+  if (e.name !== 'Rectangle' || child(e, 'ReportItems')) return false;
+  const style = childElements(e, 'Style')[0];
+  const fill = textOf(child(style, 'BackgroundColor'));
+  const height = lengthInPoints(textOf(child(e, 'Height'))) ?? 0;
+  return !!fill && !/^transparent$/i.test(fill) && /^(none)?$/i.test(textOf(child(style, 'Border/Style'))) && height > 0 && height <= 6
+    && (lengthInPoints(textOf(child(e, 'Width'))) ?? 0) >= 144;
 }
 const ITEMS = new Set(['Rectangle', 'Textbox', 'Line', 'Chart', 'Tablix', 'Subreport', 'Image']);
 
@@ -327,7 +349,7 @@ export function applyHouseStyle(rdl: string, style: HouseStyle): string {
     if (!band) return;
     const weight = band.weight ?? (band.bold === undefined ? undefined : band.bold ? 'Bold' : 'Normal');
     for (const item of items) {
-      if (band.fill) setChild(ownStyle(item), 'BackgroundColor', band.fill);
+      if (band.fill) setChild(ownStyle(item), 'BackgroundColor', item.name === 'Textbox' && parents.get(item)?.name !== 'CellContents' ? fillWhenText(item, band.fill) : band.fill);
       for (const tb of item.name === 'Textbox' ? [item] : descendants(item).filter((e) => e.name === 'Textbox')) {
         if (band.fill && tb !== item) setChild(ownStyle(tb), 'BackgroundColor', band.fill);
         for (const s of runStyles(tb)) {
@@ -406,6 +428,10 @@ export function applyHouseStyle(rdl: string, style: HouseStyle): string {
       if (kind && /^none$/i.test(kind)) continue;
       if (isBlack(textOf(child(e, 'Color')))) setChild(e, 'Color', style.border, true);
     }
+    // A thick rule drawn as a bar (a filled rectangle) takes the house's line colour too.
+    if (style.border && isRuleBar(e) && isBlack(textOf(child(childElements(e, 'Style')[0], 'BackgroundColor')))) {
+      setChild(childElements(e, 'Style')[0], 'BackgroundColor', style.border);
+    }
   }
   const bandFont = new Set<XmlElement>();
   for (const tb of banded) for (const s of runStyles(tb)) if (before.get(s) && textOf(child(s, 'FontFamily')) !== before.get(s)!.font) bandFont.add(s);
@@ -456,10 +482,23 @@ export function applyHouseStyle(rdl: string, style: HouseStyle): string {
   };
   const len = (e: XmlElement, name: string) => lengthInPoints(textOf(child(e, name))) ?? 0;
   const placed = all.filter((e) => ITEMS.has(e.name) && !inCell(e) && parents.get(e)?.name === 'ReportItems');
+  // How wide an item is drawn: a table as wide as its columns, a rectangle as wide as what is in it.
+  const drawnWidth = (e: XmlElement): number => {
+    const own = len(e, 'Width');
+    if (e.name === 'Tablix') {
+      const columns = childElements(child(e, 'TablixBody/TablixColumns') ?? el('TablixColumns'), 'TablixColumn');
+      return Math.max(own, columns.reduce((sum, c) => sum + len(c, 'Width'), 0));
+    }
+    if (e.name === 'Rectangle') {
+      const items = childElements(child(e, 'ReportItems') ?? el('ReportItems')).filter((c) => ITEMS.has(c.name));
+      return Math.max(own, ...items.map((c) => len(c, 'Left') + drawnWidth(c)));
+    }
+    return own;
+  };
   const boxOf = (e: XmlElement) => {
     const left = offsetOf(e, parents, 'Left');
     const top = offsetOf(e, parents, 'Top');
-    return { left, top, right: left + len(e, 'Width'), bottom: top + len(e, 'Height') };
+    return { left, top, right: left + drawnWidth(e), bottom: top + len(e, 'Height') };
   };
   const boxes = new Map(placed.map((e) => [e, boxOf(e)]));
   const isFrame = (e: XmlElement) => e.name === 'Rectangle' && !/^none$/i.test(textOf(child(e, 'Style/Border/Style')) || 'None');
@@ -467,16 +506,14 @@ export function applyHouseStyle(rdl: string, style: HouseStyle): string {
     const fill = textOf(child(ownStyle(e), 'BackgroundColor'));
     return !!fill && !/^transparent$/i.test(fill);
   };
-  const rules = placed.filter((e) => e.name === 'Line' && Math.abs(len(e, 'Height')) < 1).map((e) => boxes.get(e)!).filter((r) => r.right - r.left > 144);
+  const rules = placed.filter((e) => (e.name === 'Line' && Math.abs(len(e, 'Height')) < 1) || isRuleBar(e)).map((e) => boxes.get(e)!).filter((r) => r.right - r.left > 144);
   const end = Math.max(...rules.map((r) => r.right), 0);
   const ruleLeft = Math.min(...rules.filter((r) => r.right === end).map((r) => r.left));
   const thin = (e: XmlElement) => e.name === 'Line' && Math.abs(len(e, 'Width')) < 1;
-  const stretchable = (e: XmlElement) => {
-    const b = boxes.get(e)!;
-    // Plain text stays where it is (only a band or a framed text is part of the layout's edge).
+  // Plain text is not part of the layout's edge (only a band or a framed text is).
+  const edgeItem = (e: XmlElement) => {
     const framed = !/^(none)?$/i.test(textOf(child(ownStyle(e), 'Border/Style')));
-    if (thin(e) || e.name === 'Image' || (e.name === 'Textbox' && !painted(e) && !framed)) return false;
-    return b.left >= ruleLeft - 2 && b.right < end - 0.5 && b.right >= end - 54;
+    return !thin(e) && e.name !== 'Image' && (e.name !== 'Textbox' || painted(e) || framed);
   };
   const besides = (e: XmlElement) => {
     const b = boxes.get(e)!;
@@ -486,11 +523,7 @@ export function applyHouseStyle(rdl: string, style: HouseStyle): string {
       return ob.left >= b.right - 0.5 && ob.top < b.bottom && ob.bottom > b.top;
     });
   };
-  const grows = new Map<XmlElement, number>();
-  const candidates = placed.filter((e) => stretchable(e) && !besides(e));
-  // Frames first (the largest first): what is in one keeps its distance from the frame's right side.
   const area = (e: XmlElement) => { const b = boxes.get(e)!; return (b.right - b.left) * (b.bottom - b.top); };
-  candidates.sort((x, y) => Number(isFrame(y)) - Number(isFrame(x)) || area(y) - area(x));
   const within = (inner: { left: number; top: number; right: number; bottom: number }, outer: { left: number; top: number; right: number; bottom: number }) =>
     inner.left >= outer.left - 1 && inner.right <= outer.right + 1 && inner.top >= outer.top - 1 && inner.bottom <= outer.bottom + 1;
   // A frame holds what lies on it (beside it in its container) or in it.
@@ -499,10 +532,35 @@ export function applyHouseStyle(rdl: string, style: HouseStyle): string {
     for (let up = parents.get(e); up; up = parents.get(up)) if (up === frame) return true;
     return false;
   };
-  for (const e of candidates) {
+  // What an item lies in: the rectangles it sits in, or a frame drawn round where it starts (the innermost).
+  const encloser = (e: XmlElement) => {
     const b = boxes.get(e)!;
-    const frame = [...grows.keys()].find((f) => f.name === 'Rectangle' && f !== e && holds(f, e) && within(b, boxes.get(f)!));
-    const grow = Math.min(frame ? grows.get(frame)! : end - b.right, end - b.right);
+    return placed.filter((r) => {
+      if (r === e || r.name !== 'Rectangle' || !holds(r, e)) return false;
+      if (parents.get(r) !== parents.get(e)) return true;
+      const rb = boxes.get(r)!;
+      return area(r) > area(e) && b.left >= rb.left - 1 && b.left < rb.right && b.top >= rb.top - 1 && b.bottom <= rb.bottom + 1;
+    }).sort((x, y) => area(x) - area(y))[0];
+  };
+  // What lies in a frame moves with the frame (keeping its distance from the frame's side); what lies in none
+  // reaches the rule itself. Nothing ends past the rule.
+  const grows = new Map<XmlElement, number>();
+  const order = placed.filter((e) => edgeItem(e) && !besides(e)).sort((x, y) => area(y) - area(x));
+  for (const e of order) {
+    const b = boxes.get(e)!;
+    if (b.left < ruleLeft - 2 || b.right >= end - 0.5) continue;
+    const outer = encloser(e);
+    let grow: number;
+    if (outer) {
+      const frameGrow = grows.get(outer);
+      // Only what runs along the frame's right side.
+      if (!frameGrow || b.right < boxes.get(outer)!.right - 54) continue;
+      grow = frameGrow;
+    } else {
+      if (b.right < end - 54) continue;
+      grow = end - b.right;
+    }
+    grow = Math.min(grow, end - b.right);
     if (grow > 0.5) grows.set(e, grow);
   }
   // Lines down a frame's right side move with it.
@@ -512,7 +570,7 @@ export function applyHouseStyle(rdl: string, style: HouseStyle): string {
     if (moved) setChild(e, 'Left', inches(len(e, 'Left') + moved[1]));
   }
   for (const [e, grow] of grows) {
-    const width = len(e, 'Width');
+    const width = drawnWidth(e);
     if (e.name === 'Tablix') {
       const columns = childElements(child(e, 'TablixBody/TablixColumns') ?? el('TablixColumns'), 'TablixColumn');
       const last = columns[columns.length - 1];
@@ -531,21 +589,51 @@ export function applyHouseStyle(rdl: string, style: HouseStyle): string {
     }
   }
 
-  // A painted title along a frame's top: across the frame, side to side.
-  const bands = placed.filter((e) => e.name === 'Textbox' && painted(e) && isFixed(e));
+  // A painted title along a frame's top: across the frame, side to side, from its top (a frame drawn beside it, or the
+  // bordered rectangle it is in, such as a subreport's frame).
+  // (A title worked out by a formula too: a painted text no taller than a line or two.)
+  const bands = placed.filter((e) => e.name === 'Textbox' && painted(e) && (isFixed(e) || len(e, 'Height') <= 30));
+  const flush = new Set<XmlElement>();
+  const ownBox = (f: XmlElement) => {
+    const left = offsetOf(f, parents, 'Left');
+    const top = offsetOf(f, parents, 'Top');
+    return { left, top, right: left + len(f, 'Width'), bottom: top + len(f, 'Height') };
+  };
   for (const band of bands) {
     const b = boxOf(band);
-    const frame = placed.filter((f) => isFrame(f) && parents.get(f) === parents.get(band) && within(b, boxOf(f)))
-      .map((f) => ({ f, fb: boxOf(f) }))
-      .filter(({ fb }) => b.top - fb.top <= 36 && b.left - fb.left <= 25 && fb.right - b.right <= 25 && (b.right - b.left) >= (fb.right - fb.left) * 0.6)
+    const holder = parents.get(parents.get(band)!);
+    const frames = [
+      ...placed.filter((f) => isFrame(f) && parents.get(f) === parents.get(band)).map((f) => ({ f, inside: false })),
+      ...(holder && isFrame(holder) ? [{ f: holder, inside: true }] : []),
+    ];
+    const frame = frames.map((x) => ({ ...x, fb: ownBox(x.f) }))
+      .filter(({ fb }) => within(b, fb) && b.top - fb.top <= 36 && b.left - fb.left <= 25 && fb.right - b.right <= 25 && (b.right - b.left) >= (fb.right - fb.left) * 0.6)
       .sort((x, y) => (x.fb.right - x.fb.left) - (y.fb.right - y.fb.left))[0];
     if (!frame) continue;
-    setChild(band, 'Left', textOf(child(frame.f, 'Left')));
+    setChild(band, 'Top', frame.inside ? '0in' : textOf(child(frame.f, 'Top')));
+    setChild(band, 'Left', frame.inside ? '0in' : textOf(child(frame.f, 'Left')));
     setChild(band, 'Width', textOf(child(frame.f, 'Width')));
+    flush.add(band);
+  }
+  // A chart under a painted title starts below it, a little apart (the band would cover the chart's top; plain text did not).
+  for (const band of bands) {
+    const b = { top: len(band, 'Top'), left: len(band, 'Left'), right: len(band, 'Left') + len(band, 'Width') };
+    const bottom = b.top + len(band, 'Height');
+    for (const chart of childElements(parents.get(band)!, 'Chart')) {
+      const top = len(chart, 'Top');
+      const height = len(chart, 'Height');
+      const left = len(chart, 'Left');
+      const right = left + len(chart, 'Width');
+      // A few points clear of it: the value axis's top label is drawn half above the chart's plot.
+      const below = bottom + CHART_GAP;
+      if (right <= b.left || left >= b.right || below <= top || b.top > top + height / 5 || below - top >= height / 3) continue;
+      setChild(chart, 'Top', inches(below));
+      setChild(chart, 'Height', inches(height - (below - top)));
+    }
   }
   // Painted titles side by side (a row of charts' titles): on one line, at the lowest one's place.
   const rowsOf: XmlElement[][] = [];
-  for (const band of bands.filter((e) => (textSize(e) ?? 10) < usual + 6)) {
+  for (const band of bands.filter((e) => !flush.has(e) && (textSize(e) ?? 10) < usual + 6)) {
     const t = len(band, 'Top');
     const row = rowsOf.find((r) => parents.get(r[0]) === parents.get(band) && r.every((o) => Math.abs(len(o, 'Top') - t) <= 14
       && (len(o, 'Left') + len(o, 'Width') <= len(band, 'Left') + 1 || len(band, 'Left') + len(band, 'Width') <= len(o, 'Left') + 1)));
@@ -634,8 +722,17 @@ export function applyHouseStyle(rdl: string, style: HouseStyle): string {
   const fontOf = (st: XmlElement) => textOf(child(st, 'FontFamily')) || defaultFont;
   const slackOf = (tb: XmlElement, height: number) => {
     const own = ownStyle(tb);
-    const lines = isFixed(tb) ? fixedLines(tb).length : 1;
-    const text = Math.max(...runStyles(tb).map((st) => (points(textOf(child(st, 'FontSize'))) ?? 10) * lineHeight(fontOf(st))), 0) * lines;
+    // Its lines as they wrap in its width (a long heading takes two), in the font it now has, with a little to spare.
+    const first = runStyles(tb)[0];
+    const width = cellWidth(tb);
+    const room = width === undefined ? undefined
+      : width - (points(textOf(child(own, 'PaddingLeft'))) ?? 2) - (points(textOf(child(own, 'PaddingRight'))) ?? 2);
+    const font = first ? fontOf(first) : defaultFont;
+    const weight = (first && textOf(child(first, 'FontWeight'))) || 'Normal';
+    const size = (first && points(textOf(child(first, 'FontSize')))) ?? 10;
+    const lines = !isFixed(tb) ? 1 : fixedLines(tb).filter((l) => l.trim()).reduce((sum, line) => sum
+      + (room === undefined || weight.startsWith('=') ? 1 : wrapLines(line, room, (t) => textWidth(t, font, weight, size)).lines), 0) || 1;
+    const text = Math.max(...runStyles(tb).map((st) => (points(textOf(child(st, 'FontSize'))) ?? 10) * lineHeight(fontOf(st))), 0) * lines * 1.08;
     return height - text - (points(textOf(child(own, 'PaddingTop'))) ?? 2) - (points(textOf(child(own, 'PaddingBottom'))) ?? 2);
   };
   for (const tablix of all.filter((e) => e.name === 'Tablix')) {
