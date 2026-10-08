@@ -30,6 +30,7 @@ node src/cli.ts to-json  report.rpt report.json          # full JSON (original b
 node src/cli.ts to-rpt   report.json rebuilt.rpt
 node src/cli.ts to-rdl   report.rpt out/                 # SSRS .rdl (+ subreports) and a review checklist
 node src/cli.ts to-rdl   reports/ out/                   # every .rpt in a folder
+node src/cli.ts to-rdl   report.rpt out/ --house style.json                # Crystal layout, house fonts and colours
 node src/cli.ts to-rdl   report.rpt out/ --template house.rdl              # in the style of an existing report
 node src/cli.ts to-rdl   --template house.rdl --combine out/All.rdl a.rpt b.rpt   # several reports in one .rdl
 node src/cli.ts headers  report.rpt                      # header text: titles, labels, column headings
@@ -56,6 +57,7 @@ node src/cli.ts verify   report.rpt                      # round-trip checks (se
 | `--page-number` | `to-rdl` | Add "Page N" at the right of the page footer (for reports whose page numbers the printing application added) |
 | `--parameter name=value` | `to-rdl` | Convert for that parameter value: sections and objects its suppress formulas hide are left out (they take no space, as in Crystal); repeat for more parameters |
 | `--chart-axis-format <format>` | `to-rdl` | Value-axis number format (e.g. `"0.00%"`) for charts whose format the `.rpt` does not show (it is in Crystal's encrypted chart data); charts with value labels use their labels' format |
+| `--house <style.json>` | `to-rdl` | Keep the Crystal layout in a house style: fonts, title and heading bands, border and chart colours (see below) |
 | `--template <file.rdl>` | `to-rdl` | Lay each report out in the style of an existing SSRS report (see below)     |
 | `--combine <out.rdl>` | `to-rdl`  | With `--template`: put every input report into one `.rdl`, one block each     |
 
@@ -109,6 +111,35 @@ and Report Builder.
    report read.
 4. Fonts used by the report must be installed on the report server for PDF export.
 5. Run the report, compare it with the Crystal output, and work through `<name>.review.md`.
+
+### House style
+
+`--house style.json` keeps the Crystal layout (every position and size, the page setup, the pictures) and lays a house
+style over it. Every entry is optional; what the file leaves out keeps the Crystal look:
+
+```json
+{
+  "font": "Segoe UI",
+  "textColor": "#222222",
+  "border": "#5B6770",
+  "title":   { "fill": "#1F4E79", "color": "#FFFFFF", "bold": true },
+  "heading": { "fill": "#DDE6F0", "color": "#1F4E79", "bold": true },
+  "chart":   { "palette": ["#1F4E79", "#F2A541", "#5B9BD5", "#70AD47"], "plotBackground": "#FFFFFF" }
+}
+```
+
+| Entry | What it styles |
+|-------|----------------|
+| `font` | Every text, charts included (sizes, bold and italic stay as in Crystal) |
+| `textColor` | Text Crystal prints in black |
+| `border` | Lines, boxes and borders Crystal draws in black |
+| `title` | Section titles: fixed text 2 points or more larger than the report's usual text |
+| `heading` | A table's column headings: its rows above the first row of data |
+| `chart` | Chart colours, in order (bars coloured one by one too), and the plot's background |
+
+Text and lines Crystal colours itself (a figure turning red, a coloured rule) keep their colour. Colours are written
+as `#RRGGBB` or a colour name (`Navy`). The text may take a little more or less room in another font: check that
+long labels still fit. `--house` cannot be combined with `--template`, which replaces the layout.
 
 ### House templates
 
