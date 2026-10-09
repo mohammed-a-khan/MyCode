@@ -656,13 +656,7 @@ class RdlBuilder {
       result = `(${expression})`;
     } else {
       const fieldName = this.fieldNames.make(`F_${formula.name}`);
-      // Crystal prints nothing for a formula reading a null field (unless it tests for nulls itself): SSRS would
-      // carry on with an empty value ("" & "%" printing "%").
-      const read = [...new Set(expression.match(/Fields!\w+\.Value/g) ?? [])];
-      const guarded = !t.code && read.length && !/\b(isnull|hasvalue|previousisnull|nextisnull)\b/i.test(formula.text)
-        ? `=IIf(${read.map((f) => `IsNothing(${f})`).join(' OrElse ')}, Nothing, ${expression})`
-        : t.expression;
-      this.calculated.push({ name: fieldName, expression: guarded });
+      this.calculated.push({ name: fieldName, expression: t.expression });
       result = `Fields!${fieldName}.Value`;
     }
     this.formulaResults.set(key, result);
@@ -1786,8 +1780,10 @@ class RdlBuilder {
         legendWrap ? el('ChartItemInLegend', el('LegendText', `=Code.CrWrap(CStr(${seriesExpression}), 20)`)) : null,
         el('ValueAxisName', 'Primary'),
         el('CategoryAxisName', 'Primary'),
-        // Labels may sit outside the plot area (not cut short to fit beside a small pie).
-        el('ChartSmartLabel', el('AllowOutSidePlotArea', 'True'), el('CalloutLineColor', 'Black'), el('MinMovingDistance', '0pt')));
+        // Labels may sit outside the plot area (not cut short to fit beside a small pie); a bar's value label moves
+        // up out of its neighbour's way where bars of a like height stand close (Crystal's never run into each other).
+        el('ChartSmartLabel', el('AllowOutSidePlotArea', 'True'), el('CalloutLineColor', 'Black'),
+          style.type === 'Column' && labelText ? el('MaxMovingDistance', '30pt') : null, el('MinMovingDistance', '0pt')));
     });
     // Crystal frames a flat chart's plot on all four sides: the axes' lines repeated opposite them, unlabelled.
     const frame = isPie || style.threeD ? null : el('ChartAxis', { Name: 'Secondary' },

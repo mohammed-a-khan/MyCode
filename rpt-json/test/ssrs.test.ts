@@ -60,11 +60,12 @@ describe('formula translation', () => {
     assert.ok(t.issues.some((i) => /Median\(\) which has no SSRS equivalent/.test(i)));
   });
   it('translates fields, parameters, formulas and operators', () => {
-    assert.equal(tr('{Orders.Amount} * 1.1 + {@Tax}').expression, '=((Fields!Amount.Value * 1.1) + (Fields!Tax.Value))');
+    // Arithmetic with a null field gives nothing, as in Crystal (SSRS would take it as 0).
+    assert.equal(tr('{Orders.Amount} * 1.1 + {@Tax}').expression, '=IIf(IsNothing(Fields!Amount.Value) OrElse IsNothing(Fields!Tax.Value), Nothing, ((Fields!Amount.Value * 1.1) + (Fields!Tax.Value)))');
     assert.equal(tr('{Orders.Date} >= {?Start Date} and not IsNull({Orders.Date})').expression,
       '=((Fields!Date.Value >= Parameters!Start_Date.Value) AndAlso Not (IsNothing(Fields!Date.Value)))');
-    assert.equal(tr('"Total: " & ToText({Orders.Amount}, 2)').expression, '=("Total: " & FormatNumber(Fields!Amount.Value, 2))');
-    assert.equal(tr("'It''s' + UpperCase({Orders.Name})").expression, `=("It's" + UCase(Fields!Name.Value))`);
+    assert.equal(tr('"Total: " & ToText({Orders.Amount}, 2)').expression, '=IIf(IsNothing(Fields!Amount.Value), Nothing, ("Total: " & FormatNumber(Fields!Amount.Value, 2)))');
+    assert.equal(tr("'It''s' + UpperCase({Orders.Name})").expression, `=IIf(IsNothing(Fields!Name.Value), Nothing, ("It's" + UCase(Fields!Name.Value)))`);
   });
 
   it('translates if/else, select case, in lists and ranges', () => {
@@ -91,7 +92,7 @@ describe('formula translation', () => {
 
   it('compares text fields without trailing spaces, as Crystal does with padded database columns', () => {
     const typed: FormulaContext = { ...ctx, fieldType: (ref) => (ref === 'Orders.Kind' ? 'string' : 'number') };
-    assert.equal(translateFormula('if {Orders.Kind} = "N" then "Residual" else "x"', typed).expression, '=IIf((RTrim(Fields!Kind.Value) = "N"), "Residual", "x")');
+    assert.equal(translateFormula('if {Orders.Kind} = "N" then "Pending" else "x"', typed).expression, '=IIf((RTrim(Fields!Kind.Value) = "N"), "Pending", "x")');
     assert.equal(translateFormula('{Orders.Kind} in ["A", "B"]', typed).expression, '=(RTrim(Fields!Kind.Value) = "A" OrElse RTrim(Fields!Kind.Value) = "B")');
     assert.equal(translateFormula('{Orders.Amount} > 3', typed).expression, '=(Fields!Amount.Value > 3)');
   });
@@ -1147,22 +1148,24 @@ describe('joins, dates and custom function coverage', () => {
     assert.ok(rdl.includes('FROM [dbo].[Customer] AS [Customer]\nLEFT OUTER JOIN [dbo].[Orders] AS [Orders] ON [Customer].[Customer ID] = [Orders].[Customer ID]'));
     assert.ok(rdl.includes('LEAD([Orders].[Amount]) OVER (ORDER BY (SELECT NULL)) AS [Next_Amount]'));
     assert.ok(rdl.includes('WHERE ([Orders].[Order Date] &gt;= DATEADD(month, -1, DATEFROMPARTS('));
-    // Empty where a field it reads is null, as Crystal prints such a formula.
-    assert.ok(rdl.includes('<Value>=IIf(IsNothing(Fields!Order_Date.Value) OrElse IsNothing(Fields!Ship_Date.Value), Nothing, DateDiff("d", Fields!Order_Date.Value, Fields!Ship_Date.Value))</Value>'));
-    assert.ok(rdl.includes('<Value>=IIf(IsNothing(Fields!Order_Date.Value), Nothing, DateAdd("d", (30), Fields!Order_Date.Value))</Value>'));
-    assert.ok(rdl.includes('<Value>=IIf(IsNothing(Fields!Amount.Value), Nothing, IIf((Fields!Amount.Value &gt; 100), "Big", ""))</Value>'), 'Crystal default for a string');
+    assert.ok(rdl.includes('<Value>=DateDiff("d", Fields!Order_Date.Value, Fields!Ship_Date.Value)</Value>'));
+    assert.ok(rdl.includes('<Value>=DateAdd("d", (30), Fields!Order_Date.Value)</Value>'));
+    assert.ok(rdl.includes('<Value>=IIf((Fields!Amount.Value &gt; 100), "Big", "")</Value>'), 'Crystal default for a string');
     assert.ok(review.some((r) => r.item === 'Next(Orders.Amount)'));
   });
 
-  it('prints nothing for a formula reading a null field, as Crystal does, unless the formula tests for nulls', () => {
+  it('prints nothing for text joined to a null field or arithmetic with one, as Crystal does, where it is reached', () => {
     const definition: ReportDefinition = {
       ...emptyDefinition(),
-      formulas: [formula('Rate', 'ToText({Orders.Amount}, 2) + "%"'), formula('Safe', 'if IsNull({Orders.Amount}) then "-" else ToText({Orders.Amount}, 2)')],
-      layout: detailLayout('Customer.Name', '@Rate', '@Safe'),
+      formulas: [formula('Rate', 'ToText({Orders.Amount}, 2) + "%"'), formula('Safe', 'if IsNull({Orders.Amount}) then "-" else ToText({Orders.Amount}, 2)'),
+        formula('Branch', 'if {Customer.Name} = "Rest" then "Pending" else ToText({Orders.Amount}, 2) + "%"')],
+      layout: detailLayout('Customer.Name', '@Rate', '@Safe', '@Branch'),
     };
     const { rdl } = convertToRdl(definition, source, { reportName: 'Nulls' });
     assert.match(rdl, /<Field Name="F_Rate">\s*<Value>=IIf\(IsNothing\(Fields!Amount\.Value\), Nothing, [^<]*"%"\)\)<\/Value>/, 'not a lone "%"');
     assert.match(rdl, /<Field Name="F_Safe">\s*<Value>=IIf\(IsNothing\(Fields!Amount\.Value\), "-"/, 'a formula testing for nulls itself is left as it is');
+    // Only where it is reached: the branch taking no null field prints its text.
+    assert.match(rdl, /<Field Name="F_Branch">\s*<Value>=IIf\(\(RTrim\(Fields!Name\.Value\) = "Rest"\), "Pending", IIf\(IsNothing\(Fields!Amount\.Value\), Nothing, \(FormatNumber\(Fields!Amount\.Value, 2\) \+ "%"\)\)\)<\/Value>/);
   });
 
   it('converts Select statements, WeekDay constants and hoists declarations', () => {
