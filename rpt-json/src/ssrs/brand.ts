@@ -401,6 +401,10 @@ export function applyHouseStyle(rdl: string, style: HouseStyle): string {
       const cells = descendants(row).filter((e) => e.name === 'CellContents').flatMap((c) => childElements(c)).filter((e) => e.name === 'Textbox' || e.name === 'Rectangle');
       const inRow = cells.flatMap((c) => (c.name === 'Textbox' ? [c] : descendants(c).filter((e) => e.name === 'Textbox')));
       const kind = kinds[i];
+      // A row holding no text (only a line drawn along it, as its border) is not a band: painted, the line would become
+      // a bar as tall as the row, with no space left under it.
+      const blank = inRow.every((tb) => descendants(tb).filter((e) => e.name === 'Value').every((v) => !textOf(v).trim()));
+      if (blank && kind !== 'detail') return;
       if (kind === 'heading') paint(cells, inRow.some(isTitle) ? style.title : style.heading);
       else if (kind === 'groupHeading') paint(cells, style.groupHeading);
       else if (kind === 'total') paint(cells, style.total);

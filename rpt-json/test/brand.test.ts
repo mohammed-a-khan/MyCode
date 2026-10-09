@@ -192,6 +192,15 @@ describe('house style', () => {
     assert.ok(!statement.includes('RowNumber(Nothing) Mod 2'), 'lines indented record by record do not');
   });
 
+  it('leaves a group\'s opening row holding only a line unpainted: the line stays a line, with space under it', () => {
+    const row = (name: string, value: string, border = '') => `<TablixRow><Height>0.153in</Height><TablixCells><TablixCell><CellContents><Textbox Name="${name}"><Paragraphs><Paragraph><TextRuns><TextRun><Value>${value}</Value><Style /></TextRun></TextRuns></Paragraph></Paragraphs><Style>${border}</Style></Textbox></CellContents></TablixCell></TablixCells></TablixRow>`;
+    const rdl = `<Report><ReportSections><ReportSection><Body><ReportItems><Tablix Name="Lines"><TablixBody><TablixColumns><TablixColumn><Width>5in</Width></TablixColumn></TablixColumns><TablixRows>${row('Rule', '', '<TopBorder><Style>Solid</Style><Width>3.50pt</Width></TopBorder>')}${row('Label', '=Fields!Label.Value')}</TablixRows></TablixBody>
+      <TablixColumnHierarchy><TablixMembers><TablixMember /></TablixMembers></TablixColumnHierarchy><TablixRowHierarchy><TablixMembers><TablixMember><Group Name="G"><GroupExpressions><GroupExpression>=Fields!Kind.Value</GroupExpression></GroupExpressions></Group><TablixMembers><TablixMember /><TablixMember><Group Name="Details" /></TablixMember></TablixMembers></TablixMember></TablixMembers></TablixRowHierarchy>
+      <Top>0in</Top><Left>0in</Left><Height>0.3in</Height><Width>5in</Width></Tablix></ReportItems><Height>1in</Height></Body><Width>6in</Width></ReportSection></ReportSections></Report>`;
+    const styled = applyHouseStyle(rdl, readHouseStyle(JSON.stringify({ groupHeading: { fill: '#203040' } })));
+    assert.ok(!item(styled, 'Textbox', 'Rule').includes('#203040') && /<TopBorder>/.test(item(styled, 'Textbox', 'Rule')));
+  });
+
   it('takes a table starting a little inside the rule to the rule\'s left end too, its text staying where it was', () => {
     const at = (t: number, l: number, h: number, w: number) => `<Top>${t}in</Top><Left>${l}in</Left><Height>${h}in</Height><Width>${w}in</Width>`;
     const cell = (v: string) => `<TablixCell><CellContents><Textbox Name="${v}"><Paragraphs><Paragraph><TextRuns><TextRun><Value>${v}</Value><Style /></TextRun></TextRuns><Style><TextAlign>Center</TextAlign></Style></Paragraph></Paragraphs><Style><PaddingLeft>2pt</PaddingLeft></Style></Textbox></CellContents></TablixCell>`;
