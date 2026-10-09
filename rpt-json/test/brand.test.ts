@@ -181,6 +181,17 @@ describe('house style', () => {
     assert.equal(right(loose, 'Rectangle', 'Box'), 7.4);
   });
 
+  it('prints lines placed record by record (a statement) plain, without alternate row colours', () => {
+    const row = (left: string) => `<TablixRow><Height>0.2in</Height><TablixCells><TablixCell><CellContents><Textbox Name="Label"><Paragraphs><Paragraph><TextRuns><TextRun><Value>=Fields!Label.Value</Value><Style /></TextRun></TextRuns></Paragraph></Paragraphs><Style><PaddingLeft>${left}</PaddingLeft></Style></Textbox></CellContents></TablixCell></TablixCells></TablixRow>`;
+    const table = (left: string) => `<Report><ReportSections><ReportSection><Body><ReportItems><Tablix Name="Lines"><TablixBody><TablixColumns><TablixColumn><Width>5in</Width></TablixColumn></TablixColumns><TablixRows>${row(left)}</TablixRows></TablixBody>
+      <TablixColumnHierarchy><TablixMembers><TablixMember /></TablixMembers></TablixColumnHierarchy><TablixRowHierarchy><TablixMembers><TablixMember><Group Name="Details" /></TablixMember></TablixMembers></TablixRowHierarchy>
+      <Top>0in</Top><Left>0in</Left><Height>0.2in</Height><Width>5in</Width></Tablix></ReportItems><Height>1in</Height></Body><Width>6in</Width></ReportSection></ReportSections></Report>`;
+    const banded = readHouseStyle(JSON.stringify({ rowBands: { odd: '#FAFAFA', even: '#EEEEEE' } }));
+    assert.match(applyHouseStyle(table('2pt'), banded), /RowNumber\(Nothing\) Mod 2/, 'rows of a table alternate');
+    const statement = applyHouseStyle(table('=CStr(CInt(Math.Max(0, 588 + Fields!Level.Value * 432) / 20)) &amp; "pt"'), banded);
+    assert.ok(!statement.includes('RowNumber(Nothing) Mod 2'), 'lines indented record by record do not');
+  });
+
   it('takes a table starting a little inside the rule to the rule\'s left end too, its text staying where it was', () => {
     const at = (t: number, l: number, h: number, w: number) => `<Top>${t}in</Top><Left>${l}in</Left><Height>${h}in</Height><Width>${w}in</Width>`;
     const cell = (v: string) => `<TablixCell><CellContents><Textbox Name="${v}"><Paragraphs><Paragraph><TextRuns><TextRun><Value>${v}</Value><Style /></TextRun></TextRuns><Style><TextAlign>Center</TextAlign></Style></Paragraph></Paragraphs><Style><PaddingLeft>2pt</PaddingLeft></Style></Textbox></CellContents></TablixCell>`;
