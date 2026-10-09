@@ -316,6 +316,29 @@ function rowKinds(tablix: XmlElement): RowKind[] {
   return kinds;
 }
 
+/**
+ * A table's column widened on one side keeps its text where it was: each cell of the column takes the added width as
+ * padding on that side (what a rectangle cell holds moves over instead).
+ */
+function padColumn(tablix: XmlElement, index: 'first' | 'last', amount: number): void {
+  for (const row of childElements(child(tablix, 'TablixBody/TablixRows') ?? el('TablixRows'), 'TablixRow')) {
+    const cells = childElements(child(row, 'TablixCells') ?? el('TablixCells'), 'TablixCell');
+    const cell = index === 'first' ? cells[0] : cells[cells.length - 1];
+    const content = cell && childElements(child(cell, 'CellContents') ?? el('CellContents'))[0];
+    if (!content) continue;
+    if (content.name === 'Textbox') {
+      const own = ownStyle(content);
+      const side = index === 'first' ? 'PaddingLeft' : 'PaddingRight';
+      setChild(own, side, `${Math.round(((points(textOf(child(own, side))) ?? 2) + amount) * 10) / 10}pt`);
+    } else if (content.name === 'Rectangle' && index === 'first') {
+      for (const c of childElements(child(content, 'ReportItems') ?? el('ReportItems'))) {
+        const left = lengthInPoints(textOf(child(c, 'Left')));
+        if (left !== undefined) setChild(c, 'Left', `${Math.round(((left + amount) / 72) * 1000) / 1000}in`);
+      }
+    }
+  }
+}
+
 /** Lays a house style over a converted report's RDL. */
 export function applyHouseStyle(rdl: string, style: HouseStyle): string {
   const root = parseXml(rdl);
@@ -549,6 +572,8 @@ export function applyHouseStyle(rdl: string, style: HouseStyle): string {
   };
   // What lies in a frame moves with the frame (keeping its distance from the frame's side); what lies in none
   // (or in a rectangle without a border) reaches the rule itself. Nothing ends past the rule.
+  // Whether a rectangle is a frame or lies in one.
+  const framedAround = (r: XmlElement | undefined): boolean => !!r && (isFrame(r) || framedAround(encloser(r)));
   const grows = new Map<XmlElement, number>();
   const order = placed.filter((e) => edgeItem(e) && !besides(e)).sort((x, y) => area(y) - area(x));
   for (const e of order) {
@@ -556,7 +581,6 @@ export function applyHouseStyle(rdl: string, style: HouseStyle): string {
     if (b.left < ruleLeft - 2 || b.right >= end - 0.5) continue;
     // A rectangle drawn without a border (a subreport without a frame, a section's holder) lying in no frame is none:
     // what is in it reaches the rule as what lies in none does.
-    const framedAround = (r: XmlElement | undefined): boolean => !!r && (isFrame(r) || framedAround(encloser(r)));
     const outer = [encloser(e)].find(framedAround);
     let grow: number;
     if (outer) {
@@ -584,6 +608,7 @@ export function applyHouseStyle(rdl: string, style: HouseStyle): string {
       const last = columns[columns.length - 1];
       if (!last) continue;
       setChild(last, 'Width', inches(len(last, 'Width') + grow));
+      padColumn(e, 'last', grow);
     }
     setChild(e, 'Width', inches(width + grow));
     // Its containers widened with it where they would now cut it off.
@@ -595,6 +620,41 @@ export function applyHouseStyle(rdl: string, style: HouseStyle): string {
       if (up.name === 'ReportSection') break;
       right = len(up, 'Left') + Math.max(w, right);
     }
+  }
+
+  // Likewise on the left: a table (or a band, a frame) starting a little inside the rule's left end, with nothing
+  // beside it, reaches it; what holds it (a rectangle without a border) opens out to the left, what else is in it
+  // keeping its place.
+  for (const e of order.filter((x) => x.name === 'Tablix' || isFrame(x) || (x.name === 'Textbox' && painted(x)))) {
+    const b = boxOf(e);
+    const shift = b.left - ruleLeft;
+    if (shift <= 0.5 || shift > 54 || [encloser(e)].some((r) => r && framedAround(r))) continue;
+    const beside = placed.some((o) => o !== e && !thin(o) && parents.get(o) === parents.get(e) && boxes.get(o)!.right <= b.left + 0.5
+      && boxes.get(o)!.top < b.bottom && boxes.get(o)!.bottom > b.top);
+    if (beside) continue;
+    let need = shift;
+    let item = e;
+    for (let up = parents.get(item); need > 0.5 && up; up = parents.get(up)) {
+      if (up.name !== 'ReportItems') continue;
+      const own = len(item, 'Left');
+      const room = Math.min(own, need);
+      setChild(item, 'Left', inches(own - room));
+      need -= room;
+      const holder = parents.get(up);
+      if (need <= 0.5 || !holder || holder.name !== 'Rectangle' || isFrame(holder)) break;
+      // The holder opens out to the left by what is left to move; the rest of what it holds stays in place.
+      for (const c of childElements(up).filter((c) => c !== item && ITEMS.has(c.name))) setChild(c, 'Left', inches(len(c, 'Left') + need));
+      setChild(holder, 'Width', inches(len(holder, 'Width') + need));
+      item = holder;
+    }
+    const moved = shift - Math.max(0, need);
+    if (moved <= 0.5) continue;
+    if (e.name === 'Tablix') {
+      const first = childElements(child(e, 'TablixBody/TablixColumns') ?? el('TablixColumns'), 'TablixColumn')[0];
+      if (first) setChild(first, 'Width', inches(len(first, 'Width') + moved));
+      padColumn(e, 'first', moved);
+    }
+    setChild(e, 'Width', inches(len(e, 'Width') + moved));
   }
 
   // A painted title along a frame's top: across the frame, side to side, from its top (a frame drawn beside it, or the
