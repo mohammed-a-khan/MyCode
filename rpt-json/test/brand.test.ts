@@ -199,6 +199,26 @@ describe('house style', () => {
     assert.match(item(titled, 'Textbox', 'Heading'), /<BackgroundColor>=IIf\(Trim\(CStr\(Fields!Name\.Value\)\) = "", "Transparent", "#336699"\)<\/BackgroundColor>/);
   });
 
+  it('paints a heading written as lines one under another as one band, no line covering another', () => {
+    const at = (t: number, l: number, h: number, w: number) => `<Top>${t}in</Top><Left>${l}in</Left><Height>${h}in</Height><Width>${w}in</Width>`;
+    const line = (n: string, v: string, t: number) => `<Textbox Name="${n}"><Paragraphs><Paragraph><TextRuns><TextRun><Value>${v}</Value><Style /></TextRun></TextRuns></Paragraph></Paragraphs>${at(t, 0, 0.153, 1.2)}<Style><BackgroundColor>#336699</BackgroundColor></Style></Textbox>`;
+    const rdl = `<Report><ReportSections><ReportSection><Body><ReportItems><Rectangle Name="Cell"><ReportItems>${line('Second', 'Amount', 0.174)}${line('First', 'Order', 0.056)}</ReportItems>${at(0, 0, 0.4, 1.2)}<Style /></Rectangle></ReportItems><Height>1in</Height></Body><Width>2in</Width></ReportSection></ReportSections></Report>`;
+    const styled = applyHouseStyle(rdl, readHouseStyle(JSON.stringify({ font: 'Tahoma' })));
+    assert.match(item(styled, 'Textbox', 'First'), /<Height>0\.271in<\/Height>/, 'the top line paints down to the last line\'s foot');
+    assert.match(item(styled, 'Textbox', 'Second'), /<BackgroundColor>Transparent<\/BackgroundColor>/);
+    assert.ok(styled.indexOf('Name="Second"') > styled.indexOf('Name="First"'), 'the line under it drawn over the band');
+  });
+
+  it('lays a title placed in the middle of a wide frame\'s top across the frame', () => {
+    const at = (t: number, l: number, h: number, w: number) => `<Top>${t}in</Top><Left>${l}in</Left><Height>${h}in</Height><Width>${w}in</Width>`;
+    const rdl = `<Report><ReportSections><ReportSection><Body><ReportItems><Rectangle Name="Frame"><ReportItems>
+      <Textbox Name="Title"><Paragraphs><Paragraph><TextRuns><TextRun><Value>=Fields!Name.Value</Value><Style /></TextRun></TextRuns></Paragraph></Paragraphs>${at(0, 0.46, 0.177, 9.7)}<Style><BackgroundColor>#336699</BackgroundColor></Style></Textbox>
+      </ReportItems>${at(0, 0, 2.5, 10.4)}<Style><Border><Style>Solid</Style></Border></Style></Rectangle></ReportItems><Height>3in</Height></Body><Width>10.5in</Width></ReportSection></ReportSections></Report>`;
+    const styled = applyHouseStyle(rdl, readHouseStyle(JSON.stringify({ font: 'Tahoma' })));
+    const title = item(styled, 'Textbox', 'Title');
+    assert.ok(/<Left>0in<\/Left>/.test(title) && /<Width>10\.4in<\/Width>/.test(title));
+  });
+
   it('leaves a heading that wraps onto two lines all its room (no strip under its band)', () => {
     const heading = (name: string, value: string, x: number, width: number) => ({ ...text(name, value, x, 8), style: { size: 8, bold: true }, font: 'Times New Roman', size: { width, height: 400 } });
     const definition: ReportDefinition = { ...emptyDefinition(), layout: [
@@ -242,6 +262,11 @@ describe('house style', () => {
     // Bars coloured one by one take the house palette too.
     assert.match(styled, /Dim palette\(\) As String = \{"#1F4E79", "#F2A541"\}/);
     assert.ok(!styled.includes('#D9D9D9'), 'the plot has the house background');
+    // A line chart keeps Crystal's line colours (a value in blue against its limit in red).
+    const lines = { ...definition, layout: [{ name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 3000, objects: [
+      { kind: 'chart' as const, name: 'Lines', position: { x: 0, y: 0 }, size: { width: 4000, height: 2800 }, chart: { family: 1, graphType: 13, values: ['Sum of Orders.Amount', 'Max of Orders.Amount'], onChangeOf: 'Orders.Name' } }] }] }] };
+    const lined = applyHouseStyle(convertToRdl(lines, source, { reportName: 'C' }).rdl, style);
+    assert.match(lined, /<ChartCustomPaletteColors>\s*<ChartCustomPaletteColor>#3E6A9E<\/ChartCustomPaletteColor>\s*<ChartCustomPaletteColor>#E02C2C<\/ChartCustomPaletteColor>/);
   });
 
   it('leaves out what the style does not set', () => {

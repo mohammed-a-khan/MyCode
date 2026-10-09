@@ -460,8 +460,13 @@ export function applyHouseStyle(rdl: string, style: HouseStyle): string {
   }
   if (style.chart?.palette) {
     const palette = style.chart.palette;
-    for (const colors of all.filter((e) => e.name === 'ChartCustomPaletteColors')) {
-      colors.children = palette.map((c) => el('ChartCustomPaletteColor', c));
+    // A line chart keeps Crystal's line colours: its lines tell values apart by them (one blue, the next red, as
+    // Crystal draws a value against its limit).
+    const lines = (chart: XmlElement) => descendants(chart).some((e) => e.name === 'ChartSeries' && textOf(child(e, 'Type')) === 'Line');
+    for (const chart of all.filter((e) => e.name === 'Chart' && !lines(e))) {
+      for (const colors of descendants(chart).filter((e) => e.name === 'ChartCustomPaletteColors')) {
+        colors.children = palette.map((c) => el('ChartCustomPaletteColor', c));
+      }
     }
     const code = all.find((e) => e.name === 'Code');
     if (code) {
@@ -610,7 +615,9 @@ export function applyHouseStyle(rdl: string, style: HouseStyle): string {
       ...(holder && isFrame(holder) ? [{ f: holder, inside: true }] : []),
     ];
     const frame = frames.map((x) => ({ ...x, fb: ownBox(x.f) }))
-      .filter(({ fb }) => within(b, fb) && b.top - fb.top <= 36 && b.left - fb.left <= 25 && fb.right - b.right <= 25 && (b.right - b.left) >= (fb.right - fb.left) * 0.6)
+      // (Its sides close to the frame's: within 25pt, or a twentieth of a wide frame.)
+      .filter(({ fb }) => within(b, fb) && b.top - fb.top <= 36 && b.left - fb.left <= Math.max(25, (fb.right - fb.left) / 20)
+        && fb.right - b.right <= Math.max(25, (fb.right - fb.left) / 20) && (b.right - b.left) >= (fb.right - fb.left) * 0.6)
       .sort((x, y) => (x.fb.right - x.fb.left) - (y.fb.right - y.fb.left))[0];
     if (!frame) continue;
     setChild(band, 'Top', frame.inside ? '0in' : textOf(child(frame.f, 'Top')));
@@ -782,6 +789,39 @@ export function applyHouseStyle(rdl: string, style: HouseStyle): string {
     if (height === undefined || parents.get(tb)?.name === 'CellContents') continue;
     const slack = slackOf(tb, height);
     if (slack > 0.5 && slack < height / 2) setChild(ownStyle(tb), 'VerticalAlign', 'Middle');
+  }
+
+  // A heading Crystal wrote as text objects one under another, a little overlapping (Crystal's text is transparent):
+  // painted, the one drawn last would cover the other's line. The top one paints the band down to the last line's
+  // foot, the lines under it are drawn over it without a fill of their own.
+  for (const holder of all.filter((e) => e.name === 'ReportItems')) {
+    const fillOf = (e: XmlElement) => textOf(child(ownStyle(e), 'BackgroundColor'));
+    const stacked = childElements(holder, 'Textbox').filter((e) => {
+      const fill = fillOf(e);
+      return !!fill && !fill.startsWith('=') && !/^transparent$/i.test(fill) && !/^(middle|bottom)$/i.test(textOf(child(ownStyle(e), 'VerticalAlign')));
+    }).sort((a, b) => len(a, 'Top') - len(b, 'Top'));
+    const merged = new Set<XmlElement>();
+    for (const upper of stacked) {
+      if (merged.has(upper)) continue;
+      const left = len(upper, 'Left');
+      const right = left + len(upper, 'Width');
+      let bottom = len(upper, 'Top') + len(upper, 'Height');
+      for (const lower of stacked) {
+        if (lower === upper || merged.has(lower) || fillOf(lower).toLowerCase() !== fillOf(upper).toLowerCase()) continue;
+        const top = len(lower, 'Top');
+        const overlap = Math.min(right, len(lower, 'Left') + len(lower, 'Width')) - Math.max(left, len(lower, 'Left'));
+        // (A line under it: starting half its height down at least; text beside it on the same line is not.)
+        if (top < len(upper, 'Top') + len(upper, 'Height') / 2 || top >= bottom - 0.5 || overlap < Math.min(right - left, len(lower, 'Width')) / 2) continue;
+        bottom = Math.max(bottom, top + len(lower, 'Height'));
+        setChild(ownStyle(lower), 'BackgroundColor', 'Transparent');
+        merged.add(lower);
+        // Drawn after the band.
+        holder.children = [...holder.children.filter((c) => c !== lower), lower];
+      }
+      if (bottom > len(upper, 'Top') + len(upper, 'Height')) {
+        setChild(upper, 'Height', inches(bottom - len(upper, 'Top')));
+      }
+    }
   }
 
   return toXml(root);
