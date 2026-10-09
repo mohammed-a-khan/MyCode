@@ -199,14 +199,15 @@ describe('house style', () => {
     assert.match(item(titled, 'Textbox', 'Heading'), /<BackgroundColor>=IIf\(Trim\(CStr\(Fields!Name\.Value\)\) = "", "Transparent", "#336699"\)<\/BackgroundColor>/);
   });
 
-  it('paints a heading written as lines one under another as one band, no line covering another', () => {
+  it('paints a heading written as lines one under another as one band, its lines as paragraphs', () => {
     const at = (t: number, l: number, h: number, w: number) => `<Top>${t}in</Top><Left>${l}in</Left><Height>${h}in</Height><Width>${w}in</Width>`;
     const line = (n: string, v: string, t: number) => `<Textbox Name="${n}"><Paragraphs><Paragraph><TextRuns><TextRun><Value>${v}</Value><Style /></TextRun></TextRuns></Paragraph></Paragraphs>${at(t, 0, 0.153, 1.2)}<Style><BackgroundColor>#336699</BackgroundColor></Style></Textbox>`;
     const rdl = `<Report><ReportSections><ReportSection><Body><ReportItems><Rectangle Name="Cell"><ReportItems>${line('Second', 'Amount', 0.174)}${line('First', 'Order', 0.056)}</ReportItems>${at(0, 0, 0.4, 1.2)}<Style /></Rectangle></ReportItems><Height>1in</Height></Body><Width>2in</Width></ReportSection></ReportSections></Report>`;
     const styled = applyHouseStyle(rdl, readHouseStyle(JSON.stringify({ font: 'Tahoma' })));
-    assert.match(item(styled, 'Textbox', 'First'), /<Height>0\.271in<\/Height>/, 'the top line paints down to the last line\'s foot');
-    assert.ok(!item(styled, 'Textbox', 'Second').includes('BackgroundColor'), 'no fill of its own (SSRS takes no fixed Transparent)');
-    assert.ok(styled.indexOf('Name="Second"') > styled.indexOf('Name="First"'), 'the line under it drawn over the band');
+    const first = item(styled, 'Textbox', 'First');
+    assert.match(first, /<Height>0\.271in<\/Height>/, 'the top line paints down to the last line\'s foot');
+    // The line under it a paragraph of the top one (SSRS would move overlapping items apart).
+    assert.ok(first.indexOf('<Value>Order</Value>') < first.indexOf('<Value>Amount</Value>') && !styled.includes('Name="Second"'));
   });
 
   it('lays a title placed in the middle of a wide frame\'s top across the frame', () => {
@@ -217,6 +218,9 @@ describe('house style', () => {
     const styled = applyHouseStyle(rdl, readHouseStyle(JSON.stringify({ font: 'Tahoma' })));
     const title = item(styled, 'Textbox', 'Title');
     assert.ok(/<Left>0in<\/Left>/.test(title) && /<Width>10\.4in<\/Width>/.test(title));
+    // A subreport's frame is designed as low as its section (it grows with what it holds): the title reaches past it.
+    const low = applyHouseStyle(rdl.replace(`${'<Height>2.5in</Height>'}`, '<Height>0.135in</Height>'), readHouseStyle(JSON.stringify({ font: 'Tahoma' })));
+    assert.match(item(low, 'Textbox', 'Title'), /<Left>0in<\/Left>[\s\S]*<Width>10\.4in<\/Width>/);
   });
 
   it('leaves a heading that wraps onto two lines all its room (no strip under its band)', () => {

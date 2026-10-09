@@ -1402,8 +1402,33 @@ export class Emitter {
     if (op === '%') return `((${l}) / (${r}) * 100)`;
     if (op === 'eqv') return `((${l}) = (${r}))`;
     if (op === 'imp') return `(Not (${l}) OrElse (${r}))`;
-    return `(${l} ${BINARY_VB[op]} ${r})`;
+    return this.nullWhereNull(op, l, r);
   }
+
+  /**
+   * Crystal stops at a null field it reaches, printing nothing for the formula: text joined to a null field, or
+   * arithmetic with one, gives nothing (SSRS would carry on with an empty value: "" & "%" printing "%"). Only where it
+   * is reached: a branch not taken (if ... then "----" else ...) is not.
+   */
+  private nullWhereNull(op: string, l: string, r: string): string {
+    const plain = `(${l} ${BINARY_VB[op]} ${r})`;
+    if (this.inCode || !['+', '-', '*', '/', '&'].includes(op)) return plain;
+    // A side already guarded joins on under one guard (a + b + c tests its fields once).
+    const unwrap = (side: string) => this.guarded.get(side) ?? { body: side, fields: [] as string[] };
+    const left = unwrap(l);
+    const right = unwrap(r);
+    const joined = `(${left.body} ${BINARY_VB[op]} ${right.body})`;
+    // (Not a field read by an aggregate, or tested for nulls in the formula.)
+    if (/\b(Sum|Count|CountDistinct|Avg|Min|Max|First|Last|RunningValue|Previous|IsNothing)\(/.test(joined)) return plain;
+    const fields = [...new Set([...left.fields, ...right.fields, ...(joined.match(/Fields!\w+\.Value/g) ?? [])])];
+    if (!fields.length) return plain;
+    const guard = `IIf(${fields.map((f) => `IsNothing(${f})`).join(' OrElse ')}, Nothing, ${joined})`;
+    this.guarded.set(guard, { body: joined, fields });
+    return guard;
+  }
+
+  /** Joins nullWhereNull guarded: what each joins, and the fields it tests. */
+  private readonly guarded = new Map<string, { body: string; fields: string[] }>();
 
   private emitCall(name: string, args: Node[]): string {
     const key = name.toLowerCase();

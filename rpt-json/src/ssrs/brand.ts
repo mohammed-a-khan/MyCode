@@ -616,7 +616,8 @@ export function applyHouseStyle(rdl: string, style: HouseStyle): string {
     ];
     const frame = frames.map((x) => ({ ...x, fb: ownBox(x.f) }))
       // (Its sides close to the frame's: within 25pt, or a twentieth of a wide frame.)
-      .filter(({ fb }) => within(b, fb) && b.top - fb.top <= 36 && b.left - fb.left <= Math.max(25, (fb.right - fb.left) / 20)
+      // (A subreport's frame is designed as low as its section and grows with what it holds: only its sides count.)
+      .filter(({ fb, inside }) => (inside ? b.left >= fb.left - 1 && b.right <= fb.right + 1 && b.top >= fb.top - 1 : within(b, fb)) && b.top - fb.top <= 36 && b.left - fb.left <= Math.max(25, (fb.right - fb.left) / 20)
         && fb.right - b.right <= Math.max(25, (fb.right - fb.left) / 20) && (b.right - b.left) >= (fb.right - fb.left) * 0.6)
       .sort((x, y) => (x.fb.right - x.fb.left) - (y.fb.right - y.fb.left))[0];
     if (!frame) continue;
@@ -792,8 +793,8 @@ export function applyHouseStyle(rdl: string, style: HouseStyle): string {
   }
 
   // A heading Crystal wrote as text objects one under another, a little overlapping (Crystal's text is transparent):
-  // painted, the one drawn last would cover the other's line. The top one paints the band down to the last line's
-  // foot, the lines under it are drawn over it without a fill of their own.
+  // painted, the one drawn last would cover the other's line, and SSRS moves overlapping items apart (a white line
+  // pushed off its band). The lines become paragraphs of the top one, which paints the band down to the last line.
   for (const holder of all.filter((e) => e.name === 'ReportItems')) {
     const fillOf = (e: XmlElement) => textOf(child(ownStyle(e), 'BackgroundColor'));
     const stacked = childElements(holder, 'Textbox').filter((e) => {
@@ -813,16 +814,14 @@ export function applyHouseStyle(rdl: string, style: HouseStyle): string {
         // (A line under it: starting half its height down at least; text beside it on the same line is not.)
         if (top < len(upper, 'Top') + len(upper, 'Height') / 2 || top >= bottom - 0.5 || overlap < Math.min(right - left, len(lower, 'Width')) / 2) continue;
         bottom = Math.max(bottom, top + len(lower, 'Height'));
-        // No fill of its own (SSRS takes no "Transparent" as a fixed colour: the fill is left out).
-        const own = ownStyle(lower);
-        own.children = own.children.filter((c) => !(typeof c === 'object' && c !== null && (c as XmlElement).name === 'BackgroundColor'));
+        const into = child(upper, 'Paragraphs');
+        const from = child(lower, 'Paragraphs');
+        if (!into || !from) continue;
+        into.children.push(...childElements(from, 'Paragraph'));
         merged.add(lower);
-        // Drawn after the band.
-        holder.children = [...holder.children.filter((c) => c !== lower), lower];
+        holder.children = holder.children.filter((c) => c !== lower);
       }
-      if (bottom > len(upper, 'Top') + len(upper, 'Height')) {
-        setChild(upper, 'Height', inches(bottom - len(upper, 'Top')));
-      }
+      if (bottom > len(upper, 'Top') + len(upper, 'Height')) setChild(upper, 'Height', inches(bottom - len(upper, 'Top')));
     }
   }
 
