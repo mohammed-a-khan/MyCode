@@ -181,6 +181,19 @@ describe('house style', () => {
     assert.equal(right(loose, 'Rectangle', 'Box'), 7.4);
   });
 
+  it('takes a table starting a little inside the rule to the rule\'s left end too, its text staying where it was', () => {
+    const at = (t: number, l: number, h: number, w: number) => `<Top>${t}in</Top><Left>${l}in</Left><Height>${h}in</Height><Width>${w}in</Width>`;
+    const cell = (v: string) => `<TablixCell><CellContents><Textbox Name="${v}"><Paragraphs><Paragraph><TextRuns><TextRun><Value>${v}</Value><Style /></TextRun></TextRuns><Style><TextAlign>Center</TextAlign></Style></Paragraph></Paragraphs><Style><PaddingLeft>2pt</PaddingLeft></Style></Textbox></CellContents></TablixCell>`;
+    const rdl = `<Report><ReportSections><ReportSection><Body><ReportItems><Tablix Name="Grid"><TablixBody><TablixColumns><TablixColumn><Width>1.5in</Width></TablixColumn><TablixColumn><Width>5.9in</Width></TablixColumn></TablixColumns>
+      <TablixRows><TablixRow><Height>0.2in</Height><TablixCells>${cell('Name')}${cell('Amount')}</TablixCells></TablixRow></TablixRows></TablixBody>${at(0, 0.5, 0.2, 7.4)}</Tablix></ReportItems><Height>1in</Height></Body><Width>8in</Width>
+      <Page><PageHeader><Height>0.5in</Height><ReportItems><Line Name="Rule">${at(0.4, 0, 0, 7.9)}<Style /></Line></ReportItems></PageHeader></Page></ReportSection></ReportSections></Report>`;
+    const styled = applyHouseStyle(rdl, readHouseStyle(JSON.stringify({ font: 'Tahoma' })));
+    const grid = item(styled, 'Tablix', 'Grid');
+    assert.match(grid.slice(grid.lastIndexOf('</TablixBody>')), /<Left>0in<\/Left>/, 'from the rule\'s left end');
+    assert.match(grid, /<TablixColumn>\s*<Width>2in<\/Width>/, 'its first column wider by as much');
+    assert.match(item(styled, 'Textbox', 'Name'), /<PaddingLeft>38pt<\/PaddingLeft>/, 'its text where it was');
+  });
+
   it('starts a chart below a painted title over its top, and colours a rule drawn as a bar in the house\'s line colour', () => {
     const at = (t: number, l: number, h: number, w: number) => `<Top>${t}in</Top><Left>${l}in</Left><Height>${h}in</Height><Width>${w}in</Width>`;
     const rdl = `<Report><ReportSections><ReportSection><Body><ReportItems>
