@@ -329,6 +329,8 @@ function padColumn(tablix: XmlElement, index: 'first' | 'last', amount: number):
     if (content.name === 'Textbox') {
       const own = ownStyle(content);
       const side = index === 'first' ? 'PaddingLeft' : 'PaddingRight';
+      // (A padding worked out per record, placing the text by a formula, is left to it.)
+      if (textOf(child(own, side)).startsWith('=')) continue;
       setChild(own, side, `${Math.round(((points(textOf(child(own, side))) ?? 2) + amount) * 10) / 10}pt`);
     } else if (content.name === 'Rectangle' && index === 'first') {
       for (const c of childElements(child(content, 'ReportItems') ?? el('ReportItems'))) {
@@ -391,6 +393,10 @@ export function applyHouseStyle(rdl: string, style: HouseStyle): string {
   for (const tablix of all.filter((e) => e.name === 'Tablix')) {
     const rows = childElements(child(tablix, 'TablixBody/TablixRows') ?? el('TablixRows'), 'TablixRow');
     const kinds = rowKinds(tablix);
+    // Lines placed record by record (Crystal's X position formulas: a statement's labels indented by their level) are
+    // a statement laid out in lines, not rows of a table: printed plain, as in Crystal.
+    const statement = rows.some((row, i) => kinds[i] === 'detail'
+      && descendants(row).some((e) => e.name === 'Textbox' && textOf(child(ownStyle(e), 'PaddingLeft')).startsWith('=')));
     rows.forEach((row, i) => {
       const cells = descendants(row).filter((e) => e.name === 'CellContents').flatMap((c) => childElements(c)).filter((e) => e.name === 'Textbox' || e.name === 'Rectangle');
       const inRow = cells.flatMap((c) => (c.name === 'Textbox' ? [c] : descendants(c).filter((e) => e.name === 'Textbox')));
@@ -398,7 +404,7 @@ export function applyHouseStyle(rdl: string, style: HouseStyle): string {
       if (kind === 'heading') paint(cells, inRow.some(isTitle) ? style.title : style.heading);
       else if (kind === 'groupHeading') paint(cells, style.groupHeading);
       else if (kind === 'total') paint(cells, style.total);
-      else if (kind === 'detail' && style.rowBands && (style.rowBands.odd || style.rowBands.even)) {
+      else if (kind === 'detail' && !statement && style.rowBands && (style.rowBands.odd || style.rowBands.even)) {
         const odd = style.rowBands.odd ?? 'Transparent';
         const even = style.rowBands.even ?? 'Transparent';
         for (const cell of cells) {
