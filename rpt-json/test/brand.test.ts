@@ -205,7 +205,7 @@ describe('house style', () => {
     const rdl = `<Report><ReportSections><ReportSection><Body><ReportItems><Rectangle Name="Cell"><ReportItems>${line('Second', 'Amount', 0.174)}${line('First', 'Order', 0.056)}</ReportItems>${at(0, 0, 0.4, 1.2)}<Style /></Rectangle></ReportItems><Height>1in</Height></Body><Width>2in</Width></ReportSection></ReportSections></Report>`;
     const styled = applyHouseStyle(rdl, readHouseStyle(JSON.stringify({ font: 'Tahoma' })));
     assert.match(item(styled, 'Textbox', 'First'), /<Height>0\.271in<\/Height>/, 'the top line paints down to the last line\'s foot');
-    assert.match(item(styled, 'Textbox', 'Second'), /<BackgroundColor>Transparent<\/BackgroundColor>/);
+    assert.ok(!item(styled, 'Textbox', 'Second').includes('BackgroundColor'), 'no fill of its own (SSRS takes no fixed Transparent)');
     assert.ok(styled.indexOf('Name="Second"') > styled.indexOf('Name="First"'), 'the line under it drawn over the band');
   });
 
