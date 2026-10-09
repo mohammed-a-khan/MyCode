@@ -1149,16 +1149,15 @@ class RdlBuilder {
       const row = framedRow.filter((other) => Math.abs(itemNumber(other, 'Top') - itemNumber(item, 'Top')) < 0.05);
       if (row.length < 2) continue;
       const tallest = Math.max(...row.map((other) => Math.max(itemNumber(other, 'Height'), this.contentHeights.get(other) ?? 0)));
-      if (tallest - itemNumber(item, 'Height') < 0.005) continue;
-      // With the empty frame drawn in its place where its own formula hides it.
-      const frame = items.find((other) => other.attributes.Name === `${item.attributes.Name}_Frame`);
-      for (const target of frame ? [item, frame] : [item]) {
-        target.children = target.children.map((c) => (typeof c === 'object' && c !== null && (c as XmlElement).name === 'Height' ? el('Height', inches(tallest)) : c));
+      if (tallest - itemNumber(item, 'Height') >= 0.005) {
+        // With the empty frame drawn in its place where its own formula hides it.
+        const frame = items.find((other) => other.attributes.Name === `${item.attributes.Name}_Frame`);
+        for (const target of frame ? [item, frame] : [item]) {
+          target.children = target.children.map((c) => (typeof c === 'object' && c !== null && (c as XmlElement).name === 'Height' ? el('Height', inches(tallest)) : c));
+        }
       }
-      // SSRS gives up the space of items hidden at a rectangle's foot: an empty mark there keeps the row's height.
-      const foot = el('Line', { Name: this.itemNames.make(`${item.attributes.Name}_RowFoot`) },
-        el('Top', inches(Math.max(0, tallest - 0.01))), el('Left', '0in'), el('Height', '0in'), el('Width', '0.01in'),
-        el('Style', el('Border', el('Style', 'None'))));
+      // An empty text at its foot keeps the row's height, whichever of its boxes has nothing to show.
+      const foot = footMark(this.itemNames.make(`${item.attributes.Name}_RowFoot`), tallest);
       const holder = child(item, 'ReportItems');
       if (holder) holder.children.push(foot);
       else item.children.unshift(el('ReportItems', foot));
@@ -1323,11 +1322,7 @@ class RdlBuilder {
     const height = mode === 'body' ? Math.max(box.height, room ?? 0, hidden ? 0 : fixed) : Math.max(box.height, result.height);
     // SSRS gives up the space of items hidden at a rectangle's foot: an empty mark at the foot of the sections
     // that always print keeps it.
-    const keep = mode === 'body' && fixed > 0
-      ? [el('Line', { Name: this.itemNames.make(`${obj.name || 'Subreport'}_Foot`) },
-        el('Top', inches(Math.max(0, fixed - 0.01))), el('Left', '0in'), el('Height', '0in'), el('Width', '0.01in'),
-        el('Style', el('Border', el('Style', 'None'))))]
-      : [];
+    const keep = mode === 'body' && fixed > 0 ? [footMark(this.itemNames.make(`${obj.name || 'Subreport'}_Foot`), fixed)] : [];
     // Crystal clips a subreport's content to the subreport object's frame: items reaching past it are trimmed to it
     // (otherwise the frame would grow, possibly past the page's edge).
     const fitted = result.width > box.width + 0.001 ? fitWidth(result.items, box.width) : result.items;
@@ -1696,10 +1691,11 @@ class RdlBuilder {
       // Crystal angles bar charts' category labels; a line chart's dates are staggered on two rows where they do
       // not fit on one (SSRS may offset them, but neither turn nor resize them).
       // As the chart's look has them: angled; or flat where they fit side by side. A bar chart's are turned (up to
-      // upright, for long names) where they do not, at their size; a line chart's dates stay on one row, made smaller.
+      // upright, for long names) where they do not, at their size; a line chart's dates are never turned (staggered,
+      // or made smaller, where they do not fit).
       kind === 'category' && angled ? el('Angle', '-45') : null,
       kind === 'category' && turned ? el('Angle', turned) : null,
-      ...(kind === 'category' && flat && !turned ? [el('PreventFontGrow', 'true'), el('PreventLabelOffset', 'true'), el('PreventWordWrap', 'true'),
+      ...(kind === 'category' && flat && !turned ? [el('PreventFontGrow', 'true'), isLine ? null : el('PreventLabelOffset', 'true'), el('PreventWordWrap', 'true'),
         ...(isLine ? [el('AllowLabelRotation', 'None'), el('MinFontSize', '5pt')] : [el('PreventFontShrink', 'true'), el('AllowLabelRotation', 'Rotate90')])] : []),
       // SSRS would otherwise resize axis text to fit (up to 10pt); Crystal keeps its size.
       el('LabelsAutoFitDisabled', kind === 'category' && flat && !turned ? 'false' : 'true'),
@@ -4463,6 +4459,19 @@ function clearLineOverlaps(items: XmlElement[]): XmlElement[] {
  * border): Crystal's print shows one line between them; SSRS would draw two lines a few hundredths of an inch
  * apart, reading as one thick line. The second box moves up to the first and leaves that side to it.
  */
+/**
+ * An empty text ending at a rectangle's foot: SSRS keeps a rectangle down to its last item that shows, so items hidden
+ * at its foot (a chart without data) would otherwise take its height with them. (A line without a border is not
+ * counted; an empty text is.)
+ */
+function footMark(name: string, foot: number): XmlElement {
+  return el('Textbox', { Name: name },
+    el('CanGrow', 'false'), el('KeepTogether', 'true'),
+    el('Paragraphs', el('Paragraph', el('TextRuns', el('TextRun', el('Value'), el('Style'))), el('Style'))),
+    el('Top', inches(Math.max(0, foot - 0.02))), el('Left', '0in'), el('Height', '0.01in'), el('Width', '0.01in'),
+    el('Style', el('Border', el('Style', 'None'))));
+}
+
 /** Whether a formula can hide an item. */
 function canHide(item: XmlElement): boolean {
   const visibility = child(item, 'Visibility');

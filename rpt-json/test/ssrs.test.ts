@@ -534,7 +534,7 @@ describe('layout conversion', () => {
     // The shown one grows to its own sections (3000 twips from 40); the one that may be hidden ends with the section.
     assert.ok(Math.abs(top('Textbox', 'Footnote') - (top('Rectangle', 'Shown') + 3000 / 1440)) < 0.01, 'the note follows the shown subreport');
     assert.ok(Math.abs(top('Rectangle', 'Optional') + height - top('Rectangle', 'Shown') - 2760 / 1440) < 0.01, 'the one a formula hides ends with its section');
-    assert.match(rdl, /<Rectangle Name="Optional">[\s\S]*?<Line Name="Optional_Foot">\s*<Top>2\.07\d*in/, 'shown, it still grows to its own sections');
+    assert.match(rdl, /<Rectangle Name="Optional">[\s\S]*?<Textbox Name="Optional_Foot">[\s\S]*?<Top>2\.06\d*in/, 'shown, it still grows to its own sections');
   });
 
   it('prints a group\'s blank section as blank space (a gap after its last row), unless it is suppressed where blank', () => {
@@ -564,8 +564,8 @@ describe('layout conversion', () => {
     // The right one's sections may not print (a chart without data): its frame still reaches the row's foot.
     assert.equal(height('Right'), height('Left'));
     // SSRS would give up the space of its hidden items: an empty mark at the row's foot keeps it.
-    const foot = /<Line Name="Right_RowFoot">\s*<Top>([\d.]+)in<\/Top>/.exec(rdl);
-    assert.ok(foot && Math.abs(Number(foot[1]) + 0.01 - parseFloat(height('Left'))) < 0.002);
+    const foot = /<Textbox Name="Right_RowFoot">[\s\S]*?<Top>([\d.]+)in<\/Top>/.exec(rdl);
+    assert.ok(foot && Math.abs(Number(foot[1]) + 0.02 - parseFloat(height('Left'))) < 0.002);
   });
 
   it('draws the empty frame of a bordered subreport its own formula hides', () => {
