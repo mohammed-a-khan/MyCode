@@ -656,7 +656,13 @@ class RdlBuilder {
       result = `(${expression})`;
     } else {
       const fieldName = this.fieldNames.make(`F_${formula.name}`);
-      this.calculated.push({ name: fieldName, expression: t.expression });
+      // Crystal prints nothing for a formula reading a null field (unless it tests for nulls itself): SSRS would
+      // carry on with an empty value ("" & "%" printing "%").
+      const read = [...new Set(expression.match(/Fields!\w+\.Value/g) ?? [])];
+      const guarded = !t.code && read.length && !/\b(isnull|hasvalue|previousisnull|nextisnull)\b/i.test(formula.text)
+        ? `=IIf(${read.map((f) => `IsNothing(${f})`).join(' OrElse ')}, Nothing, ${expression})`
+        : t.expression;
+      this.calculated.push({ name: fieldName, expression: guarded });
       result = `Fields!${fieldName}.Value`;
     }
     this.formulaResults.set(key, result);
@@ -1672,14 +1678,15 @@ class RdlBuilder {
       : raw ? `=${fit(factor)}` : 'NaN';
     const angled = style.type !== 'Shape' && !isLine && chart.look === 1;
     const flat = style.type !== 'Shape' && !angled;
-    // Crystal lays a bar chart's category labels flat where they fit side by side, angles them where each still has
-    // room at 45 degrees, and turns them upright where even that would overlap (about 0.04in a character, 0.13in a
-    // label at 45 degrees, at 5.5pt, over the plot without its value axis).
+    // Crystal lays a bar chart's category labels flat where they fit side by side, upright where at 45 degrees each
+    // would reach across more than three bars (long names under narrow bars), and at 45 degrees otherwise (about
+    // 0.04in a character at 5.5pt, over the plot without its value axis).
     const turned = flat && style.type === 'Column' && categoryExpression && categoryExpression !== 'Nothing'
       ? (() => {
         const n = `CountDistinct(${categoryExpression})`;
         const slot = `${Math.max(0.5, box.width - 0.6).toFixed(2)} / IIf(${n} < 1, 1, ${n})`;
-        return `=IIf(Max(Len(CStr(${categoryExpression}))) * 0.04 + 0.04 <= ${slot}, 0, IIf(${slot} >= 0.13, -45, -90))`;
+        const length = `Max(Len(CStr(${categoryExpression}))) * 0.04`;
+        return `=IIf(${length} + 0.04 <= ${slot}, 0, IIf(${length} * 0.71 > 3 * ${slot}, -90, -45))`;
       })()
       : undefined;
     const axis = (title: string | undefined, kind: 'category' | 'value', format?: string) => el('ChartAxis', { Name: 'Primary' },
@@ -1687,7 +1694,9 @@ class RdlBuilder {
       el('Style', el('FontFamily', 'Arial'), el('FontSize', '5.5pt'), el('FontWeight', 'Normal'), format ? el('Format', format) : null),
       el('ChartAxisTitle', el('Caption', title ?? ''), el('Style', el('FontFamily', 'Arial'), el('FontSize', '5.5pt'), el('FontWeight', 'Normal'))),
       // Crystal's single bar: six steps from 0.4 to 1.6 times its value (every 20% for 100%).
-      kind === 'category' ? el('Interval', '1') : (single || raw) && kind === 'value' ? el('Interval', scaled(0.2)) : null,
+      // An axis set by hand in Crystal: from 0 to its top, in five steps.
+      kind === 'category' ? el('Interval', '1') : chart.valueMax ? el('Interval', String(chart.valueMax / 5))
+        : (single || raw) && kind === 'value' ? el('Interval', scaled(0.2)) : null,
       // Crystal angles bar charts' category labels; a line chart's dates are staggered on two rows where they do
       // not fit on one (SSRS may offset them, but neither turn nor resize them).
       // As the chart's look has them: angled; or flat where they fit side by side. A bar chart's are turned (up to
@@ -1705,7 +1714,8 @@ class RdlBuilder {
       el('CrossAt', 'NaN'),
       // Crystal fits the value axis to the values (bars too: 1.00% to 1.40%, not from zero).
       kind === 'value' && !isPie ? el('IncludeZero', 'false') : null,
-      el('Minimum', kind === 'value' ? scaled(0.4) : 'NaN'), el('Maximum', kind === 'value' ? scaled(1.6) : 'NaN'),
+      el('Minimum', kind === 'value' ? (chart.valueMax ? '0' : scaled(0.4)) : 'NaN'),
+      el('Maximum', kind === 'value' ? (chart.valueMax ? String(chart.valueMax) : scaled(1.6)) : 'NaN'),
       el('ChartAxisScaleBreak', el('Style')));
     // One value over categories, as bars: Crystal gives each bar its own colour, in its palette's order (SSRS
     // would colour the whole series alike), and shows no legend for it.
@@ -4460,15 +4470,15 @@ function clearLineOverlaps(items: XmlElement[]): XmlElement[] {
  * apart, reading as one thick line. The second box moves up to the first and leaves that side to it.
  */
 /**
- * An empty text ending at a rectangle's foot: SSRS keeps a rectangle down to its last item that shows, so items hidden
- * at its foot (a chart without data) would otherwise take its height with them. (A line without a border is not
- * counted; an empty text is.)
+ * An empty text from a rectangle's top down to its foot: SSRS keeps a rectangle down to its last item that shows, and
+ * moves what lies under a hidden item up by its height, so a chart without data (hidden) would take the rectangle's
+ * height with it, a mark under it too. Running down from the top, beside what is in it, nothing moves it.
  */
 function footMark(name: string, foot: number): XmlElement {
   return el('Textbox', { Name: name },
     el('CanGrow', 'false'), el('KeepTogether', 'true'),
     el('Paragraphs', el('Paragraph', el('TextRuns', el('TextRun', el('Value'), el('Style'))), el('Style'))),
-    el('Top', inches(Math.max(0, foot - 0.02))), el('Left', '0in'), el('Height', '0.01in'), el('Width', '0.01in'),
+    el('Top', '0in'), el('Left', '0in'), el('Height', inches(Math.max(0.01, foot - 0.01))), el('Width', '0.01in'),
     el('Style', el('Border', el('Style', 'None'))));
 }
 

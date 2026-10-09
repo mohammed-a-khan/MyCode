@@ -205,6 +205,8 @@ export interface ChartInfo {
    * inside, in whole numbers; 2 and 3 keep the labels flat, the bars half their category's width, labelled above.
    */
   look?: number;
+  /** The value axis's top, where it is set by hand (Chart Options, Axes: 0 to this, in five steps). */
+  valueMax?: number;
 }
 
 /** A number format of a field (Crystal's Format Editor, Number tab). */
@@ -773,14 +775,24 @@ export function chartStyleTail(bytes: Uint8Array): boolean {
   return !!text && 'text' in text && text.text === '' && !!last && 'bytes' in last && last.bytes.length === 5 && last.bytes.every((x) => x === 0);
 }
 
-export function chartOptions(bytes: Uint8Array): Pick<ChartInfo, 'legend' | 'dataLabels' | 'look'> {
+export function chartOptions(bytes: Uint8Array): Pick<ChartInfo, 'legend' | 'dataLabels' | 'look' | 'valueMax'> {
   const tokens = tokenize(bytes);
   const runs = tokens.filter((t): t is { bytes: Uint8Array } => 'bytes' in t);
-  const out: Pick<ChartInfo, 'legend' | 'dataLabels' | 'look'> = {};
+  const out: Pick<ChartInfo, 'legend' | 'dataLabels' | 'look' | 'valueMax'> = {};
   const options = runs[0]?.bytes;
   if (!options || options.length < 3) return out;
   out.legend = { visible: options[1] === 1, position: options[2] };
   if (options.length > 5) out.look = options[5];
+  // A value axis set by hand keeps its top among the options' numbers (big-endian doubles after the twelfth byte): a
+  // whole number of a thousand or more (the smaller ones there are sizes and percentages of the chart's own).
+  for (let at = 11; at + 8 <= Math.min(options.length, 35); at++) {
+    if (options[at] < 0x40 || options[at] > 0x43 || options[at + 4] || options[at + 5] || options[at + 6] || options[at + 7]) continue;
+    const value = new DataView(options.buffer, options.byteOffset + at, 8).getFloat64(0, false);
+    if (Number.isInteger(value) && value >= 1000 && value < 1e15) {
+      out.valueMax = value;
+      break;
+    }
+  }
   // The data labels follow the options (after an empty text): the 00 00 01 marker, the kind and the list format. A
   // format of the chart's own follows as a text: after the marker and the kind, or after a lone 00 (no labels).
   const first = tokens.findIndex((t) => 'bytes' in t);

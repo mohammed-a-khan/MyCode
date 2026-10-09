@@ -534,7 +534,7 @@ describe('layout conversion', () => {
     // The shown one grows to its own sections (3000 twips from 40); the one that may be hidden ends with the section.
     assert.ok(Math.abs(top('Textbox', 'Footnote') - (top('Rectangle', 'Shown') + 3000 / 1440)) < 0.01, 'the note follows the shown subreport');
     assert.ok(Math.abs(top('Rectangle', 'Optional') + height - top('Rectangle', 'Shown') - 2760 / 1440) < 0.01, 'the one a formula hides ends with its section');
-    assert.match(rdl, /<Rectangle Name="Optional">[\s\S]*?<Textbox Name="Optional_Foot">[\s\S]*?<Top>2\.06\d*in/, 'shown, it still grows to its own sections');
+    assert.match(rdl, /<Rectangle Name="Optional">[\s\S]*?<Textbox Name="Optional_Foot">[\s\S]*?<Top>0in<\/Top>\s*<Left>0in<\/Left>\s*<Height>2\.07\d*in/, 'shown, it still grows to its own sections (a mark from its top, which nothing hidden above it moves)');
   });
 
   it('prints a group\'s blank section as blank space (a gap after its last row), unless it is suppressed where blank', () => {
@@ -564,8 +564,9 @@ describe('layout conversion', () => {
     // The right one's sections may not print (a chart without data): its frame still reaches the row's foot.
     assert.equal(height('Right'), height('Left'));
     // SSRS would give up the space of its hidden items: an empty mark at the row's foot keeps it.
-    const foot = /<Textbox Name="Right_RowFoot">[\s\S]*?<Top>([\d.]+)in<\/Top>/.exec(rdl);
-    assert.ok(foot && Math.abs(Number(foot[1]) + 0.02 - parseFloat(height('Left'))) < 0.002);
+    // (From its top: SSRS moves what lies under a hidden item up.)
+    const foot = /<Textbox Name="Right_RowFoot">[\s\S]*?<Top>0in<\/Top>\s*<Left>0in<\/Left>\s*<Height>([\d.]+)in<\/Height>/.exec(rdl);
+    assert.ok(foot && Math.abs(Number(foot[1]) + 0.01 - parseFloat(height('Left'))) < 0.002);
   });
 
   it('draws the empty frame of a bordered subreport its own formula hides', () => {
@@ -1146,10 +1147,22 @@ describe('joins, dates and custom function coverage', () => {
     assert.ok(rdl.includes('FROM [dbo].[Customer] AS [Customer]\nLEFT OUTER JOIN [dbo].[Orders] AS [Orders] ON [Customer].[Customer ID] = [Orders].[Customer ID]'));
     assert.ok(rdl.includes('LEAD([Orders].[Amount]) OVER (ORDER BY (SELECT NULL)) AS [Next_Amount]'));
     assert.ok(rdl.includes('WHERE ([Orders].[Order Date] &gt;= DATEADD(month, -1, DATEFROMPARTS('));
-    assert.ok(rdl.includes('<Value>=DateDiff("d", Fields!Order_Date.Value, Fields!Ship_Date.Value)</Value>'));
-    assert.ok(rdl.includes('<Value>=DateAdd("d", (30), Fields!Order_Date.Value)</Value>'));
-    assert.ok(rdl.includes('<Value>=IIf((Fields!Amount.Value &gt; 100), "Big", "")</Value>'), 'Crystal default for a string');
+    // Empty where a field it reads is null, as Crystal prints such a formula.
+    assert.ok(rdl.includes('<Value>=IIf(IsNothing(Fields!Order_Date.Value) OrElse IsNothing(Fields!Ship_Date.Value), Nothing, DateDiff("d", Fields!Order_Date.Value, Fields!Ship_Date.Value))</Value>'));
+    assert.ok(rdl.includes('<Value>=IIf(IsNothing(Fields!Order_Date.Value), Nothing, DateAdd("d", (30), Fields!Order_Date.Value))</Value>'));
+    assert.ok(rdl.includes('<Value>=IIf(IsNothing(Fields!Amount.Value), Nothing, IIf((Fields!Amount.Value &gt; 100), "Big", ""))</Value>'), 'Crystal default for a string');
     assert.ok(review.some((r) => r.item === 'Next(Orders.Amount)'));
+  });
+
+  it('prints nothing for a formula reading a null field, as Crystal does, unless the formula tests for nulls', () => {
+    const definition: ReportDefinition = {
+      ...emptyDefinition(),
+      formulas: [formula('Rate', 'ToText({Orders.Amount}, 2) + "%"'), formula('Safe', 'if IsNull({Orders.Amount}) then "-" else ToText({Orders.Amount}, 2)')],
+      layout: detailLayout('Customer.Name', '@Rate', '@Safe'),
+    };
+    const { rdl } = convertToRdl(definition, source, { reportName: 'Nulls' });
+    assert.match(rdl, /<Field Name="F_Rate">\s*<Value>=IIf\(IsNothing\(Fields!Amount\.Value\), Nothing, [^<]*"%"\)\)<\/Value>/, 'not a lone "%"');
+    assert.match(rdl, /<Field Name="F_Safe">\s*<Value>=IIf\(IsNothing\(Fields!Amount\.Value\), "-"/, 'a formula testing for nulls itself is left as it is');
   });
 
   it('converts Select statements, WeekDay constants and hoists declarations', () => {
@@ -1967,6 +1980,13 @@ describe('chart options', () => {
     // No labels, but a format of its own (for the axis): a lone 00, then the format.
     const lone = bytes('Title', [0, 1, 2, 0, 1, 3, 2, 9, 0, 0, 2, 0], '', [0], '0.00%', [0, 0, 0, 0, 0, 0, 0, 0]);
     assert.deepEqual(chartOptions(lone).dataLabels, { kind: 0, format: -1, custom: '0.00%' });
+    // A value axis set by hand (0 to 10,000,000): its top among the options' numbers; a chart's own sizes are not.
+    const axis = bytes('Title', [0, 1, 2, 0, 1, 2, 2, 1, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0x41, 0x63, 0x12, 0xd0, 0, 0, 0, 0, 0, 0, 0, 0], '', [0, 0, 1, 0, 2], '#,##0', [0]);
+    assert.equal(chartOptions(axis).valueMax, 10000000);
+    const sized = bytes('Title', [0, 0, 0, 0, 1, 2, 2, 1, 0, 0, 2, 0, 0x40, 0x54, 0, 0, 0, 0, 0, 0, 4, 7, 0x40, 0, 0, 0, 0, 0, 0, 0], '', [0, 0, 1, 0, 2, 7]);
+    assert.equal(chartOptions(sized).valueMax, undefined);
+    const { rdl } = convertToRdl(chartReport({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 0, graphType: 0, valueMax: 10000000 } as ChartInfo), source, { reportName: 'C', subreport: true });
+    assert.match(rdl, /<ChartValueAxes>[\s\S]*?<Interval>2000000<\/Interval>[\s\S]*?<Minimum>0<\/Minimum>\s*<Maximum>10000000<\/Maximum>/, 'from 0 to its top in five steps');
   });
   const source: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Label', type: 'string' }, { name: 'Share', type: 'number' }] }] };
   const chartReport = (chart: ChartInfo): ReportDefinition => ({ ...emptyDefinition(), layout: [
@@ -2051,7 +2071,7 @@ describe('chart options', () => {
     const rdl = (chart: ChartInfo) => convertToRdl(chartReport(chart), source, { reportName: 'C', subreport: true }).rdl;
     const flat = rdl({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', series: 'T.Label', family: 0, graphType: 0, look: 2, dataLabels: { kind: 2, format: 7 } } as ChartInfo);
     const angled = rdl({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', series: 'T.Label', family: 0, graphType: 0, look: 1, dataLabels: { kind: 2, format: 7 } } as ChartInfo);
-    assert.ok(!flat.includes('<Angle>-45</Angle>') && /<Angle>=IIf\(Max\(Len\(CStr\(Fields!Label\.Value\)\)\) \* 0\.04 \+ 0\.04 &lt;= [\d.]+ \/ IIf\(CountDistinct\(Fields!Label\.Value\) &lt; 1, 1, CountDistinct\(Fields!Label\.Value\)\), 0, IIf\([^<]*&gt;= 0\.13, -45, -90\)\)<\/Angle>/.test(flat), 'flat where they fit, angled, or upright where they would overlap');
+    assert.ok(!flat.includes('<Angle>-45</Angle>') && /<Angle>=IIf\(Max\(Len\(CStr\(Fields!Label\.Value\)\)\) \* 0\.04 \+ 0\.04 &lt;= [\d.]+ \/ IIf\(CountDistinct\(Fields!Label\.Value\) &lt; 1, 1, CountDistinct\(Fields!Label\.Value\)\), 0, IIf\(Max\(Len\(CStr\(Fields!Label\.Value\)\)\) \* 0\.04 \* 0\.71 &gt; 3 \* [^<]*, -90, -45\)\)<\/Angle>/.test(flat), 'flat where they fit, upright where at 45 degrees they would reach across more than three bars, angled otherwise');
     const line = rdl({ values: ['Sum of T.Share'], onChangeOf: 'T.Label', family: 1, graphType: 13, look: 3 } as ChartInfo);
     assert.ok(line.includes('<AllowLabelRotation>None</AllowLabelRotation>') && line.includes('<MinFontSize>5pt</MinFontSize>'), 'a line chart\'s dates on one row, smaller where they do not fit');
     assert.ok(angled.includes('<Angle>-45</Angle>'));

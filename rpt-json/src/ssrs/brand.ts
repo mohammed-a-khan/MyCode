@@ -813,7 +813,9 @@ export function applyHouseStyle(rdl: string, style: HouseStyle): string {
         // (A line under it: starting half its height down at least; text beside it on the same line is not.)
         if (top < len(upper, 'Top') + len(upper, 'Height') / 2 || top >= bottom - 0.5 || overlap < Math.min(right - left, len(lower, 'Width')) / 2) continue;
         bottom = Math.max(bottom, top + len(lower, 'Height'));
-        setChild(ownStyle(lower), 'BackgroundColor', 'Transparent');
+        // No fill of its own (SSRS takes no "Transparent" as a fixed colour: the fill is left out).
+        const own = ownStyle(lower);
+        own.children = own.children.filter((c) => !(typeof c === 'object' && c !== null && (c as XmlElement).name === 'BackgroundColor'));
         merged.add(lower);
         // Drawn after the band.
         holder.children = [...holder.children.filter((c) => c !== lower), lower];
