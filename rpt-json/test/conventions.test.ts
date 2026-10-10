@@ -91,7 +91,7 @@ describe('conventions', () => {
     assert.equal(first.attributes.Name, 'Orders_Heading_Title');
     assert.equal(textOf(descendants(rows[0]!).find((e) => e.name === 'ColSpan')), '2', 'the title spans every column');
     const empty = byName(root, 'Orders_Grid_1_Empty_Message');
-    assert.equal(valueIn(empty), '="No Orders by Region for this period"');
+    assert.equal(valueIn(empty), 'No Orders by Region for this period', 'plain text, readable in the designer');
     assert.ok(rdl.includes('<Hidden>=CountRows() &gt; 0</Hidden>'), 'shown only without data');
     const last = descendants(rows[rows.length - 1]!).filter((e) => e.name === 'Textbox').map((t) => t.attributes.Name);
     assert.deepEqual(last, ['Orders_Grid_1_AllLbl', 'Orders_Grid_1_Amount_AllVal']);
@@ -208,6 +208,18 @@ describe('conventions', () => {
     const tablix = descendants(r).find((e) => e.name === 'Tablix')!;
     const leaves = (m: XmlElement): number => (child(m, 'TablixMembers') ? childElements(child(m, 'TablixMembers')!, 'TablixMember').reduce((a, x) => a + leaves(x), 0) : 1);
     assert.equal(childElements(child(tablix, 'TablixRowHierarchy/TablixMembers')!, 'TablixMember').reduce((a, x) => a + leaves(x), 0), childElements(child(tablix, 'TablixBody/TablixRows')!, 'TablixRow').length);
+  });
+
+  it('takes a short name for the report, and lifts tables out of plain frames', () => {
+    const plain = converted().replace(/<Tablix Name="([^"]+)">([\s\S]*?)<\/Tablix>/, (m) => `<Rectangle Name="Frame"><ReportItems>${m}</ReportItems><KeepTogether>true</KeepTogether><Top>0in</Top><Left>0.1in</Left><Height>0.5in</Height><Width>6in</Width><Style><Border><Style>None</Style></Border></Style></Rectangle>`);
+    const out = applyConventions(plain, 'Orders', readConventions(JSON.stringify({ names: { table: '{S}_Grid_{n}', rect: '{S}_Box_{n}' }, prefixes: { orders: 'Ord' } })));
+    const r = parseXml(out.rdl);
+    const tablix = descendants(r).find((e) => e.name === 'Tablix')!;
+    assert.equal(tablix.attributes.Name, 'Ord_Grid_1');
+    const wrapper = childElements(child(descendants(r).find((e) => e.name === 'Body')!, 'ReportItems')!)[0]!;
+    assert.ok(childElements(child(wrapper, 'ReportItems')!).includes(tablix), 'the table sits straight in the report\'s box');
+    assert.ok(!byName(r, 'Frame'));
+    assert.equal(applyConventions(converted(), 'Orders', conventions, 'Short').rdl.includes('Short_Grid_1'), true);
   });
 
   it('rejects unknown entries', () => {
