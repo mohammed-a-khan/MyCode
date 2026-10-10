@@ -525,7 +525,10 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       bandRows.push(row);
       const repeat = leaves0[0]?.kind === 'heading' && textOf(child(leaves0[0].member, 'RepeatOnNewPage')) === 'true';
       child(tablix, 'TablixRowHierarchy/TablixMembers')!.children.unshift(el('TablixMember', el('KeepWithGroup', 'After'), repeat ? el('RepeatOnNewPage', 'true') : null));
+      const oldBottom = len(tablix, 'Top') + len(tablix, 'Height');
       setChild(tablix, 'Height', inch(len(tablix, 'Height') + height));
+      // What lies under the table (a rule, the next table) moves down as far.
+      if (container) moveBelow(container, tablix, oldBottom, height, tLeft, tLeft + tWidth);
       headerTitle = undefined;
     }
 
@@ -615,11 +618,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       const oldBottom = len(tablix, 'Top') + len(tablix, 'Height');
       setChild(tablix, 'Height', inch(len(tablix, 'Height') + 0.2));
       // What lies under the table moves down as far (the row is hidden when there is data; then all moves back up).
-      if (container) {
-        for (const e of childElements(container).filter((x) => ITEMS.has(x.name) && x !== tablix)) {
-          if (len(e, 'Top') >= oldBottom - 0.001 && len(e, 'Left') < tLeft + tWidth && len(e, 'Left') + len(e, 'Width') > tLeft) setChild(e, 'Top', inch(len(e, 'Top') + 0.2));
-        }
-      }
+      if (container) moveBelow(container, tablix, oldBottom, 0.2, tLeft, tLeft + tWidth);
     }
 
     // Column names: the field each column shows in its data row, else its heading.
@@ -783,8 +782,11 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
   // table, a row holding a box, a row of text drawn shorter than its text) is drawn at its full size, and what lies
   // under it moves down as far, so nothing overlaps in the designer and the printed report stays the same.
   if (body) {
-    unwrapPlain(child(body, 'ReportItems'));
     minTextRow = conv.style ? MIN_TEXT_ROW : 0;
+    // First every box as tall as what it holds (moving what lies under it), then the plain ones give way to what they
+    // hold: lifted out, each table keeps the place the grown boxes give it.
+    fitItems(child(body, 'ReportItems'));
+    unwrapPlain(child(body, 'ReportItems'));
     const bottom = fitItems(child(body, 'ReportItems'));
     if (bottom > len(body, 'Height')) setChild(body, 'Height', inch(bottom));
   }
@@ -868,8 +870,19 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     if (v !== t) e.children = [v];
   }
   dropUnused(report, conv, review);
-  // Custom code is part of this report alone.
+  // What a combined report takes from each template is its box and its datasets: what else this one still needs is
+  // listed, to be added where the reports are combined (or taken out).
   if (child(report, 'Code')) review.push({ item: 'Custom code', message: 'the report uses custom code (Code.*); where reports are combined, its functions must go with it' });
+  if (conv.parameters.length) {
+    for (const p of childElements(child(report, 'ReportParameters') ?? el('x'), 'ReportParameter')) {
+      const name = p.attributes.Name ?? '';
+      if (!conv.parameters.some((s) => s.name.toLowerCase() === name.toLowerCase())) {
+        review.push({ item: `Parameter ${name}`, message: 'not one of the standard parameters: where reports are combined it must be added there, or its value passed another way' });
+      }
+    }
+  }
+  const pictures = childElements(child(report, 'EmbeddedImages') ?? el('x'), 'EmbeddedImage').map((i) => i.attributes.Name);
+  if (pictures.length) review.push({ item: 'Pictures', message: `the report shows embedded pictures (${pictures.join(', ')}): where reports are combined they must be embedded there too` });
 
   // Notes the conversion made that no longer apply (the shared data source replaces the connection).
   return { rdl: toXml(root), review, settled: conv.dataSource ? ['Data source'] : [] };
@@ -919,6 +932,13 @@ function fitTablix(tablix: XmlElement): number {
   }
   if (grown) setChild(tablix, 'Height', inch(len(tablix, 'Height') + grown));
   return grown;
+}
+
+/** What lies under an item that grew (from its old bottom, across part of its width) moves down by as far. */
+function moveBelow(container: XmlElement, item: XmlElement, oldBottom: number, by: number, left: number, right: number): void {
+  for (const e of childElements(container).filter((x) => ITEMS.has(x.name) && x !== item)) {
+    if (len(e, 'Top') >= oldBottom - 0.001 && len(e, 'Left') < right && len(e, 'Left') + len(e, 'Width') > left) setChild(e, 'Top', inch(len(e, 'Top') + by));
+  }
 }
 
 /** The least height of a row of text whose size the style dataset gives (inches). */
@@ -1082,6 +1102,10 @@ function applyStyleRoles(report: XmlElement, style: NonNullable<Conventions['sty
         const current = textOf(child(s, prop));
         // A colour Crystal works out by a formula, or prints in red, is kept.
         if (prop === 'Color' && (current.startsWith('=') || isRed(current))) continue;
+        // So is a weight Crystal works out by a formula (a statement's bold lines), and bold text in a table's data or
+        // in plain text (Crystal's emphasis), where the role's weight would lose it.
+        if (prop === 'FontWeight' && (current.startsWith('=')
+          || (/^(semibold|bold|extrabold|heavy)$/i.test(current) && ['body', 'bodyFirst', 'number', 'text', 'footer'].includes(roleKey)))) continue;
         setChild(s, prop, `=${expr(field(role, word))}`);
       }
     }

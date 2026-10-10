@@ -152,7 +152,13 @@ describe('conventions', () => {
       + `<Value>${value}</Value><Style><FontSize>${size}</FontSize></Style></TextRun></TextRuns><Style /></Paragraph></Paragraphs>`
       + `<Top>0in</Top><Left>0in</Left><Height>0.25in</Height><Width>3in</Width><Style /></Textbox>`;
     const header = `<PageHeader><Height>0.5in</Height><PrintOnFirstPage>true</PrintOnFirstPage><ReportItems>${box('Heading', 'Orders Checked', '14pt')}${box('AsOf', 'As of:', '8pt')}</ReportItems></PageHeader>`;
-    const plain = convertToRdl(definition, source, { reportName: 'Lines' }).rdl.replace(/<Page>/, `<Page>${header}`);
+    const rule = '<Line Name="UnderRule"><Top>0.6in</Top><Left>0in</Left><Height>0in</Height><Width>4in</Width><Style><Border><Style>Solid</Style></Border></Style></Line>';
+    let plain = convertToRdl(definition, source, { reportName: 'Lines' }).rdl.replace(/<Page>/, `<Page>${header}`);
+    const tableBottom = (x: string) => {
+      const t = descendants(parseXml(x)).find((e) => e.name === 'Tablix')!;
+      return parseFloat(textOf(child(t, 'Top'))) + parseFloat(textOf(child(t, 'Height')));
+    };
+    plain = plain.replace(/<\/Tablix>/, `</Tablix>${rule.replace('0.6in', `${tableBottom(plain) + 0.05}in`)}`);
     const out = applyConventions(plain, 'Lines', conventions);
     const r = parseXml(out.rdl);
     const tablix = descendants(r).find((e) => e.name === 'Tablix')!;
@@ -160,6 +166,8 @@ describe('conventions', () => {
     assert.equal(first.attributes.Name, 'Lines_Heading_Title');
     assert.equal(valueIn(first), 'Orders Checked');
     assert.ok(!child(first, 'Top'), 'placed by its cell');
+    const under = descendants(r).find((e) => e.name === 'Line')!;
+    assert.ok(parseFloat(textOf(child(under, 'Top'))) >= parseFloat(textOf(child(tablix, 'Top'))) + parseFloat(textOf(child(tablix, 'Height'))), 'the rule under the table stays under it');
     assert.ok(!out.rdl.includes('Odd_fill'), 'rows without column headings are not banded');
     assert.ok(out.review.some((n) => n.item === 'Page header' && n.message.includes('As of:')));
   });
@@ -220,6 +228,22 @@ describe('conventions', () => {
     assert.ok(childElements(child(wrapper, 'ReportItems')!).includes(tablix), 'the table sits straight in the report\'s box');
     assert.ok(!byName(r, 'Frame'));
     assert.equal(applyConventions(converted(), 'Orders', conventions, 'Short').rdl.includes('Short_Grid_1'), true);
+  });
+
+  it('keeps what lies under a subreport frame drawn too short below its table once the frame is lifted', () => {
+    const box = (name: string, inner: string, top: string, height: string) => `<Rectangle Name="${name}"><ReportItems>${inner}</ReportItems><KeepTogether>true</KeepTogether>`
+      + `<Top>${top}</Top><Left>0in</Left><Height>${height}</Height><Width>6in</Width><Style><Border><Style>None</Style></Border></Style></Rectangle>`;
+    const note = '<Textbox Name="Below"><CanGrow>true</CanGrow><KeepTogether>true</KeepTogether><Paragraphs><Paragraph><TextRuns><TextRun><Value>Below the table</Value><Style /></TextRun></TextRuns><Style /></Paragraph></Paragraphs>'
+      + '<Top>0in</Top><Left>0in</Left><Height>0.2in</Height><Width>3in</Width><Style /></Textbox>';
+    let plain = converted().replace(/<Tablix Name="[^"]+">[\s\S]*?<\/Tablix>/, (m) => box('FrameA', m.replace(/(<\/TablixRowHierarchy>[\s\S]*?<Top>)[^<]*(<\/Top>)/, '$10in$2'), '0in', '0.2in'));
+    plain = plain.replace(/(<Rectangle Name="FrameA">[\s\S]*?<\/Rectangle>)/, `$1${box('FrameB', note, '0.25in', '0.2in')}`);
+    const out = applyConventions(plain, 'Orders', conventions);
+    const r = parseXml(out.rdl);
+    const tablix = descendants(r).find((e) => e.name === 'Tablix')!;
+    const below = descendants(r).find((e) => e.name === 'Textbox' && valueIn(e) === 'Below the table')!;
+    const inch = (e: XmlElement, n: string) => parseFloat(textOf(child(e, n)));
+    assert.ok(!byName(r, 'FrameA') && !byName(r, 'FrameB'), 'the frames are lifted');
+    assert.ok(inch(below, 'Top') >= inch(tablix, 'Top') + inch(tablix, 'Height') - 0.001, 'the text stays under the table');
   });
 
   it('rejects unknown entries', () => {

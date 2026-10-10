@@ -215,6 +215,16 @@ async function main(argv: string[]): Promise<number> {
         throw new Error(`conventions ${conventionsPath}: ${(err as Error).message}`);
       }
       reshape = (rdl, name) => applyConventions(rdl, name, conv, prefix);
+      // The house style step's layout work (tables, bands and frames reaching the page's rules), without its looks:
+      // the team's looks come from their style dataset.
+      if (!restyle) {
+        try {
+          const house: { applyHouseStyle(rdl: string, style: object): string } = await import('./ssrs/brand.ts');
+          restyle = (rdl) => house.applyHouseStyle(rdl, {});
+        } catch {
+          // (The house style module is optional.)
+        }
+      }
     }
     if (prefix && !conventionsPath) throw new Error('to-rdl: --prefix goes with --conventions');
     const templatePath = takeOption(args, '--template');
