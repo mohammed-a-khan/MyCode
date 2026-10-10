@@ -14,7 +14,7 @@
  *                "value": "{T}_{col}", "groupText": "{T}_{col}_Group", "subtotalText": "{T}_{col}_SubtotalLabel",
  *                "subtotal": "{T}_{col}_Subtotal", "totalText": "{T}_TotalLabel", "total": "{T}_{col}_Total",
  *                "blank": "{T}_Blank{n}", "noData": "{T}_NoData", "footer": "{S}_Footnote", "text": "{S}_Text{n}",
- *                "cellRect": "{T}_{col}_Box",
+ *                "cellRect": "{T}_{col}_Box", "cellLine": "{T}_{col}_Line{n}",
  *                "line": "{S}_Line{n}", "image": "{S}_Image{n}", "chart": "{S}_Chart{n}", "group": "{S}_Group{n}",
  *                "details": "{S}_Details" },
  *     "prefixes": { "Long_Report_File_Name": "Short" },
@@ -46,7 +46,7 @@ import { child, childElements, descendants, el, parseXml, textOf, toXml, type Xm
 import { parametersLayout, type ReviewNote } from './rdl.ts';
 
 const NAME_KEYS = ['rect', 'table', 'title', 'heading', 'value', 'groupText', 'subtotalText', 'subtotal', 'totalText', 'total',
-  'blank', 'noData', 'footer', 'text', 'cellRect', 'line', 'image', 'chart', 'group', 'details'] as const;
+  'blank', 'noData', 'footer', 'text', 'cellRect', 'cellLine', 'line', 'image', 'chart', 'group', 'details'] as const;
 type NameKey = typeof NAME_KEYS[number];
 
 const ROLE_KEYS = ['title', 'heading', 'headingFirst', 'body', 'bodyFirst', 'number', 'group', 'totalLabel', 'totalValue', 'footer', 'text'] as const;
@@ -81,7 +81,7 @@ const DEFAULT_NAMES: Record<NameKey, string> = {
   rect: '{S}_Box{n}', table: '{S}_Table{n}', title: '{S}_Title', heading: '{T}_{col}_Heading', value: '{T}_{col}',
   groupText: '{T}_{col}_Group', subtotalText: '{T}_{col}_SubtotalLabel', subtotal: '{T}_{col}_Subtotal',
   totalText: '{T}_TotalLabel', total: '{T}_{col}_Total', blank: '{T}_Blank{n}', noData: '{T}_NoData', footer: '{S}_Footnote',
-  text: '{S}_Text{n}', cellRect: '{T}_{col}_Box', line: '{S}_Line{n}', image: '{S}_Image{n}', chart: '{S}_Chart{n}', group: '{S}_Group{n}', details: '{S}_Details',
+  text: '{S}_Text{n}', cellRect: '{T}_{col}_Box', cellLine: '{T}_{col}_Line{n}', line: '{S}_Line{n}', image: '{S}_Image{n}', chart: '{S}_Chart{n}', group: '{S}_Group{n}', details: '{S}_Details',
 };
 
 /** Reads and checks a conventions file. */
@@ -320,7 +320,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     let pattern = conv.names[key];
     if (pattern.includes('{n}')) {
       // One count per pattern (groups and details groups named alike count together).
-      const id = `${pattern}|${pattern.includes('{T}') ? vars.T ?? '' : ''}`;
+      const id = `${pattern}|${pattern.includes('{T}') ? vars.T ?? '' : ''}|${pattern.includes('{col}') ? vars.col ?? '' : ''}`;
       const n = (counters.get(id) ?? 0) + 1;
       counters.set(id, n);
       pattern = pattern.replace(/\{n\}/g, String(n));
@@ -336,8 +336,10 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     }
     item.attributes.Name = name;
     named.add(item);
+    if (key === 'heading') headings.add(item);
     return name;
   };
+  const headings = new Set<XmlElement>();
 
   const named = new Set<XmlElement>();
 
@@ -364,10 +366,17 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     // The other tables' and charts' datasets: the same pattern, numbered after the report's name (2, 3, ...).
     let n = 1;
     const taken = new Set(dataSets.map((d) => (d.attributes.Name ?? '').toLowerCase()));
-    for (const region of descendants(report).filter((e) => (e.name === 'Tablix' || e.name === 'Chart') && child(e, 'DataSetName'))) {
-      const old = textOf(child(region, 'DataSetName'));
-      const ds = dataSets.find((d) => d.attributes.Name === old);
-      if (!ds || ds === main || scopeRenames.has(old)) continue;
+    // (Then any other dataset, read by name in an expression: reports combined into one keep only the first dataset
+    // of each name, so each report's own are named after it.)
+    const regionSets = descendants(report).filter((e) => (e.name === 'Tablix' || e.name === 'Chart') && child(e, 'DataSetName'))
+      .map((region) => dataSets.find((d) => d.attributes.Name === textOf(child(region, 'DataSetName'))));
+    const done = new Set<XmlElement>([main]);
+    // (One nothing reads is left out further on: it takes no number.)
+    const read = (name: string) => descendants(report).some((e) => (e.name === 'DataSetName' && textOf(e) === name) || (textOf(e).startsWith('=') && textOf(e).includes(`"${name}"`)));
+    for (const ds of [...regionSets, ...dataSets]) {
+      const old = ds?.attributes.Name ?? '';
+      if (!ds || done.has(ds) || old === conv.style?.dataset || !read(old)) continue;
+      done.add(ds);
       let other: string;
       do other = conv.dataset.includes('{S}') ? conv.dataset.replace(/\{S\}/g, `${S}_${++n}`) : `${name}_${++n}`;
       while (taken.has(other.toLowerCase()));
@@ -601,14 +610,16 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       }
     }
 
-    // A row shown only when there is no data, under the headings.
+    // A row shown only when there is no data, under the headings: where the table has headings of its own (a table
+    // of lines with none, as a statement under another, prints nothing then, as in Crystal).
     const leaves = rowLeaves(tablix);
-    if (textOf(child(tablix, 'DataSetName')) && !leaves.some((l) => l.kind === 'noData')) {
-      const memberList = child(tablix, 'TablixRowHierarchy/TablixMembers')!;
-      const top = childElements(memberList, 'TablixMember');
-      // The leading rows that are headings (each its own top-level member).
-      let at = 0;
-      while (at < top.length && leaves[at]?.member === top[at] && leaves[at]!.kind === 'heading') at++;
+    const memberList = child(tablix, 'TablixRowHierarchy/TablixMembers')!;
+    const top = childElements(memberList, 'TablixMember');
+    // The leading rows that are headings (each its own top-level member).
+    let at = 0;
+    while (at < top.length && leaves[at]?.member === top[at] && leaves[at]!.kind === 'heading') at++;
+    const headed = rowsOf(tablix).slice(0, at).some((row) => descendants(row).some((e) => e.name === 'Textbox' && !isBlank(e)));
+    if (textOf(child(tablix, 'DataSetName')) && headed && !leaves.some((l) => l.kind === 'noData')) {
       const what = (titleText ?? reportName.replace(/_/g, ' ')).trim();
       const message = conv.noData.replace(/\{TITLE\}/g, what.toUpperCase()).replace(/\{title\}/g, what);
       const row = spanningRow(0.2, newTextbox('__nodata', message), columns);
@@ -662,6 +673,10 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     rows.forEach((row, i) => {
       const kind = kinds[i]!;
       let labelled = false;
+      // Column headings Crystal printed in a group's header (fixed text only, over two columns or more): named as
+      // headings, which is how reports are combined finds and relabels columns.
+      const rowTexts = descendants(row).filter((e) => e.name === 'Textbox' && !isBlank(e));
+      const headingsHere = kind === 'groupHeading' && rowTexts.length > 1 && rowTexts.every((e) => fixedText(e) !== undefined);
       cellsOf(row).forEach((cell, c) => {
         let item = cellItem(cell);
         if (!item) return;
@@ -711,7 +726,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           switch (kind) {
             case 'heading': return rename(tb, 'heading', { T, col: colNames[c] ?? col });
             case 'detail': return rename(tb, 'value', { T, col });
-            case 'groupHeading': return rename(tb, 'groupText', { T, col });
+            case 'groupHeading': return headingsHere ? rename(tb, 'heading', { T, col: colNames[c] ?? col }) : rename(tb, 'groupText', { T, col });
             case 'subtotal': return rename(tb, totalled ? 'subtotal' : 'subtotalText', { T, col });
             default:
               if (totalled) return rename(tb, 'total', { T, col });
@@ -729,7 +744,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
             if (d === item || named.has(d) || inTable(d, item)) continue;
             if (d.name === 'Textbox') cellName(d);
             else if (d.name === 'Rectangle') rename(d, 'cellRect', { T, col });
-            else if (d.name === 'Line') rename(d, 'line', { T });
+            else if (d.name === 'Line') rename(d, 'cellLine', { T, col });
             else if (d.name === 'Image') rename(d, 'image', { T });
           }
         } else if (item.name === 'Textbox') cellName(item);
@@ -784,7 +799,8 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
   // table, a row holding a box, a row of text drawn shorter than its text) is drawn at its full size, and what lies
   // under it moves down as far, so nothing overlaps in the designer and the printed report stays the same.
   if (body) {
-    minTextRow = conv.style ? MIN_TEXT_ROW : 0;
+    designText = !!conv.style;
+    for (const holder of descendants(body).filter((e) => e.name === 'ReportItems')) separate(holder, review);
     // (Each subreport's frame stays: when the report runs, a frame growing with its table pushes the next frame down,
     // which items side by side in one box, touching, would not do.)
     const bottom = fitItems(child(body, 'ReportItems'));
@@ -872,7 +888,16 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
   dropUnused(report, conv, review);
   // What a combined report takes from each template is its box and its datasets: what else this one still needs is
   // listed, to be added where the reports are combined (or taken out).
-  if (child(report, 'Code')) review.push({ item: 'Custom code', message: 'the report uses custom code (Code.*); where reports are combined, its functions must go with it' });
+  if (child(report, 'Code')) {
+    const used = [...new Set(descendants(report).flatMap((e) => (textOf(e).startsWith('=') ? [...textOf(e).matchAll(/\bCode\.(\w+)/g)].map((m) => m[1]!) : [])))].sort();
+    review.push({ item: 'Custom code', message: `the report uses custom code${used.length ? ` (${used.join(', ')})` : ''}; where reports are combined only the box and its datasets are taken, so these functions must be in the combined report too (or written as expressions here)` });
+  }
+  // Where reports are combined, hiding a column takes the last columns off every table in the box: one with more
+  // than one table loses columns from each.
+  const boxTables = body ? descendants(body).filter((e) => e.name === 'Tablix') : [];
+  if (boxTables.length > 1 && boxTables.some((t) => descendants(t).some((e) => headings.has(e)))) {
+    review.push({ item: 'Tables', message: `the box holds ${boxTables.length} tables: where reports are combined, hiding columns takes the last columns off each of them; choose columns only where one table has them, or keep the others as they are` });
+  }
   if (conv.parameters.length) {
     for (const p of childElements(child(report, 'ReportParameters') ?? el('x'), 'ReportParameter')) {
       const name = p.attributes.Name ?? '';
@@ -893,16 +918,22 @@ function inTable(item: XmlElement, container: XmlElement): boolean {
   return descendants(container).some((t) => t !== container && t.name === 'Tablix' && descendants(t).includes(item) && t !== item);
 }
 
-/** The height a text box's text needs on one line per paragraph (inches); none where its size is worked out. */
-function textHeight(textbox: XmlElement): number | undefined {
+/**
+ * The height a text box's text needs on one line per paragraph (inches). Where its size is worked out when the report
+ * runs (as all text is where the style dataset styles it), the designer draws it at its default size (10pt), so
+ * that is what it needs; undefined there unless asked.
+ */
+function textHeight(textbox: XmlElement, design = false): number | undefined {
   const sizes = descendants(textbox).filter((e) => e.name === 'FontSize').map((e) => textOf(e));
-  if (sizes.some((v) => v.startsWith('='))) return undefined;
-  const points = sizes.map((v) => (inches(v) ?? 0) * 72).filter((v) => v > 0);
-  const size = points.length ? Math.max(...points) : 10;
+  // (Text the style dataset styles takes its size from there: drawn at the default size, or its own if larger.)
+  const worked = design || sizes.some((v) => v.startsWith('='));
+  if (worked && !design) return undefined;
+  const points = sizes.filter((v) => !v.startsWith('=')).map((v) => (inches(v) ?? 0) * 72).filter((v) => v > 0);
+  const size = Math.max(worked || !points.length ? DESIGN_FONT : 0, ...points);
   const lines = Math.max(1, descendants(textbox).filter((e) => e.name === 'Paragraph').length);
   const style = childElements(textbox, 'Style')[0];
-  const padding = ['PaddingTop', 'PaddingBottom'].reduce((a, k) => a + (inches(textOf(child(style, k)) || '2pt') ?? 0), 0);
-  return (lines * size * 1.2) / 72 + padding;
+  const padding = ['PaddingTop', 'PaddingBottom'].reduce((a, k) => a + (inches(textOf(child(style, k))) ?? 0), 0);
+  return (lines * size * (worked ? DESIGN_LEADING : 1.2)) / 72 + padding;
 }
 
 /**
@@ -921,9 +952,10 @@ function fitTablix(tablix: XmlElement): number {
       else if (item.name === 'Tablix') need = Math.max(need, len(item, 'Height') + fitTablix(item));
       else if (item.name === 'Textbox' && !child(item, 'Visibility') && textOf(child(item, 'CanShrink')) !== 'true') {
         if (fixedText(item)) need = Math.max(need, textHeight(item) ?? 0);
-        // (Text in the house's fonts, worked out when the report runs: a row at least as tall as a line of it.)
-        if (!isBlank(item)) need = Math.max(need, minTextRow);
       }
+      // (Text in the house's fonts, worked out when the report runs: the designer draws it at its default size, and
+      // a row shorter than that cuts it off there.)
+      if (item.name === 'Textbox' && designText && !isBlank(item)) need = Math.max(need, textHeight(item, true)!);
     }
     if (need > height + 0.001) {
       setChild(row, 'Height', inch(need));
@@ -934,6 +966,137 @@ function fitTablix(tablix: XmlElement): number {
   return grown;
 }
 
+/**
+ * Items drawn over each other, as Crystal allows: SSRS moves one of them aside when the report is previewed or saved
+ * as a page, document or workbook (only a PDF or a print keeps them over each other), and the designer draws them
+ * piled up. A box drawn round other items holds them; a text running on over its neighbour stops where the neighbour
+ * starts (centred text equally at both ends, so it stays centred); what is left is listed for review.
+ */
+function separate(container: XmlElement, review: ReviewNote[]): void {
+  const box = (e: XmlElement) => ({ l: len(e, 'Left'), t: len(e, 'Top'), r: len(e, 'Left') + len(e, 'Width'), b: len(e, 'Top') + len(e, 'Height') });
+  const items = () => childElements(container).filter((e) => ITEMS.has(e.name) && e.name !== 'Line' && child(e, 'Top'));
+  for (let changed = true; changed;) {
+    changed = false;
+    const list = items();
+    pairs: for (const a of list) {
+      for (const o of list) {
+        if (a === o) continue;
+        const A = box(a);
+        const O = box(o);
+        const ox = Math.min(A.r, O.r) - Math.max(A.l, O.l);
+        const oy = Math.min(A.b, O.b) - Math.max(A.t, O.t);
+        if (ox <= 0.001 || oy <= 0.001) continue;
+        // An empty text box drawn as a band (filled or framed) round the item: a box (a text box holds no items).
+        const inside = O.l >= A.l - 0.001 && O.r <= A.r + 0.001 && O.t >= A.t - 0.001 && O.b <= A.b + 0.001;
+        if (a.name === 'Textbox' && o.name !== 'Rectangle' && inside && isBlank(a) && drawnAs(a)) {
+          a.name = 'Rectangle';
+          a.children = a.children.filter((c) => typeof c !== 'object' || ['Top', 'Left', 'Height', 'Width', 'ZIndex', 'Visibility', 'Style', 'Bookmark', 'DocumentMapLabel'].includes((c as XmlElement).name));
+          const st = childElements(a, 'Style')[0];
+          if (st) removeChildren(st, ['PaddingLeft', 'PaddingRight', 'PaddingTop', 'PaddingBottom', 'VerticalAlign', 'TextAlign', 'Format', 'Direction', 'WritingMode']);
+          changed = true;
+          break pairs;
+        }
+        // A box round the item: the item goes into it.
+        if (a.name === 'Rectangle' && o.name !== 'Rectangle' && O.l >= A.l - 0.001 && O.r <= A.r + 0.001 && O.t >= A.t - 0.001 && O.b <= A.b + 0.001) {
+          let holder = child(a, 'ReportItems');
+          if (!holder) {
+            holder = el('ReportItems');
+            a.children.unshift(holder);
+          }
+          setChild(o, 'Top', inch(Math.max(0, O.t - A.t)));
+          setChild(o, 'Left', inch(Math.max(0, O.l - A.l)));
+          container.children = container.children.filter((c) => c !== o);
+          holder.children.push(o);
+          separate(holder, review);
+          changed = true;
+          break pairs;
+        }
+        if (a.name !== 'Textbox') continue;
+        // An empty text box with nothing drawn (no border, no fill) over another item: it shows nothing, so it goes.
+        if (isBlank(a) && !drawnAs(a) && !child(a, 'Visibility')) {
+          container.children = container.children.filter((c) => c !== a);
+          changed = true;
+          break pairs;
+        }
+        const align = textAlignOf(a);
+        // Centred over a box of the same middle (a frame round a title): within the box, when it fits there.
+        if (align === 'Center' && o.name === 'Rectangle' && Math.abs((A.l + A.r) / 2 - (O.l + O.r) / 2) < 0.05 && A.l < O.l && A.r > O.r
+          && A.t >= O.t - 0.01 && A.b <= O.b + 0.01 && textWidth(a) <= O.r - O.l) {
+          setChild(a, 'Left', inch(O.l));
+          setChild(a, 'Width', inch(O.r - O.l));
+          if (A.b > O.b) setChild(a, 'Height', inch(O.b - A.t));
+          changed = true;
+          break pairs;
+        }
+        // Over its neighbour by a hair from above: it ends where the neighbour starts.
+        if (oy < 0.05 && A.t < O.t && A.b < O.b && ox > oy) {
+          setChild(a, 'Height', inch(O.t - A.t));
+          changed = true;
+          break pairs;
+        }
+        // Over its neighbour along a line of text: the text stops at the neighbour.
+        const sliver = ox < 0.05;
+        let l = A.l;
+        let r = A.r;
+        if (align === 'Center' && O.l > A.l && O.r < A.r) {
+          // (Centred, the neighbour within its width: equally at both ends, past the neighbour.)
+          const cut = O.l - A.l < A.r - O.r ? O.r - A.l : A.r - O.l;
+          l = A.l + cut;
+          r = A.r - cut;
+        } else if (A.l < O.l && (align !== 'Right' || sliver)) {
+          r = O.l;
+          if (align === 'Center') l = Math.min(O.l, A.l + (A.r - O.l));
+        } else if (A.r > O.r && (align !== 'Left' || sliver)) {
+          l = O.r;
+          if (align === 'Center') r = Math.max(O.r, A.r - (O.r - A.l));
+        } else continue;
+        if (r - l < (sliver ? 0.05 : Math.max(0.05, Math.min(A.r - A.l, textWidth(a))))) continue;
+        setChild(a, 'Left', inch(l));
+        setChild(a, 'Width', inch(r - l));
+        changed = true;
+        break pairs;
+      }
+    }
+  }
+  const list = items();
+  for (let i = 0; i < list.length; i++) {
+    for (let j = i + 1; j < list.length; j++) {
+      const a = list[i]!;
+      const o = list[j]!;
+      if (Math.min(len(a, 'Left') + len(a, 'Width'), len(o, 'Left') + len(o, 'Width')) - Math.max(len(a, 'Left'), len(o, 'Left')) > 0.001
+        && Math.min(len(a, 'Top') + len(a, 'Height'), len(o, 'Top') + len(o, 'Height')) - Math.max(len(a, 'Top'), len(o, 'Top')) > 0.001) {
+        review.push({ item: `${a.attributes.Name} / ${o.attributes.Name}`, message: 'drawn over each other, as in Crystal: a PDF or a print keeps them so, a preview, page, document or workbook moves one aside; place them apart' });
+      }
+    }
+  }
+}
+
+/** Whether an item draws anything of its own: a border or a fill. */
+function drawnAs(item: XmlElement): boolean {
+  const st = childElements(item, 'Style')[0] ?? el('Style');
+  return /^(solid|dashed|dotted|double)/i.test(textOf(child(st, 'Border/Style'))) || BORDER_SIDES.some((side) => /^(solid|dashed|dotted|double)/i.test(textOf(child(st, `${side}/Style`))))
+    || (!!textOf(child(st, 'BackgroundColor')) && !/^(transparent|#00ffffff)$/i.test(textOf(child(st, 'BackgroundColor'))));
+}
+
+/** How a text box's text is set across (its first paragraph's; a number on its own, as SSRS sets it, to the right). */
+function textAlignOf(textbox: XmlElement): string {
+  const set = textOf(child(descendants(textbox).find((e) => e.name === 'Paragraph') ?? el('x'), 'Style/TextAlign'));
+  if (set && set !== 'General') return set;
+  const format = descendants(textbox).find((e) => e.name === 'Format');
+  return (format && /[#0]|^[NCP]\d*$/i.test(textOf(format))) || /^=\s*(Sum|Count|Avg)\(/i.test(valueOf(textbox)) ? 'Right' : 'Left';
+}
+
+/** About how wide a text box's fixed text is drawn (inches); unknown (0) for text worked out when the report runs. */
+function textWidth(textbox: XmlElement): number {
+  const text = fixedText(textbox);
+  if (text === undefined) return 0;
+  const sizes = descendants(textbox).filter((e) => e.name === 'FontSize' && !textOf(e).startsWith('=')).map((e) => (inches(textOf(e)) ?? 0) * 72);
+  const size = Math.max(DESIGN_FONT, ...sizes);
+  const style = childElements(textbox, 'Style')[0];
+  const padding = ['PaddingLeft', 'PaddingRight'].reduce((a, k) => a + (inches(textOf(child(style, k))) ?? 0), 0);
+  return Math.max(...text.split(/\r?\n/).map((line) => line.length)) * size * 0.55 / 72 + padding;
+}
+
 /** What lies under an item that grew (from its old bottom, across part of its width) moves down by as far. */
 function moveBelow(container: XmlElement, item: XmlElement, oldBottom: number, by: number, left: number, right: number): void {
   for (const e of childElements(container).filter((x) => ITEMS.has(x.name) && x !== item)) {
@@ -941,9 +1104,10 @@ function moveBelow(container: XmlElement, item: XmlElement, oldBottom: number, b
   }
 }
 
-/** The least height of a row of text whose size the style dataset gives (inches). */
-const MIN_TEXT_ROW = 0.2;
-let minTextRow = 0;
+/** The size (pt) and line spacing the designer draws text at where its size is worked out when the report runs. */
+const DESIGN_FONT = 10;
+const DESIGN_LEADING = 1.4;
+let designText = false;
 
 /** Fits the items in a container (see above); returns where the lowest ends. */
 function fitItems(container: XmlElement | undefined): number {
@@ -957,8 +1121,9 @@ function fitItems(container: XmlElement | undefined): number {
       const inner = fitItems(child(e, 'ReportItems'));
       g = Math.max(0, inner - len(e, 'Height'));
     } else if (e.name === 'Tablix') g = fitTablix(e);
+    else if (e.name === 'Textbox' && designText && !isBlank(e)) g = Math.max(0, textHeight(e, true)! - len(e, 'Height'));
     if (g > 0.001) {
-      if (e.name === 'Rectangle') setChild(e, 'Height', inchUp(len(e, 'Height') + g));
+      if (e.name === 'Rectangle' || e.name === 'Textbox') setChild(e, 'Height', inchUp(len(e, 'Height') + g));
       grew.set(e, g);
     }
   }
@@ -971,7 +1136,11 @@ function fitItems(container: XmlElement | undefined): number {
     for (const i of order) {
       if (i === j) continue;
       const bi = before.get(i)!;
-      if (bi.bottom > bj.top + 0.001 || bi.right <= bj.left + 0.001 || bj.right <= bi.left + 0.001) continue;
+      if (bi.right <= bj.left + 0.001 || bj.right <= bi.left + 0.001) continue;
+      // (A rule drawn in the lower half of a text box is that text's rule, along its bottom: it moves with that.)
+      const rule = j.name === 'Line' && len(j, 'Height') === 0 && i.name === 'Textbox' && bj.top >= (bi.top + bi.bottom) / 2 - 0.001;
+      // (Items Crystal drew touching, or a hair over each other, are one under the other.)
+      if (bi.bottom > bj.top + 0.01 && !rule) continue;
       s = Math.max(s, (shift.get(i) ?? 0) + (grew.get(i) ?? 0));
     }
     if (s > 0.001) {

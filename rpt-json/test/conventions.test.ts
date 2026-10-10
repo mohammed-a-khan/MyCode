@@ -246,6 +246,87 @@ describe('conventions', () => {
     assert.ok(inch(b, 'Top') >= inch(a, 'Top') + inch(a, 'Height'), 'the second frame starts under the first');
   });
 
+  it('draws rows tall enough for text at the designer\'s default size, a rule along the text moving with it', () => {
+    const definition: ReportDefinition = {
+      ...emptyDefinition(),
+      formulas: [
+        { name: 'Bottom_Line_Style', index: 1, kind: 'conditionalFormat', text: 'if {Orders.Region} = "Total" then crSingleLine else crNoLine', referencedFields: [] },
+        { name: 'DeltaX_Value_Formula', index: 2, kind: 'conditionalFormat', text: '(if IsNull({Orders.Amount}) then 0 else 1) * 1.15 * 1440', referencedFields: [] },
+      ],
+      layout: [{ name: 'DetailArea1', sections: [{ name: 'D', height: 220, objects: [
+        { kind: 'field', name: 'Name', field: 'Orders.Customer', style: { size: 8 }, position: { x: 0, y: 0 }, size: { width: 7000, height: 200 } },
+        { kind: 'field', name: 'Amt', field: 'Orders.Amount', style: { size: 8 }, position: { x: 7751, y: 0 }, size: { width: 2000, height: 200 }, align: 'right',
+          conditions: { bottomLine: { name: 'Bottom_Line_Style', index: 1 }, deltaX: { name: 'DeltaX_Value_Formula', index: 2 } } },
+        { kind: 'field', name: 'Tag', field: 'Orders.Region', style: { size: 8 }, position: { x: 13327, y: 0 }, size: { width: 650, height: 200 } },
+      ] }] }],
+    } as ReportDefinition;
+    const out = applyConventions(convertToRdl(definition, source, { reportName: 'Lines' }).rdl, 'Lines', conventions);
+    const r = parseXml(out.rdl);
+    const inch = (e: XmlElement, n: string) => parseFloat(textOf(child(e, n)));
+    const tablix = descendants(r).find((e) => e.name === 'Tablix')!;
+    // (10pt drawn by the designer where the size comes from the style dataset: about 0.19in a line.)
+    for (const row of childElements(child(tablix, 'TablixBody/TablixRows')!, 'TablixRow')) {
+      if (descendants(row).some((e) => e.name === 'Textbox' && valueIn(e).startsWith('=Fields!'))) assert.ok(inch(row, 'Height') >= 0.19, 'a row of text fits a line of it');
+    }
+    const amount = descendants(r).find((e) => e.name === 'Textbox' && valueIn(e) === '=Fields!Amount.Value')!;
+    assert.ok(inch(amount, 'Height') >= 0.19, 'the text in its cell\'s box fits too');
+    const lines = descendants(r).filter((e) => e.name === 'Line');
+    assert.ok(lines.length > 1);
+    for (const line of lines) assert.ok(inch(line, 'Top') >= inch(amount, 'Height') - 0.02, 'its rule stays along the bottom of the text');
+    // A table of lines with no headings of its own gets no message row (Crystal prints nothing there then).
+    assert.ok(!out.rdl.includes('Empty_Message'));
+  });
+
+  it('keeps items from lying over each other: a frame holds what it is drawn round, a text stops at its neighbour', () => {
+    const tb = (name: string, value: string, l: number, t: number, w: number, h: number, extra = '', align = 'Left') => `<Textbox Name="${name}"><CanGrow>true</CanGrow><KeepTogether>true</KeepTogether>`
+      + `<Paragraphs><Paragraph><TextRuns><TextRun><Value>${value}</Value><Style><FontSize>8pt</FontSize></Style></TextRun></TextRuns><Style><TextAlign>${align}</TextAlign></Style></Paragraph></Paragraphs>`
+      + `<Top>${t}in</Top><Left>${l}in</Left><Height>${h}in</Height><Width>${w}in</Width><Style><Border><Style>None</Style></Border>${extra}<PaddingTop>0pt</PaddingTop><PaddingBottom>0pt</PaddingBottom></Style></Textbox>`;
+    const frame = '<Rectangle Name="Frame"><KeepTogether>true</KeepTogether><Top>4in</Top><Left>0in</Left><Height>0.6in</Height><Width>6in</Width><Style><Border><Style>Solid</Style></Border></Style></Rectangle>';
+    const extra = frame + tb('Inside', 'Printed', 0.2, 4.1, 3, 0.2)
+      + tb('Band', '', 0, 5, 2, 0.3, '<BackgroundColor>Navy</BackgroundColor>') + tb('OnBand', 'Order ID', 0.1, 5.02, 1, 0.2)
+      + tb('Long', '=Fields!Customer.Value', 0, 6, 5, 0.2) + tb('Next', 'Amount', 3, 6, 1, 0.2)
+      + tb('Lone', 'Centred', 0, 7, 6, 0.2, '', 'Center') + '<Image Name="Logo"><Source>Embedded</Source><Value>Logo</Value><Top>7in</Top><Left>0in</Left><Height>0.3in</Height><Width>1in</Width><Style /></Image>';
+    const plain = converted().replace(/<Body>\s*<ReportItems>/, (m) => m + extra).replace('</ReportSections>', '</ReportSections><EmbeddedImages><EmbeddedImage Name="Logo"><MIMEType>image/png</MIMEType><ImageData>iVBORw0KGgo=</ImageData></EmbeddedImage></EmbeddedImages>');
+    const out = applyConventions(plain, 'Orders', conventions);
+    const r = parseXml(out.rdl);
+    const find = (v: string) => descendants(r).find((e) => e.name === 'Textbox' && valueIn(e) === v)!;
+    const parentOf = (e: XmlElement) => descendants(r).find((x) => x.name === 'Rectangle' && childElements(child(x, 'ReportItems') ?? { name: '', attributes: {}, children: [] }).includes(e));
+    const inch = (e: XmlElement, n: string) => parseFloat(textOf(child(e, n)));
+    assert.ok(parentOf(find('Printed'))?.attributes.Name?.length, 'the frame holds the text drawn in it');
+    assert.equal(inch(find('Printed'), 'Top'), 0.1, 'placed within the frame');
+    const band = parentOf(find('Order ID'))!;
+    assert.ok(band && textOf(child(band, 'Style/BackgroundColor')) === 'Navy', 'a filled band is a box holding its text');
+    assert.equal(inch(find('=Fields!Customer.Value'), 'Width'), 3, 'a text stops where its neighbour starts');
+    const centred = find('Centred');
+    assert.equal(inch(centred, 'Left'), 1);
+    assert.equal(inch(centred, 'Width'), 4, 'centred text is cut equally at both ends, staying centred');
+  });
+
+  it('keeps what reports combined into one need: datasets named after the report, headings found by name', () => {
+    const extra = '<DataSet Name="DataSet9"><Query><DataSourceName>DataSource1</DataSourceName><CommandText>dbo.note_get</CommandText></Query>'
+      + '<Fields><Field Name="note"><DataField>note</DataField></Field></Fields></DataSet>';
+    const note = '<Textbox Name="Note"><CanGrow>true</CanGrow><KeepTogether>true</KeepTogether><Paragraphs><Paragraph><TextRuns><TextRun><Value>=Code.Tidy(First(Fields!note.Value, "DataSet9"))</Value><Style /></TextRun></TextRuns><Style /></Paragraph></Paragraphs>'
+      + '<Top>9in</Top><Left>0in</Left><Height>0.2in</Height><Width>3in</Width><Style /></Textbox>';
+    const plain = converted().replace('</DataSets>', `${extra}</DataSets>`).replace(/<Body>\s*<ReportItems>/, (m) => m + note)
+      .replace(/<rd:ReportUnitType>/, '<Code>Public Function Tidy(a) : Return a : End Function</Code><rd:ReportUnitType>');
+    const out = applyConventions(plain, 'Orders', conventions);
+    assert.ok(out.rdl.includes('<DataSet Name="Orders_2_Rows">') && out.rdl.includes('"Orders_2_Rows")'), 'a dataset read by name is named after the report');
+    assert.ok(!out.rdl.includes('DataSet9'));
+    assert.ok(out.review.some((n) => n.item === 'Custom code' && n.message.includes('Tidy')), 'the functions to carry over are named');
+
+    // Headings Crystal printed in a group's header are named as headings.
+    const definition: ReportDefinition = {
+      ...emptyDefinition(),
+      formulas: [{ name: 'Group #1 Order', kind: 'internal', text: '', referencedFields: ['Orders.Region'] }],
+      layout: [
+        { name: 'GroupHeaderArea1', sections: [{ name: 'GH', height: 240, objects: [text('CustomerHeading', 'Customer', 0), text('AmountHeading', 'Amount', 2880)] }] },
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [field('CustomerValue', 'Orders.Customer', 0), field('AmountValue', 'Orders.Amount', 2880)] }] },
+      ],
+    } as ReportDefinition;
+    const grouped = applyConventions(convertToRdl(definition, source, { reportName: 'Heads' }).rdl, 'Heads', conventions).rdl;
+    assert.ok(grouped.includes('Name="Heads_Grid_1_Customer_Head"') && grouped.includes('Name="Heads_Grid_1_Amount_Head"'), 'headings by name');
+  });
+
   it('rejects unknown entries', () => {
     assert.throws(() => readConventions('{"nmes": {}}'), /unknown entry "nmes"/);
     assert.throws(() => readConventions('{"names": {"tabel": "x"}}'), /unknown entry "tabel"/);
