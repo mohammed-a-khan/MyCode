@@ -57,6 +57,12 @@ export interface RdlOptions {
    * data), e.g. "0.00%"; charts with value labels use their labels' format.
    */
   chartAxisFormat?: string;
+  /**
+   * A line along a field that formulas move or widen (a statement's underline under an indented figure) is drawn as
+   * the field's own underline (or overline) instead of short line pieces across the cell: simpler to edit, the line
+   * then as long as the figure rather than the field.
+   */
+  simpleRules?: boolean;
   /** Subreports by their "Subdocument N" number: RDL name and link parameters (Crystal "Pm-" parameters). */
   subreports?: Map<number, SubreportInfo>;
   /** Image bytes by their "Embedding N" number. */
@@ -2277,6 +2283,7 @@ class RdlBuilder {
             const box = { top: Math.min(twipsToInches(line.position?.y ?? 0), height), left: twipsToInches(x - columnLeft), width: twipsToInches(right - x), height: 0 };
             return this.reportItem({ ...line, size: { width: right - x, height: 0 } }, 'row', area, box);
           });
+          const decorations: { over: boolean; shown: string }[] = [];
           for (const key of ruleFormulas) {
             const style = this.conditionExpression(obj!.conditions![key]!, false, `${obj!.kind} object "${obj!.name}"`, 'row');
             if (!style) continue;
@@ -2298,6 +2305,10 @@ class RdlBuilder {
             // Where the text is: moved with it, unless formulas moving the field place the text from the field's own place.
             const ownLeft = obj!.position!.x - columnLeft + (moving ? 0 : moved);
             const pieces: { x: number; right: number; within?: string }[] = [];
+            if (moving && this.options.simpleRules) {
+              decorations.push({ over: key === 'topLine', shown: `IIf(IsNothing(${style.slice(1)}), "${own}", ${style.slice(1)})` });
+              continue;
+            }
             if (moving) {
               const start = `(${ownLeft} + ${offset(dxValue)})`;
               const end = `(${ownLeft + obj!.size!.width} + ${offset(dxValue)}${dwValue ? ` + ${offset(dwValue)}` : ''})`;
@@ -2335,6 +2346,23 @@ class RdlBuilder {
           const text = obj || ruled.top || ruled.bottom || ruled.left || ruled.right || background
             ? this.textbox(name, value, this.ruledBorderObject(textObj, ruled), format, 'row', { top: 0, left: 0, width: columnWidth, height }, undefined, ruled, textPadding)
             : null;
+          // Lines drawn as the text's own underline or overline (where Crystal would draw them).
+          if (text && decorations.length) {
+            const under = decorations.find((d) => !d.over) ?? decorations[0]!;
+            const decoration = `=IIf(${under.shown} = "None", "None", "${under.over ? 'Overline' : 'Underline'}")`;
+            const runs: XmlElement[] = [];
+            const walk = (e: XmlElement) => {
+              if (e.name === 'TextRun') runs.push(e);
+              for (const c of e.children) if (c && typeof c === 'object') walk(c as XmlElement);
+            };
+            walk(text);
+            for (const run of runs) {
+              let style = run.children.find((c): c is XmlElement => !!c && typeof c === 'object' && (c as XmlElement).name === 'Style');
+              if (!style) run.children.push((style = el('Style')));
+              style.children = style.children.filter((c) => !(c && typeof c === 'object' && (c as XmlElement).name === 'TextDecoration'));
+              style.children.push(el('TextDecoration', decoration));
+            }
+          }
           return el('TablixCell', el('CellContents', el('Rectangle', { Name: this.itemNames.make(`${name}_Area`) },
             el('ReportItems', ...(text ? [text] : []), ...items.filter((item): item is XmlElement => !!item)),
             el('KeepTogether', 'true'),

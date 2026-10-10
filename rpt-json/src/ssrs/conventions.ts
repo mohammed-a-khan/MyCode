@@ -353,6 +353,20 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     const name = conv.dataset.replace(/\{S\}/g, S);
     scopeRenames.set(mainName, name);
     main.attributes.Name = name;
+    // The other tables' and charts' datasets: the same pattern, numbered after the report's name (2, 3, ...).
+    let n = 1;
+    const taken = new Set(dataSets.map((d) => (d.attributes.Name ?? '').toLowerCase()));
+    for (const region of descendants(report).filter((e) => (e.name === 'Tablix' || e.name === 'Chart') && child(e, 'DataSetName'))) {
+      const old = textOf(child(region, 'DataSetName'));
+      const ds = dataSets.find((d) => d.attributes.Name === old);
+      if (!ds || ds === main || scopeRenames.has(old)) continue;
+      let other: string;
+      do other = conv.dataset.includes('{S}') ? conv.dataset.replace(/\{S\}/g, `${S}_${++n}`) : `${name}_${++n}`;
+      while (taken.has(other.toLowerCase()));
+      taken.add(other.toLowerCase());
+      scopeRenames.set(old, other);
+      ds.attributes.Name = other;
+    }
   }
   const fieldTypes = new Map<string, string>();
   for (const f of descendants(main ?? el('x')).filter((e) => e.name === 'Field')) fieldTypes.set(f.attributes.Name ?? '', textOf(child(f, 'rd:TypeName')));
@@ -393,17 +407,21 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
   const section = descendants(report).find((e) => e.name === 'ReportSection');
   const body = child(section, 'Body');
   const page = child(section, 'Page');
-  const reportWidth = len(section ?? el('x'), 'Width');
+  let reportWidth = len(section ?? el('x'), 'Width');
   if (conv.page && page) {
     const width = inches(conv.page.width ?? '') ?? len(page, 'PageWidth');
     const margin = conv.page.margin ? inches(conv.page.margin) : undefined;
     const usable = width - (margin ?? len(page, 'LeftMargin')) * 2;
-    if (reportWidth <= usable + 0.01) {
+    // What the body holds decides (the report may be drawn wider than what is in it).
+    const content = Math.max(0, ...childElements(child(body, 'ReportItems') ?? el('x')).filter((e) => ITEMS.has(e.name)).map((e) => len(e, 'Left') + len(e, 'Width')));
+    if (content <= usable + 0.01) {
+      reportWidth = Math.floor(usable * 100000) / 100000;
+      setChild(section!, 'Width', inch(reportWidth));
       if (conv.page.width) setChild(page, 'PageWidth', conv.page.width);
       if (conv.page.height) setChild(page, 'PageHeight', conv.page.height);
       if (conv.page.margin) for (const m of ['LeftMargin', 'RightMargin', 'TopMargin', 'BottomMargin']) setChild(page, m, conv.page.margin);
     } else {
-      review.push({ item: 'Page', message: `the report is ${inch(reportWidth)} wide, wider than the standard page leaves room for; Crystal's page size is kept` });
+      review.push({ item: 'Page', message: `the report is ${inch(content)} wide, wider than the standard page leaves room for; Crystal's page size is kept` });
     }
   }
   if (conv.page?.font) for (const e of descendants(report).filter((x) => x.name === 'df:DefaultFontFamily')) e.children = [conv.page.font];
@@ -622,7 +640,25 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
         if (!item) return;
         // A box in a cell holding just one text: the text itself, placed by its padding.
         if (item.name === 'Rectangle') {
-          const inner = childElements(child(item, 'ReportItems') ?? el('x')).filter((e) => ITEMS.has(e.name));
+          let inner = childElements(child(item, 'ReportItems') ?? el('x')).filter((e) => ITEMS.has(e.name));
+          // A text with a line drawn just under it (Crystal's underlined heading): the text underlined.
+          const texts = inner.filter((e) => e.name === 'Textbox');
+          const lines = inner.filter((e) => e.name === 'Line');
+          if (texts.length === 1 && lines.length && lines.length + 1 === inner.length) {
+            const tb = texts[0]!;
+            const top = len(tb, 'Top');
+            const bottom = top + len(tb, 'Height');
+            const under = lines.every((l) => len(l, 'Height') === 0 && len(l, 'Top') >= top + (bottom - top) / 2 && len(l, 'Top') <= bottom + 0.1
+              && len(l, 'Left') < len(tb, 'Left') + len(tb, 'Width') && len(l, 'Left') + len(l, 'Width') > len(tb, 'Left')
+              && /^(solid|dashed|dotted|double)$/i.test(textOf(child(l, 'Style/Border/Style'))));
+            const decorated = descendants(tb).some((e) => e.name === 'TextDecoration' && textOf(e).startsWith('='));
+            if (under && !decorated) {
+              for (const run of runStyles(tb)) setChild(run, 'TextDecoration', 'Underline');
+              const holder = child(item, 'ReportItems')!;
+              holder.children = holder.children.filter((x) => !lines.includes(x as XmlElement));
+              inner = [tb];
+            }
+          }
           const rs = ownStyle(item);
           const plain = !/^(solid|dashed|dotted|double)/i.test(textOf(child(rs, 'Border/Style'))) && !BORDER_SIDES.some((s) => /^(solid|dashed|dotted|double)/i.test(textOf(child(rs, `${s}/Style`))))
             && (!textOf(child(rs, 'BackgroundColor')) || /^(transparent|#00ffffff)$/i.test(textOf(child(rs, 'BackgroundColor'))));
@@ -783,8 +819,6 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
   // ----- Looks from the style dataset.
   if (conv.style) applyStyleRoles(report, conv.style, roles, tableCells, unbanded, bandRows, review, dataSources[0]?.attributes.Name ?? conv.dataSource?.name ?? '');
 
-  // Custom code is part of this report alone.
-  if (child(report, 'Code')) review.push({ item: 'Custom code', message: 'the report uses custom code (Code.*); where reports are combined, its functions must go with it' });
 
   // ----- References to renamed items, groups, datasets and parameters.
   for (const e of descendants(report)) {
@@ -805,6 +839,10 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     v = v.replace(/"([^"]*)"/g, (m, n: string) => (scopeRenames.has(n) ? `"${scopeRenames.get(n)}"` : m));
     if (v !== t) e.children = [v];
   }
+  dropUnused(report, conv, review);
+  // Custom code is part of this report alone.
+  if (child(report, 'Code')) review.push({ item: 'Custom code', message: 'the report uses custom code (Code.*); where reports are combined, its functions must go with it' });
+
   // Notes the conversion made that no longer apply (the shared data source replaces the connection).
   return { rdl: toXml(root), review, settled: conv.dataSource ? ['Data source'] : [] };
 }
@@ -886,6 +924,62 @@ function fitItems(container: XmlElement | undefined): number {
     }
   }
   return Math.max(0, ...items.map((e) => len(e, 'Top') + len(e, 'Height')));
+}
+
+/**
+ * What nothing reads any more (the page header's dataset, its custom code, its pictures, a placeholder dataset, a
+ * parameter only those read) is left out.
+ */
+function dropUnused(report: XmlElement, conv: Conventions, review: ReviewNote[]): void {
+  const texts = () => descendants(report).flatMap((e) => [textOf(e), ...Object.values(e.attributes)]).join('\n');
+  const quoted = (name: string) => new RegExp(`"${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`, 'i');
+  // Datasets: read by a table or chart, a parameter's values, or by name in an expression.
+  const dataSets = child(report, 'DataSets');
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const ds of childElements(dataSets ?? el('x'), 'DataSet')) {
+      const name = ds.attributes.Name ?? '';
+      if (name === conv.style?.dataset) continue;
+      const others = descendants(report).filter((e) => !descendants(ds).includes(e));
+      const read = others.some((e) => (e.name === 'DataSetName' && textOf(e) === name) || (textOf(e).startsWith('=') && quoted(name).test(textOf(e))));
+      if (read) continue;
+      dataSets!.children = dataSets!.children.filter((c) => c !== ds);
+      review.push({ item: `Dataset ${name}`, message: 'left out: nothing in the template reads it (it served the page header or no data)' });
+      changed = true;
+    }
+  }
+  // Parameters only the dropped datasets passed on (the team's standard ones stay).
+  const params = child(report, 'ReportParameters');
+  const all = texts();
+  for (const p of childElements(params ?? el('x'), 'ReportParameter')) {
+    const name = p.attributes.Name ?? '';
+    if (conv.parameters.some((s) => s.name.toLowerCase() === name.toLowerCase())) continue;
+    if (new RegExp(`Parameters!${name}\\b`).test(all)) continue;
+    params!.children = params!.children.filter((c) => c !== p);
+    review.push({ item: `Parameter ${name}`, message: 'left out: nothing in the template uses it' });
+  }
+  if (params && !childElements(params, 'ReportParameter').length) report.children = report.children.filter((c) => c !== params);
+  const layout = child(report, 'ReportParametersLayout');
+  if (layout) {
+    const names = childElements(params ?? el('x'), 'ReportParameter').map((p) => p.attributes.Name ?? '');
+    const fresh = parametersLayout(names);
+    report.children = report.children.flatMap((c) => (c === layout ? (fresh ? [fresh] : []) : [c]));
+  }
+  // Custom code nothing calls; pictures nothing shows.
+  const code = child(report, 'Code');
+  if (code && !/\bCode\./.test(descendants(report).filter((e) => e !== code).map(textOf).join('\n'))) {
+    report.children = report.children.filter((c) => c !== code);
+    review.push({ item: 'Custom code', message: 'left out: nothing in the template calls it' });
+  }
+  const images = child(report, 'EmbeddedImages');
+  if (images) {
+    const shown = new Set(descendants(report).filter((e) => e.name === 'Image' && textOf(child(e, 'Source')) === 'Embedded').map((e) => textOf(child(e, 'Value'))));
+    const before = childElements(images, 'EmbeddedImage').length;
+    images.children = images.children.filter((c) => !(c && typeof c === 'object' && (c as XmlElement).name === 'EmbeddedImage' && !shown.has((c as XmlElement).attributes.Name ?? '')));
+    if (!childElements(images, 'EmbeddedImage').length) report.children = report.children.filter((c) => c !== images);
+    const dropped = before - childElements(images, 'EmbeddedImage').length;
+    if (dropped) review.push({ item: 'Pictures', message: `${dropped} left out: nothing in the template shows them (the page header's logo)` });
+  }
 }
 
 const newNames = (named: Set<XmlElement>) => new Set([...named].map((e) => (e.attributes.Name ?? '').toLowerCase()));

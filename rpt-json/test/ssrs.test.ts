@@ -426,6 +426,29 @@ describe('layout conversion', () => {
     assert.ok(!/<Line Name="Amt_Below[^"]*">\s*<Top>[^<]*<\/Top>\s*<Left>[^<]*<\/Left>\s*<Height>[^<]*<\/Height>\s*<Width>[^<]*<\/Width>\s*<Visibility>/.test(rdl));
   });
 
+  it('draws a moved line under a field as the field\'s underline when asked for simple rules', () => {
+    const definition: ReportDefinition = {
+      ...emptyDefinition(),
+      formulas: [
+        { name: 'Bottom_Line_Style', index: 1, kind: 'conditionalFormat', text: 'if {Orders.Region} = "Total" then crSingleLine else crNoLine', referencedFields: [] },
+        { name: 'DeltaX_Value_Formula', index: 2, kind: 'conditionalFormat', text: '(if IsNull({Orders.Amount}) then 0 else 1) * 1.15 * 1440', referencedFields: [] },
+      ],
+      layout: [
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 220, objects: [
+          { kind: 'field', name: 'Name', field: 'Orders.Customer', position: { x: 0, y: 0 }, size: { width: 7000, height: 200 } },
+          { kind: 'field', name: 'Amt', field: 'Orders.Amount', position: { x: 7751, y: 0 }, size: { width: 2000, height: 200 }, align: 'right',
+            conditions: { bottomLine: { name: 'Bottom_Line_Style', index: 1 }, deltaX: { name: 'DeltaX_Value_Formula', index: 2 } } },
+          { kind: 'field', name: 'Tag', field: 'Orders.Region', position: { x: 13327, y: 0 }, size: { width: 650, height: 200 } },
+        ] }] },
+      ],
+    };
+    const { rdl } = convertToRdl(definition, source, { reportName: 'Rule', simpleRules: true });
+    assertBalancedXml(rdl);
+    assert.ok(!/<Line Name="Amt_Below/.test(rdl), 'no line pieces');
+    const amount = rdl.slice(rdl.indexOf('<Textbox Name="Amt">'), rdl.indexOf('</Textbox>', rdl.indexOf('<Textbox Name="Amt">')));
+    assert.match(amount, /<TextDecoration>=IIf\(IIf\(IsNothing\([^<]*\), "None", [^<]*\) = "None", "None", "Underline"\)<\/TextDecoration>/);
+  });
+
   it('keeps a table reaching out to a rule within the printable page', () => {
     const definition: ReportDefinition = {
       ...emptyDefinition(),

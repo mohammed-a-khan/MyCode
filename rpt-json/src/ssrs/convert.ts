@@ -27,6 +27,8 @@ export interface SsrsOptions {
   parameterValues?: Record<string, string>;
   /** Number format for chart value axes the .rpt does not show (e.g. "0.00%"). */
   chartAxisFormat?: string;
+  /** Lines along fields that formulas move: drawn as the field's underline (see RdlOptions.simpleRules). */
+  simpleRules?: boolean;
   /** A last step over each report's RDL (a house style laid over the Crystal layout, ...). */
   restyle?: (rdl: string) => string;
   /** The very last step: the report reshaped as a team's template (names, structure, looks), with notes. */
@@ -77,6 +79,7 @@ export function convertDocumentToSsrs(doc: CfbDocument, baseName: string, option
       pageNumber: options.pageNumber,
       parameterValues: options.parameterValues,
       chartAxisFormat: options.chartAxisFormat,
+      simpleRules: options.simpleRules,
       subreports: model.storage ? new Map() : subreports,
       subreport: Boolean(model.storage),
       images: embeddedImages(storageAt(doc.root, model.storage)),
