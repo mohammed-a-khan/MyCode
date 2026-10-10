@@ -186,6 +186,30 @@ describe('conventions', () => {
     assert.ok(out.review.some((n) => n.item === 'Dataset Spare'));
   });
 
+  it('shows the team\'s message row instead of Crystal\'s blank band when there is no data', () => {
+    const definition: ReportDefinition = {
+      ...emptyDefinition(),
+      formulas: [
+        { name: 'Fake', index: 0, kind: 'formula', text: '1', referencedFields: [] },
+        { name: 'Group #1 Order', kind: 'internal', text: '', referencedFields: ['@Fake'] },
+      ],
+      layout: [
+        { name: 'GroupHeaderArea1', sections: [{ name: 'GH', height: 240, objects: [text('CustomerHeading', 'Customer', 0), text('AmountHeading', 'Amount', 2880)] }] },
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [field('CustomerValue', 'Orders.Customer', 0), field('AmountValue', 'Orders.Amount', 2880)] }] },
+      ],
+    } as ReportDefinition;
+    const plain = convertToRdl(definition, source, { reportName: 'Band' }).rdl;
+    assert.ok(plain.includes('CountRows() &gt; 0'), 'the conversion keeps a blank band for no data');
+    const out = applyConventions(plain, 'Band', conventions);
+    const r = parseXml(out.rdl);
+    const values = descendants(r).filter((e) => e.name === 'Textbox' && valueIn(e) === '=Fields!Customer.Value');
+    assert.equal(values.length, 1, 'the data row is not doubled');
+    assert.ok(byName(r, 'Band_Grid_1_Empty_Message'), 'the message row');
+    const tablix = descendants(r).find((e) => e.name === 'Tablix')!;
+    const leaves = (m: XmlElement): number => (child(m, 'TablixMembers') ? childElements(child(m, 'TablixMembers')!, 'TablixMember').reduce((a, x) => a + leaves(x), 0) : 1);
+    assert.equal(childElements(child(tablix, 'TablixRowHierarchy/TablixMembers')!, 'TablixMember').reduce((a, x) => a + leaves(x), 0), childElements(child(tablix, 'TablixBody/TablixRows')!, 'TablixRow').length);
+  });
+
   it('rejects unknown entries', () => {
     assert.throws(() => readConventions('{"nmes": {}}'), /unknown entry "nmes"/);
     assert.throws(() => readConventions('{"names": {"tabel": "x"}}'), /unknown entry "tabel"/);
