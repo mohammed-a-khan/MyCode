@@ -143,6 +143,36 @@ describe('conventions', () => {
     for (const m of rdl.matchAll(/ReportItems!(\w+)/g)) assert.ok(names.includes(m[1]!.toLowerCase()), `ReportItems!${m[1]} exists`);
   });
 
+  it('keeps the title Crystal printed in the page header, and leaves a list of lines unbanded', () => {
+    const definition: ReportDefinition = {
+      ...emptyDefinition(),
+      layout: [{ name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [field('CustomerValue', 'Orders.Customer', 0), field('AmountValue', 'Orders.Amount', 2880)] }] }],
+    };
+    const box = (name: string, value: string, size: string) => `<Textbox Name="${name}"><CanGrow>true</CanGrow><KeepTogether>true</KeepTogether><Paragraphs><Paragraph><TextRuns><TextRun>`
+      + `<Value>${value}</Value><Style><FontSize>${size}</FontSize></Style></TextRun></TextRuns><Style /></Paragraph></Paragraphs>`
+      + `<Top>0in</Top><Left>0in</Left><Height>0.25in</Height><Width>3in</Width><Style /></Textbox>`;
+    const header = `<PageHeader><Height>0.5in</Height><PrintOnFirstPage>true</PrintOnFirstPage><ReportItems>${box('Heading', 'Orders Checked', '14pt')}${box('AsOf', 'As of:', '8pt')}</ReportItems></PageHeader>`;
+    const plain = convertToRdl(definition, source, { reportName: 'Lines' }).rdl.replace(/<Page>/, `<Page>${header}`);
+    const out = applyConventions(plain, 'Lines', conventions);
+    const r = parseXml(out.rdl);
+    const tablix = descendants(r).find((e) => e.name === 'Tablix')!;
+    const first = descendants(childElements(child(tablix, 'TablixBody/TablixRows')!, 'TablixRow')[0]!).find((e) => e.name === 'Textbox')!;
+    assert.equal(first.attributes.Name, 'Lines_Heading_Title');
+    assert.equal(valueIn(first), 'Orders Checked');
+    assert.ok(!child(first, 'Top'), 'placed by its cell');
+    assert.ok(!out.rdl.includes('Odd_fill'), 'rows without column headings are not banded');
+    assert.ok(out.review.some((n) => n.item === 'Page header' && n.message.includes('As of:')));
+  });
+
+  it('draws boxes as tall as what they hold, moving what lies under them', () => {
+    const rects = all.filter((e) => e.name === 'Rectangle' && child(e, 'Height'));
+    for (const rect of rects) {
+      const items = childElements(child(rect, 'ReportItems') ?? { name: '', attributes: {}, children: [] });
+      const inner = Math.max(0, ...items.filter((e) => child(e, 'Top')).map((e) => parseFloat(textOf(child(e, 'Top'))) + parseFloat(textOf(child(e, 'Height')))));
+      assert.ok(inner <= parseFloat(textOf(child(rect, 'Height'))) + 0.001, `${rect.attributes.Name} holds what is in it`);
+    }
+  });
+
   it('rejects unknown entries', () => {
     assert.throws(() => readConventions('{"nmes": {}}'), /unknown entry "nmes"/);
     assert.throws(() => readConventions('{"names": {"tabel": "x"}}'), /unknown entry "tabel"/);

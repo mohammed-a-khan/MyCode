@@ -407,7 +407,20 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     }
   }
   if (conv.page?.font) for (const e of descendants(report).filter((x) => x.name === 'df:DefaultFontFamily')) e.children = [conv.page.font];
+  // The report's title, where Crystal printed it in the page header: the fixed text in the largest letters (not a
+  // label such as "As of:" or "Page"). It is kept, as the table's title.
+  let headerTitle: XmlElement | undefined;
   if (page && conv.pageBands === 'drop') {
+    const size = (tb: XmlElement) => Math.max(0, ...descendants(tb).filter((e) => e.name === 'FontSize').map((e) => inches(textOf(e)) ?? 0));
+    const candidates = descendants(child(page, 'PageHeader') ?? el('x')).filter((e) => e.name === 'Textbox' && !child(e, 'Visibility')).filter((tb) => {
+      const t = fixedText(tb);
+      return !!t && t.length > 3 && !/:\s*$/.test(t) && !/^(as of|page|date|run date|printed)\b/i.test(t) && !/Globals!|Parameters!/.test(valueOf(tb));
+    });
+    headerTitle = candidates.sort((a, b) => size(b) - size(a))[0];
+    if (headerTitle) {
+      const parent = descendants(page).find((e) => childElements(e).includes(headerTitle!));
+      if (parent) parent.children = parent.children.filter((c) => c !== headerTitle);
+    }
     for (const band of ['PageHeader', 'PageFooter']) {
       const b = child(page, band);
       if (!b) continue;
@@ -419,6 +432,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
 
   // ----- Roles each text box takes its looks from.
   const roles = new Map<XmlElement, RoleKey>();
+  const unbanded = new Set<XmlElement>();
   const tableCells = new Set<XmlElement>();
   const bandRows: XmlElement[] = [];
 
@@ -450,7 +464,9 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       && len(e, 'Left') >= tLeft - 0.1 && len(e, 'Left') + len(e, 'Width') <= tLeft + tWidth + 0.1)
       .sort((a, b) => len(b, 'Top') - len(a, 'Top'));
     const nearest = above[0];
-    const between = nearest && siblings.some((e) => e !== nearest && len(e, 'Top') >= len(nearest, 'Top') + len(nearest, 'Height') - 0.01 && len(e, 'Top') < tTop
+    // Nothing else between the title and the table, nor beside the title over the table's width (a logo, a label):
+    // the title is a line of its own.
+    const between = nearest && siblings.some((e) => e !== nearest && len(e, 'Top') < tTop && len(e, 'Top') + len(e, 'Height') > len(nearest, 'Top') + 0.01
       && len(e, 'Left') < tLeft + tWidth && len(e, 'Left') + len(e, 'Width') > tLeft);
     const leaves0 = rowLeaves(tablix);
     if (nearest && !between && tTop - (len(nearest, 'Top') + len(nearest, 'Height')) <= 0.5 && tablix === tablixes[0]) {
@@ -472,6 +488,21 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       child(tablix, 'TablixRowHierarchy/TablixMembers')!.children.unshift(member);
       setChild(tablix, 'Top', inch(top));
       setChild(tablix, 'Height', inch(len(tablix, 'Height') + height));
+    } else if (headerTitle && tablix === tablixes[0]) {
+      // The title from the page header: over the table, as its first row.
+      const height = Math.max(len(headerTitle, 'Height'), 0.2);
+      titleText = fixedText(headerTitle);
+      unplace(headerTitle);
+      rename(headerTitle, 'title');
+      roles.set(headerTitle, 'title');
+      tableCells.add(headerTitle);
+      const row = spanningRow(height, headerTitle, columns);
+      child(tablix, 'TablixBody/TablixRows')!.children.unshift(row);
+      bandRows.push(row);
+      const repeat = leaves0[0]?.kind === 'heading' && textOf(child(leaves0[0].member, 'RepeatOnNewPage')) === 'true';
+      child(tablix, 'TablixRowHierarchy/TablixMembers')!.children.unshift(el('TablixMember', el('KeepWithGroup', 'After'), repeat ? el('RepeatOnNewPage', 'true') : null));
+      setChild(tablix, 'Height', inch(len(tablix, 'Height') + height));
+      headerTitle = undefined;
     }
 
     // Totals printed just under the table, each under a column: the table's last row(s).
@@ -537,12 +568,23 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       const member = el('TablixMember', el('KeepWithGroup', 'After'), repeat ? el('RepeatOnNewPage', 'true') : null, el('Visibility', el('Hidden', '=CountRows() > 0')));
       if (at < top.length) memberList.children.splice(memberList.children.indexOf(top[at]!), 0, member);
       else memberList.children.push(member);
+      const oldBottom = len(tablix, 'Top') + len(tablix, 'Height');
       setChild(tablix, 'Height', inch(len(tablix, 'Height') + 0.2));
+      // What lies under the table moves down as far (the row is hidden when there is data; then all moves back up).
+      if (container) {
+        for (const e of childElements(container).filter((x) => ITEMS.has(x.name) && x !== tablix)) {
+          if (len(e, 'Top') >= oldBottom - 0.001 && len(e, 'Left') < tLeft + tWidth && len(e, 'Left') + len(e, 'Width') > tLeft) setChild(e, 'Top', inch(len(e, 'Top') + 0.2));
+        }
+      }
     }
 
     // Column names: the field each column shows in its data row, else its heading.
     const rows = rowsOf(tablix);
     const kinds = rowLeaves(tablix).map((l) => l.kind);
+    // A table without column headings, or placing its lines by formula (a statement's indented labels), is lines of
+    // text, not rows of data: its rows are not banded.
+    const statement = !rows.some((row, i) => kinds[i] === 'heading' && !descendants(row).some((e) => roles.get(e) === 'title')) || rows.some((row, i) => kinds[i] === 'detail'
+      && descendants(row).some((e) => e.name === 'Textbox' && textOf(child(childElements(e, 'Style')[0] ?? el('x'), 'PaddingLeft')).startsWith('=')));
     const colNames: (string | undefined)[] = [];
     const textboxIn = (cell: XmlElement | undefined) => {
       const item = cell ? cellItem(cell) : undefined;
@@ -631,6 +673,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
         else if (item.name === 'Tablix' || item.name === 'Chart') { /* named where met */ } else rename(item, item.name === 'Line' ? 'line' : item.name === 'Image' ? 'image' : 'text', { T });
         for (const tb of textboxes) {
           tableCells.add(tb);
+          if ((statement && kind === 'detail') || kind === 'noData') unbanded.add(tb);
           if (roles.has(tb) || isBlank(tb)) continue;
           const numeric = isNumber(tb);
           const totalled = TOTALLED.test(valueOf(tb));
@@ -642,7 +685,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
         }
         if (kind !== 'detail' && kind !== 'noData' && !isBlank(textboxes[0] ?? el('x'))) bandRows.push(row);
       });
-      if (kind === 'detail') bandRows.push(row);
+      if (kind === 'detail' && !statement) bandRows.push(row);
     });
     // A cross-tab's row and column headers.
     for (const hierarchy of ['TablixRowHierarchy', 'TablixColumnHierarchy']) {
@@ -672,6 +715,14 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     g.attributes.Name = name;
     named.add(g);
     if (old && old !== name) scopeRenames.set(old, name);
+  }
+
+  // ----- Sizes as the report prints: what Crystal's layout leaves to grow when the report runs (a box holding a
+  // table, a row holding a box, a row of text drawn shorter than its text) is drawn at its full size, and what lies
+  // under it moves down as far, so nothing overlaps in the designer and the printed report stays the same.
+  if (body) {
+    const bottom = fitItems(child(body, 'ReportItems'));
+    if (bottom > len(body, 'Height')) setChild(body, 'Height', inch(bottom));
   }
 
   // ----- What else lies in the body: one rectangle around it all.
@@ -730,7 +781,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
   }
 
   // ----- Looks from the style dataset.
-  if (conv.style) applyStyleRoles(report, conv.style, roles, tableCells, bandRows, review, dataSources[0]?.attributes.Name ?? conv.dataSource?.name ?? '');
+  if (conv.style) applyStyleRoles(report, conv.style, roles, tableCells, unbanded, bandRows, review, dataSources[0]?.attributes.Name ?? conv.dataSource?.name ?? '');
 
   // Custom code is part of this report alone.
   if (child(report, 'Code')) review.push({ item: 'Custom code', message: 'the report uses custom code (Code.*); where reports are combined, its functions must go with it' });
@@ -763,6 +814,80 @@ function inTable(item: XmlElement, container: XmlElement): boolean {
   return descendants(container).some((t) => t !== container && t.name === 'Tablix' && descendants(t).includes(item) && t !== item);
 }
 
+/** The height a text box's text needs on one line per paragraph (inches); none where its size is worked out. */
+function textHeight(textbox: XmlElement): number | undefined {
+  const sizes = descendants(textbox).filter((e) => e.name === 'FontSize').map((e) => textOf(e));
+  if (sizes.some((v) => v.startsWith('='))) return undefined;
+  const points = sizes.map((v) => (inches(v) ?? 0) * 72).filter((v) => v > 0);
+  const size = points.length ? Math.max(...points) : 10;
+  const lines = Math.max(1, descendants(textbox).filter((e) => e.name === 'Paragraph').length);
+  const style = childElements(textbox, 'Style')[0];
+  const padding = ['PaddingTop', 'PaddingBottom'].reduce((a, k) => a + (inches(textOf(child(style, k)) || '2pt') ?? 0), 0);
+  return (lines * size * 1.2) / 72 + padding;
+}
+
+/**
+ * A table's rows as tall as what they always print: a row holding fixed text (it always prints the text), a row
+ * holding a box (as tall as what the box holds). Returns how much taller the table is.
+ */
+function fitTablix(tablix: XmlElement): number {
+  let grown = 0;
+  for (const row of rowsOf(tablix)) {
+    const height = len(row, 'Height');
+    let need = 0;
+    for (const cell of cellsOf(row)) {
+      const item = cellItem(cell);
+      if (!item) continue;
+      if (item.name === 'Rectangle') need = Math.max(need, fitItems(child(item, 'ReportItems')));
+      else if (item.name === 'Tablix') need = Math.max(need, len(item, 'Height') + fitTablix(item));
+      else if (item.name === 'Textbox' && fixedText(item) && !child(item, 'Visibility') && textOf(child(item, 'CanShrink')) !== 'true') need = Math.max(need, textHeight(item) ?? 0);
+    }
+    if (need > height + 0.001) {
+      setChild(row, 'Height', inch(need));
+      grown += need - height;
+    }
+  }
+  if (grown) setChild(tablix, 'Height', inch(len(tablix, 'Height') + grown));
+  return grown;
+}
+
+/** Fits the items in a container (see above); returns where the lowest ends. */
+function fitItems(container: XmlElement | undefined): number {
+  if (!container) return 0;
+  const items = childElements(container).filter((e) => ITEMS.has(e.name));
+  const before = new Map(items.map((e) => [e, { top: len(e, 'Top'), bottom: len(e, 'Top') + len(e, 'Height'), left: len(e, 'Left'), right: len(e, 'Left') + len(e, 'Width') }]));
+  const grew = new Map<XmlElement, number>();
+  for (const e of items) {
+    let g = 0;
+    if (e.name === 'Rectangle') {
+      const inner = fitItems(child(e, 'ReportItems'));
+      g = Math.max(0, inner - len(e, 'Height'));
+    } else if (e.name === 'Tablix') g = fitTablix(e);
+    if (g > 0.001) {
+      if (e.name === 'Rectangle') setChild(e, 'Height', inch(len(e, 'Height') + g));
+      grew.set(e, g);
+    }
+  }
+  // What lies under a grown item (across part of its width) moves down with it, as it does when the report runs.
+  const shift = new Map<XmlElement, number>();
+  const order = [...items].sort((a, b) => before.get(a)!.top - before.get(b)!.top);
+  for (const j of order) {
+    const bj = before.get(j)!;
+    let s = 0;
+    for (const i of order) {
+      if (i === j) continue;
+      const bi = before.get(i)!;
+      if (bi.bottom > bj.top + 0.001 || bi.right <= bj.left + 0.001 || bj.right <= bi.left + 0.001) continue;
+      s = Math.max(s, (shift.get(i) ?? 0) + (grew.get(i) ?? 0));
+    }
+    if (s > 0.001) {
+      shift.set(j, s);
+      setChild(j, 'Top', inch(bj.top + s));
+    }
+  }
+  return Math.max(0, ...items.map((e) => len(e, 'Top') + len(e, 'Height')));
+}
+
 const newNames = (named: Set<XmlElement>) => new Set([...named].map((e) => (e.attributes.Name ?? '').toLowerCase()));
 
 const BORDER_SIDES = ['TopBorder', 'BottomBorder', 'LeftBorder', 'RightBorder'];
@@ -775,7 +900,7 @@ function insertBefore(parent: XmlElement, item: XmlElement, before: string[]): v
 
 /** Each role's looks, as expressions reading the style dataset; the dataset itself, with the fields used. */
 function applyStyleRoles(report: XmlElement, style: NonNullable<Conventions['style']>, roles: Map<XmlElement, RoleKey>, tableCells: Set<XmlElement>,
-  bandRows: XmlElement[], review: ReviewNote[], dataSourceName: string): void {
+  unbanded: Set<XmlElement>, bandRows: XmlElement[], review: ReviewNote[], dataSourceName: string): void {
   const used = new Set<string>();
   const field = (role: string, prop: string) => {
     const name = style.field.replace(/\{role\}/g, role).replace(/\{prop\}/g, prop);
@@ -816,7 +941,7 @@ function applyStyleRoles(report: XmlElement, style: NonNullable<Conventions['sty
     const plain = !current || /^(transparent|white|#ffffff|#00ffffff)$/i.test(current);
     if (fillWord && tableCells.has(tb) && plain) {
       if (roleKey === 'body' || roleKey === 'bodyFirst' || roleKey === 'number') {
-        if (style.rowBands) setChild(own, 'BackgroundColor', `=IIF(RowNumber(Nothing) Mod 2, ${expr(field(style.rowBands.odd, fillWord))}, ${expr(field(style.rowBands.even, fillWord))})`);
+        if (style.rowBands && !unbanded.has(tb)) setChild(own, 'BackgroundColor', `=IIF(RowNumber(Nothing) Mod 2, ${expr(field(style.rowBands.odd, fillWord))}, ${expr(field(style.rowBands.even, fillWord))})`);
       } else setChild(own, 'BackgroundColor', `=${expr(field(role, fillWord))}`);
     }
   }
