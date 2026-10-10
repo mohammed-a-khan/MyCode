@@ -176,6 +176,8 @@ const inches = (value: string): number | undefined => {
   return { in: v, cm: v / 2.54, mm: v / 25.4, pt: v / 72, pc: v / 6 }[(m[2] ?? 'in').toLowerCase() as 'in'];
 };
 const inch = (v: number) => `${Math.round(v * 100000) / 100000}in`;
+/** Rounded up: what moves below another item never ends up a hair inside it (SSRS then would not push it). */
+const inchUp = (v: number) => `${Math.ceil(v * 100000 - 1e-6) / 100000}in`;
 const pt = (v: number) => `${Math.round(v * 72 * 10) / 10}pt`;
 const len = (e: XmlElement, name: string) => inches(textOf(child(e, name))) ?? 0;
 
@@ -783,10 +785,8 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
   // under it moves down as far, so nothing overlaps in the designer and the printed report stays the same.
   if (body) {
     minTextRow = conv.style ? MIN_TEXT_ROW : 0;
-    // First every box as tall as what it holds (moving what lies under it), then the plain ones give way to what they
-    // hold: lifted out, each table keeps the place the grown boxes give it.
-    fitItems(child(body, 'ReportItems'));
-    unwrapPlain(child(body, 'ReportItems'));
+    // (Each subreport's frame stays: when the report runs, a frame growing with its table pushes the next frame down,
+    // which items side by side in one box, touching, would not do.)
     const bottom = fitItems(child(body, 'ReportItems'));
     if (bottom > len(body, 'Height')) setChild(body, 'Height', inch(bottom));
   }
@@ -937,44 +937,13 @@ function fitTablix(tablix: XmlElement): number {
 /** What lies under an item that grew (from its old bottom, across part of its width) moves down by as far. */
 function moveBelow(container: XmlElement, item: XmlElement, oldBottom: number, by: number, left: number, right: number): void {
   for (const e of childElements(container).filter((x) => ITEMS.has(x.name) && x !== item)) {
-    if (len(e, 'Top') >= oldBottom - 0.001 && len(e, 'Left') < right && len(e, 'Left') + len(e, 'Width') > left) setChild(e, 'Top', inch(len(e, 'Top') + by));
+    if (len(e, 'Top') >= oldBottom - 0.001 && len(e, 'Left') < right && len(e, 'Left') + len(e, 'Width') > left) setChild(e, 'Top', inchUp(len(e, 'Top') + by));
   }
 }
 
 /** The least height of a row of text whose size the style dataset gives (inches). */
 const MIN_TEXT_ROW = 0.2;
 let minTextRow = 0;
-
-/**
- * A plain box (no border, fill, show/hide rule, page break or document map entry: a Crystal subreport's frame) gives
- * way to what it holds, placed where it was; the template holds its tables directly.
- */
-function unwrapPlain(container: XmlElement | undefined): void {
-  if (!container) return;
-  for (let again = true; again;) {
-    again = false;
-    for (const e of childElements(container)) {
-      if (e.name !== 'Rectangle') continue;
-      const style = childElements(e, 'Style')[0];
-      const bordered = /^(solid|dashed|dotted|double)/i.test(textOf(child(style, 'Border/Style')))
-        || BORDER_SIDES.some((side) => /^(solid|dashed|dotted|double)/i.test(textOf(child(style, `${side}/Style`))));
-      const fill = textOf(child(style, 'BackgroundColor'));
-      const plain = !bordered && (!fill || /^(transparent|#00ffffff)$/i.test(fill)) && !child(e, 'Visibility') && !child(e, 'PageBreak')
-        && !child(e, 'DocumentMapLabel') && !child(e, 'Bookmark') && !child(e, 'ActionInfo');
-      const inner = childElements(child(e, 'ReportItems') ?? el('x')).filter((x) => ITEMS.has(x.name));
-      if (!plain || !inner.length) continue;
-      const top = len(e, 'Top');
-      const left = len(e, 'Left');
-      for (const x of inner) {
-        setChild(x, 'Top', inch(len(x, 'Top') + top));
-        setChild(x, 'Left', inch(len(x, 'Left') + left));
-      }
-      container.children = container.children.flatMap((c) => (c === e ? inner : [c]));
-      again = true;
-      break;
-    }
-  }
-}
 
 /** Fits the items in a container (see above); returns where the lowest ends. */
 function fitItems(container: XmlElement | undefined): number {
@@ -989,7 +958,7 @@ function fitItems(container: XmlElement | undefined): number {
       g = Math.max(0, inner - len(e, 'Height'));
     } else if (e.name === 'Tablix') g = fitTablix(e);
     if (g > 0.001) {
-      if (e.name === 'Rectangle') setChild(e, 'Height', inch(len(e, 'Height') + g));
+      if (e.name === 'Rectangle') setChild(e, 'Height', inchUp(len(e, 'Height') + g));
       grew.set(e, g);
     }
   }
@@ -1007,7 +976,7 @@ function fitItems(container: XmlElement | undefined): number {
     }
     if (s > 0.001) {
       shift.set(j, s);
-      setChild(j, 'Top', inch(bj.top + s));
+      setChild(j, 'Top', inchUp(bj.top + s));
     }
   }
   return Math.max(0, ...items.map((e) => len(e, 'Top') + len(e, 'Height')));
