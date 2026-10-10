@@ -505,6 +505,11 @@ export function applyHouseStyle(rdl: string, style: HouseStyle): string {
     if (code) {
       code.children = [textOf(code).replace(/Dim palette\(\) As String = \{[^}]*\}/g, `Dim palette() As String = {${palette.map((c) => `"${c}"`).join(', ')}}`)];
     }
+    // Bars coloured by their place in the chart (a column of the query): the palette's colour at that place.
+    for (const color of all.filter((e) => e.name === 'Color')) {
+      const place = /^=Choose\(\(Fields!(\w+)\.Value - 1\) Mod \d+ \+ 1, /.exec(textOf(color))?.[1];
+      if (place) color.children = [`=Choose((Fields!${place}.Value - 1) Mod ${palette.length} + 1, ${palette.map((c) => `"${c}"`).join(', ')})`];
+    }
   }
   if (style.chart?.plotBackground) {
     for (const area of all.filter((e) => e.name === 'ChartArea')) {

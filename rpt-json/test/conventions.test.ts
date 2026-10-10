@@ -327,6 +327,60 @@ describe('conventions', () => {
     assert.ok(grouped.includes('Name="Heads_Grid_1_Customer_Head"') && grouped.includes('Name="Heads_Grid_1_Amount_Head"'), 'headings by name');
   });
 
+  it('gives each table after the first thin spare columns, which hiding the first one\'s columns takes off instead', () => {
+    let plain = converted();
+    const tablix = /<Tablix Name="([^"]+)">[\s\S]*?<\/Tablix>/.exec(plain)!;
+    const second = tablix[0].replace(`Name="${tablix[1]}"`, 'Name="Second"').replace(/Name="(?!Second")([^"]+)"/g, 'Name="$1_b"')
+      .replace(/(<\/TablixRowHierarchy>[\s\S]*?<Top>)[^<]*(<\/Top>)/, '$15in$2');
+    plain = plain.replace(tablix[0], tablix[0] + second);
+    const r = parseXml(applyConventions(plain, 'Orders', conventions).rdl);
+    const tables = descendants(r).filter((e) => e.name === 'Tablix');
+    assert.equal(tables.length, 2);
+    const cols = (t: XmlElement) => childElements(child(t, 'TablixBody/TablixColumns')!, 'TablixColumn').length;
+    const width = (t: XmlElement) => childElements(child(t, 'TablixBody/TablixColumns')!, 'TablixColumn').reduce((a, c) => a + parseFloat(textOf(child(c, 'Width'))), 0);
+    const before = parseXml(plain);
+    const original = descendants(before).filter((e) => e.name === 'Tablix');
+    assert.equal(cols(tables[1]!), cols(original[1]!) + cols(tables[0]!) - 1, 'one spare column for each column the first table could lose');
+    assert.ok(Math.abs(width(tables[1]!) - width(original[1]!)) < 0.001, 'as wide as before');
+    for (const row of childElements(child(tables[1]!, 'TablixBody/TablixRows')!, 'TablixRow')) {
+      const cells = childElements(child(row, 'TablixCells')!, 'TablixCell');
+      const spans = cells.reduce((a, c) => a + (c.children.length ? 1 : 0) + Math.max(0, Number(textOf(child(c, 'CellContents/ColSpan')) || 1) - 1), 0);
+      assert.equal(cells.length, cols(tables[1]!));
+      assert.ok(spans <= cols(tables[1]!));
+    }
+    assert.equal(childElements(child(tables[1]!, 'TablixColumnHierarchy/TablixMembers')!, 'TablixMember').length, cols(tables[1]!));
+  });
+
+  it('gives each column a heading of its own and lists the columns by number, for reports combined', () => {
+    // "Customer" over two columns (the name and the region beside it), centred.
+    const definition: ReportDefinition = {
+      ...emptyDefinition(),
+      layout: [
+        { name: 'PageHeaderArea1', sections: [{ name: 'PH', height: 240, objects: [text('CustomerHeading', 'Customer', 0, { align: 'center', ...at(0, 5760) }), text('AmountHeading', 'Amount', 5760)] }] },
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [field('CustomerValue', 'Orders.Customer', 0), field('RegionValue', 'Orders.Region', 2880), field('AmountValue', 'Orders.Amount', 5760)] }] },
+      ],
+    } as ReportDefinition;
+    const out = applyConventions(convertToRdl(definition, source, { reportName: 'Heads' }).rdl, 'Heads', conventions);
+    const r = parseXml(out.rdl);
+    const tablix = descendants(r).find((e) => e.name === 'Tablix')!;
+    const headingRow = childElements(child(tablix, 'TablixBody/TablixRows')!, 'TablixRow').find((row) => descendants(row).some((e) => e.name === 'Textbox' && valueIn(e) === 'Customer'))!;
+    assert.ok(!descendants(headingRow).some((e) => e.name === 'ColSpan'), 'no heading across columns');
+    for (const col of ['Customer', 'Region', 'Amount']) assert.ok(out.rdl.includes(`Name="Heads_Grid_1_${col}_Head"`), `a heading for ${col}`);
+    assert.ok(out.review.some((n) => n.message.includes('columns, by number:') && /1 Customer, 2 Region, 3 Amount/.test(n.message)));
+    assert.ok(out.review.some((n) => n.message.includes('"Customer" was over columns 1 to 2')));
+  });
+
+  it('names custom code after the report, so reports combined keep their functions apart', () => {
+    const plain = converted().replace(/<rd:ReportUnitType>/, '<Code>Dim seen As Integer\nPublic Function Tick(a) As Integer\n  seen = seen + 1\n  Return Helper(a)\nEnd Function\nPublic Function Helper(a) As Integer\n  Return "Tick" &amp; a\nEnd Function</Code><rd:ReportUnitType>')
+      .replace(/<Body>\s*<ReportItems>/, (m) => m + '<Textbox Name="T"><CanGrow>true</CanGrow><KeepTogether>true</KeepTogether><Paragraphs><Paragraph><TextRuns><TextRun><Value>=Code.Tick(1)</Value><Style /></TextRun></TextRuns><Style /></Paragraph></Paragraphs><Top>9in</Top><Left>0in</Left><Height>0.2in</Height><Width>1in</Width><Style /></Textbox>');
+    const out = applyConventions(plain, 'Orders', conventions);
+    const code = textOf(descendants(parseXml(out.rdl)).find((e) => e.name === 'Code'));
+    assert.match(code, /Dim Orders_seen As Integer/);
+    assert.match(code, /Function Orders_Tick\(a\)[\s\S]*Orders_seen = Orders_seen \+ 1[\s\S]*Return Orders_Helper\(a\)/);
+    assert.match(code, /Return "Tick" & a/, 'quoted text kept');
+    assert.ok(out.rdl.includes('=Code.Orders_Tick(1)'));
+  });
+
   it('rejects unknown entries', () => {
     assert.throws(() => readConventions('{"nmes": {}}'), /unknown entry "nmes"/);
     assert.throws(() => readConventions('{"names": {"tabel": "x"}}'), /unknown entry "tabel"/);

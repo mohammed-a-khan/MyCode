@@ -21,6 +21,10 @@ export interface FormulaContext {
   runningTotal?(name: string): string | undefined;
   /** VB name of a Crystal custom function (a formula written as "Function (...)"), or undefined. */
   customFunction?(name: string): string | undefined;
+  /** The Crystal text of a custom function, for writing one of a single value in place (see inlineFunctions). */
+  customFunctionText?(name: string): string | undefined;
+  /** Custom functions of a single value (an expression, or an if/select choosing one) are written in place, not as code. */
+  inlineFunctions?(): boolean;
   /** For a range parameter: the SSRS parameters holding its start and end. */
   parameterRange?(name: string): { start: string; end: string } | undefined;
   /** Whether a parameter accepts several values. */
@@ -1069,7 +1073,7 @@ export class Emitter {
   result(node: Node, colors: boolean): string {
     if (colors) {
       if (node.t === 'literal' && /^\d+$/.test(node.vb)) return vbString(crystalColor(Number(node.vb)));
-      if (node.t === 'call' && node.name.toLowerCase() === 'color' && node.args.every((a) => a.t === 'literal' && /^\d+$/.test(a.vb))) {
+      if (node.t === 'call' && ['color', 'rgb'].includes(node.name.toLowerCase()) && node.args.length === 3 && node.args.every((a) => a.t === 'literal' && /^\d+$/.test(a.vb))) {
         const [r, g, b] = node.args.map((a) => Number((a as { vb: string }).vb));
         return vbString(crystalColor(r | (g << 8) | (b << 16)));
       }
@@ -1081,8 +1085,76 @@ export class Emitter {
         if (node.otherwise) pairs.push('True', this.result(node.otherwise, true));
         return `Switch(${pairs.join(', ')})`;
       }
+      const inlined = node.t === 'call' ? this.inlined(node.name, node.args) : undefined;
+      if (inlined) return this.within(inlined.name, () => this.result(inlined.node, true));
     }
     return this.emit(node);
+  }
+
+  /** Custom functions being written in place (one cannot be written inside itself). */
+  private readonly inlining = new Set<string>();
+
+  private within(name: string, emit: () => string): string {
+    this.inlining.add(name);
+    try {
+      return emit();
+    } finally {
+      this.inlining.delete(name);
+    }
+  }
+
+  /**
+   * A custom function of a single value, called with these arguments, as that value: its parameters replaced by
+   * the arguments (or their defaults). Undefined where it needs statements, or outside custom code is not wanted.
+   */
+  private inlined(name: string, args: Node[]): { name: string; node: Node } | undefined {
+    const key = name.toLowerCase();
+    if (!this.ctx.inlineFunctions?.() || this.inCode || this.inlining.has(key)) return undefined;
+    const text = this.ctx.customFunctionText?.(name);
+    if (!text) return undefined;
+    let program: Program;
+    try {
+      program = new Parser(tokenize(text)).parseProgram();
+    } catch {
+      return undefined;
+    }
+    const params = program.params ?? [];
+    if (args.length > params.length || params.some((p) => p.array || p.range)) return undefined;
+    const bound = new Map<string, Node>();
+    for (const [i, p] of params.entries()) {
+      const value = args[i] ?? p.optional;
+      if (!value) return undefined;
+      bound.set(p.name.toLowerCase(), value);
+    }
+    const single = (stmts: Stmt[] | undefined): Node | undefined => {
+      const effective = (stmts ?? []).filter((st) => st.s !== 'timing');
+      if (effective.length !== 1) return undefined;
+      const st = effective[0]!;
+      if (st.s === 'expr') return st.expr;
+      if (st.s === 'if') {
+        const then = single(st.then);
+        const otherwise = st.else ? single(st.else) : undefined;
+        return then && (otherwise || !st.else) ? { t: 'if', cond: st.cond, then, ...(otherwise ? { else: otherwise } : {}) } : undefined;
+      }
+      if (st.s === 'select') {
+        const cases = st.cases.map((c) => ({ match: c.match, result: single(c.body) }));
+        const otherwise = st.otherwise ? single(st.otherwise) : undefined;
+        if (cases.some((c) => !c.result) || (st.otherwise && !otherwise)) return undefined;
+        return { t: 'select', value: st.value, cases: cases as { match: Node[]; result: Node }[], ...(otherwise ? { otherwise } : {}) };
+      }
+      return undefined;
+    };
+    const body = single(program.body);
+    if (!body) return undefined;
+    // (Each parameter replaced by its argument, as it is: the arguments are not themselves searched.)
+    const substitute = (value: unknown): unknown => {
+      if (Array.isArray(value)) return value.map(substitute);
+      if (!value || typeof value !== 'object') return value;
+      const node = value as Node;
+      if (node.t === 'name') return bound.get(node.name.toLowerCase()) ?? node;
+      return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, substitute(v)]));
+    };
+    return { name: key, node: substitute(body) as Node };
   }
 
   private note(message: string): void {
@@ -1662,6 +1734,8 @@ export class Emitter {
     if (key === 'instr' || key === 'instrrev') return this.instr(key, args);
     const vb = SAME_ARGS[key];
     if (vb) return `${vb}(${a().join(', ')})`;
+    const inlined = this.inlined(name, args);
+    if (inlined) return this.within(inlined.name, () => `(${this.emit(inlined.node)})`);
     const custom = this.ctx.customFunction?.(name);
     if (custom) return `${this.inCode ? '' : 'Code.'}${custom}(${a().join(', ')})`;
     // Left as it is, the function would not compile in SSRS (the report would not upload): nothing is shown
@@ -2099,6 +2173,940 @@ export function translateToSql(source: string, ctx: SqlContext): string | undefi
     return condition(tree);
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * A long SQL expression laid out to read: each WHEN and ELSE of a CASE on a line of its own, indented by how deep the
+ * CASE is (text in quotes left as it is). Short ones stay on one line.
+ */
+export function layOutSql(sql: string, indent: string, width = 110): string {
+  if (sql.length <= width) return sql;
+  const parts = sql.split(/(N?'(?:[^']|'')*')/);
+  let depth = 0;
+  let out = '';
+  for (const [i, part] of parts.entries()) {
+    if (i % 2) {
+      out += part;
+      continue;
+    }
+    out += part.replace(/\b(CASE|END|WHEN|ELSE)\b/g, (word) => {
+      if (word === 'CASE') {
+        depth++;
+        return word;
+      }
+      if (word === 'END') {
+        depth--;
+        return `\n${indent}${'  '.repeat(depth)}END`;
+      }
+      return `\n${indent}${'  '.repeat(depth)}${word}`;
+    });
+  }
+  return out.replace(/ +\n/g, '\n');
+}
+
+/** SQL types of Crystal variables and parameters, and what values of them are here. */
+const SQL_VAR_TYPES: Record<string, string> = { numbervar: 'float', currencyvar: 'money', stringvar: 'nvarchar(max)', booleanvar: 'bit', datevar: 'date', datetimevar: 'datetime2(0)', timevar: 'time(0)' };
+const VAR_TYPES: Record<string, SqlType> = { numbervar: 'number', currencyvar: 'number', stringvar: 'string', booleanvar: 'boolean', datevar: 'date', datetimevar: 'dateTime', timevar: 'dateTime' };
+const SQL_RESULT_TYPES: Record<SqlType, string> = { number: 'float', string: 'nvarchar(max)', boolean: 'bit', date: 'date', dateTime: 'datetime2(0)' };
+/** A Crystal name as part of a T-SQL variable name. */
+const sqlIdent = (name: string) => name.replace(/\W/g, '_');
+/** A value passed as a parameter of the given SQL type (dates as dates, numbers as they are). */
+function castTo(v: { sql: string; type: SqlType }, sqlType: string): string {
+  return v.type === 'date' && sqlType.startsWith('datetime') ? `CAST(${v.sql} AS ${sqlType})` : v.sql;
+}
+/** Every expression in statements. */
+function statementNodes(list: Stmt[]): Node[] {
+  return list.flatMap((st): Node[] => {
+    switch (st.s) {
+      case 'decl': return st.init ? [st.init] : [];
+      case 'assign': return [st.value, ...(st.index ? [st.index] : [])];
+      case 'expr': return [st.expr];
+      case 'if': return [st.cond, ...statementNodes(st.then), ...statementNodes(st.else ?? [])];
+      case 'select': return [st.value, ...st.cases.flatMap((c) => [...c.match, ...statementNodes(c.body)]), ...statementNodes(st.otherwise ?? [])];
+      case 'for': return [st.from, st.to, ...(st.step ? [st.step] : []), ...statementNodes(st.body)];
+      case 'while': return [st.cond, ...statementNodes(st.body)];
+      case 'redim': return [st.size];
+      default: return [];
+    }
+  });
+}
+/** Whether an expression reads a variable. */
+function nodeReads(n: Node, name: string): boolean {
+  return (n.t === 'name' && n.name.toLowerCase() === name.toLowerCase()) || childNodes(n).some((c) => nodeReads(c, name));
+}
+/** Whether a statement (itself, not those inside it) reads a variable. */
+function statementReads(st: Stmt, name: string): boolean {
+  switch (st.s) {
+    case 'decl': return !!st.init && nodeReads(st.init, name);
+    case 'assign': return nodeReads(st.value, name);
+    case 'expr': return nodeReads(st.expr, name);
+    case 'if': return nodeReads(st.cond, name);
+    case 'select': return nodeReads(st.value, name);
+    case 'for': return nodeReads(st.from, name) || nodeReads(st.to, name);
+    case 'while': return nodeReads(st.cond, name);
+    default: return false;
+  }
+}
+
+/** The nodes directly under a node. */
+function childNodes(n: Node): Node[] {
+  switch (n.t) {
+    case 'call': return n.args;
+    case 'unary': return [n.arg];
+    case 'binary': return [n.left, n.right];
+    case 'if': return [n.cond, n.then, ...(n.else ? [n.else] : [])];
+    case 'in': return [n.value, ...n.list];
+    case 'range': return [n.value, n.from, n.to];
+    case 'select': return [n.value, ...n.cases.flatMap((c) => [...c.match, c.result]), ...(n.otherwise ? [n.otherwise] : [])];
+    case 'array': return n.items;
+    case 'index': return [n.base, n.from, ...(n.to ? [n.to] : [])];
+    case 'rangeValue': return [n.from, n.to];
+    default: return [];
+  }
+}
+
+// ---- formula -> T-SQL column ---------------------------------------------------------------
+
+/** The type of a value worked out in SQL. */
+export type SqlType = 'number' | 'string' | 'date' | 'dateTime' | 'boolean';
+
+export interface FormulaSqlContext {
+  /** Quoted column for a database field, or undefined. */
+  column(table: string, field: string): string | undefined;
+  /** Value type of a database field ("string", "number", "currency", "date", "dateTime", "boolean", ...). */
+  columnType(table: string, field: string): string | undefined;
+  /** Another formula as SQL, or undefined where it has none. */
+  formula(name: string): { sql: string; type: SqlType } | undefined;
+  /** The text of a custom function by name (any case), if the report has one. */
+  customFunction?(name: string): string | undefined;
+  /**
+   * Adds a T-SQL function to the report's SQL (once per key) and gives the name to call it by: what statements one
+   * after another work out (variables, loops) is a function. Without it, such formulas are not worked out in SQL.
+   */
+  addFunction?(key: string, text: (name: string) => string): string;
+  /**
+   * The value a variable kept from record to record (WhilePrintingRecords) has where the formula is printed, as SQL
+   * (a running total or count over the report's groups); undefined where it cannot be worked out so.
+   */
+  variable?(name: string): { sql: string; type: SqlType } | undefined;
+}
+
+/** What a print-time formula does with a variable kept from record to record. */
+export type PrintRole =
+  | { role: 'reset'; variable: string; value: number }
+  | { role: 'add'; variable: string; amount: string }
+  | { role: 'read' };
+
+/**
+ * The part a WhilePrintingRecords formula plays: setting a number variable to a constant ("x := 0"), adding to it
+ * ("x := x + amount", amount as Crystal text), or reading it. Undefined for any other formula.
+ */
+export function printRole(source: string): PrintRole | undefined {
+  if (!/\bwhileprintingrecords\b/i.test(source)) return undefined;
+  const body = source.replace(/\/\/[^\n]*/g, '').replace(/\bwhileprintingrecords\s*;?/i, '').trim().replace(/;\s*$/, '');
+  const decl = String.raw`(?:(?:shared|global)\s+)?(?:numbervar|currencyvar)\s+`;
+  let m = new RegExp(String.raw`^${decl}(\w+)\s*:=\s*(-?\d+(?:\.\d+)?)$`, 'i').exec(body) ?? new RegExp(String.raw`^(\w+)\s*:=\s*(-?\d+(?:\.\d+)?)$`, 'i').exec(body);
+  if (m) return { role: 'reset', variable: m[1]!.toLowerCase(), value: Number(m[2]) };
+  m = new RegExp(String.raw`^(?:${decl})?(\w+)\s*:=\s*\1\s*\+\s*([\s\S]+)$`, 'i').exec(body);
+  if (m && !/:=|;/.test(m[2]!)) return { role: 'add', variable: m[1]!.toLowerCase(), amount: m[2]!.trim() };
+  return { role: 'read' };
+}
+
+/** Text compared as Crystal compares it: with case. */
+const CASED = 'COLLATE Latin1_General_CS_AS';
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const DATE_PARTS: Record<string, string> = { yyyy: 'year', q: 'quarter', m: 'month', y: 'dayofyear', d: 'day', ww: 'week', h: 'hour', n: 'minute', s: 'second' };
+
+/**
+ * A formula worked out per record as a T-SQL expression giving the same value, for a column of the report's query
+ * (what a stored procedure for the report would return). Undefined, with the reason, where SQL would not give exactly
+ * the same: variables, running values, page or print-time values, parameters, or a function with no exact equivalent.
+ */
+export function formulaToSql(source: string, ctx: FormulaSqlContext): { sql: string; type: SqlType } | { reason: string } {
+  let tree: Node | undefined;
+  let program: Program | undefined;
+  try {
+    const tokens = tokenize(source);
+    const timing = tokens.filter((t) => t.kind === 'ident' && TIMING_WORDS.includes(KEYWORD(t.value))).map((t) => KEYWORD(t.value));
+    if (timing.includes('whileprintingrecords') && ctx.variable && !timing.includes('evaluateafter')) {
+      // Print time: its variables are their running values where it is printed (what remains is one statement).
+      const prog = new Parser(tokens).parseProgram();
+      const rest = prog.body.filter((st) => st.s !== 'timing' && !(st.s === 'decl' && !st.init));
+      for (const st of prog.body) if (st.s === 'decl' && !ctx.variable(st.name)) return { reason: `it keeps ${st.name} from record to record in a way not worked out in SQL` };
+      const only = rest.length === 1 ? rest[0]! : undefined;
+      if (only?.s === 'expr') tree = only.expr;
+      else if (only?.s === 'assign' || (only?.s === 'decl' && only.init)) {
+        if (!ctx.variable(only.name)) return { reason: `it keeps ${only.name} from record to record in a way not worked out in SQL` };
+        tree = { t: 'name', name: only.name };
+      } else return { reason: 'it is worked out as the report prints' };
+    } else if (timing.some((w) => w === 'whileprintingrecords' || w === 'evaluateafter')) return { reason: 'it is worked out as the report prints' };
+    else if (needsCode(tokens) || timing.length) {
+      program = new Parser(tokens).parseProgram();
+      if (program.params) return { reason: 'it is a custom function' };
+    } else {
+      const parser = new Parser(tokens);
+      tree = parser.parseFormula();
+      if (parser.issues.length > 0) return { reason: parser.issues[0]! };
+    }
+  } catch (e) {
+    return { reason: (e as Error).message };
+  }
+  class Refused extends Error {}
+  const refuse = (why: string): never => {
+    throw new Refused(why);
+  };
+  // Fields tested for nulls anywhere in the formula: the formula handles them itself.
+  const tested = new Set<string>();
+  const walk = (n: Node): void => {
+    if (n.t === 'call' && n.name.toLowerCase() === 'isnull' && n.args[0]?.t === 'field') tested.add(n.args[0].ref.toLowerCase());
+    childNodes(n).forEach(walk);
+  };
+  if (tree) walk(tree);
+  else statementNodes(program!.body).forEach(walk);
+  /** Database fields a condition reads (untested): where one is null, Crystal prints nothing for the formula. */
+  const reads = (n: Node, out: Set<string>): Set<string> => {
+    if (n.t === 'field' && !n.ref.startsWith('@') && !tested.has(n.ref.toLowerCase())) {
+      const dot = n.ref.lastIndexOf('.');
+      const column = dot > 0 ? ctx.column(n.ref.slice(0, dot), n.ref.slice(dot + 1)) : undefined;
+      if (column) out.add(column);
+    }
+    if (!(n.t === 'call' && n.name.toLowerCase() === 'isnull')) for (const c of childNodes(n)) reads(c, out);
+    return out;
+  };
+  /** Inside a T-SQL function: fields are its parameters, and nulls are met statement by statement. */
+  let fieldParams: Map<string, { name: string; arg: string; type: SqlType }> | undefined;
+  const nullWhen = (nodes: Node[]) => {
+    if (fieldParams) return '';
+    const fields = new Set<string>();
+    for (const n of nodes) reads(n, fields);
+    return fields.size ? `WHEN ${[...fields].map((f) => `${f} IS NULL`).join(' OR ')} THEN NULL ` : '';
+  };
+  type V = { sql: string; type: SqlType };
+  /** A custom function's parameters, while its body is worked out where it is called. */
+  const bound: Map<string, V>[] = [];
+  /** Inside a function: its array variables (table variables of index and value) and its ranges (two bounds). */
+  const arrays: Map<string, { sql: string; type: SqlType; sqlType: string }>[] = [];
+  const ranges: Map<string, { lo: string; hi: string; type: SqlType }>[] = [];
+  const arrayVar = (n: Node) => (n.t === 'name' ? arrays[arrays.length - 1]?.get(n.name.toLowerCase()) : undefined);
+  const rangeVar = (n: Node) => (n.t === 'name' ? ranges[ranges.length - 1]?.get(n.name.toLowerCase()) : undefined);
+  let depth = 0;
+  const fieldType = (ref: string): SqlType => {
+    const dot = ref.lastIndexOf('.');
+    const t = dot > 0 ? ctx.columnType(ref.slice(0, dot), ref.slice(dot + 1)) : undefined;
+    if (t === 'string' || t === 'memo') return 'string';
+    if (t === 'number' || t === 'currency' || t === 'integer') return 'number';
+    if (t === 'date') return 'date';
+    if (t === 'dateTime') return 'dateTime';
+    if (t === 'boolean') return 'boolean';
+    return refuse(`the type of {${ref}} is not known`);
+  };
+  const isDateType = (t: SqlType) => t === 'date' || t === 'dateTime';
+  const text = (v: V) => (v.type === 'string' ? v.sql : refuse('it joins text to a value that is not text'));
+  const num = (v: V) => (v.type === 'number' ? v.sql : refuse('it does arithmetic on a value that is not a number'));
+  /** A whole number for a position or a length (a number variable is a float). */
+  const whole = (v: V) => (/^\d+$/.test(num(v)) ? v.sql : `CAST(${v.sql} AS int)`);
+  const bool = (v: V) => (v.type === 'boolean' ? `${v.sql} = 1` : refuse('it tests a value that is not true or false'));
+  /** A condition as a SQL predicate. */
+  const cond = (n: Node): string => {
+    switch (n.t) {
+      case 'binary': {
+        if (n.op === 'and' || n.op === 'or') return `(${cond(n.left)} ${n.op.toUpperCase()} ${cond(n.right)})`;
+        if (['=', '<>', '<', '>', '<=', '>='].includes(n.op)) {
+          const l = value(n.left);
+          const r = value(n.right);
+          if (l.type === 'string' && r.type === 'string') return `${l.sql} ${CASED} ${n.op} ${r.sql}`;
+          if (l.type === r.type || (isDateType(l.type) && isDateType(r.type))) return `${l.sql} ${n.op} ${r.sql}`;
+          return refuse('it compares values of different types');
+        }
+        if (n.op === 'startswith') {
+          const l = text(value(n.left));
+          const lit = n.right.t === 'literal' ? vbLiteralText(n.right.vb) : undefined;
+          if (lit === undefined) return refuse('it tests the start of text against something other than fixed text');
+          return `${l} ${CASED} LIKE ${sqlString(`${lit.replace(/[[%_]/g, (c) => `[${c}]`)}%`)}`;
+        }
+        if (n.op === 'like' && n.right.t === 'literal') {
+          const pattern = vbLiteralText(n.right.vb) ?? refuse('it matches text against a pattern that is not fixed');
+          return `${text(value(n.left))} ${CASED} LIKE ${sqlString(sqlLikePattern(pattern))}`;
+        }
+        return bool(value(n));
+      }
+      case 'unary':
+        return n.op === 'not' ? `NOT (${cond(n.arg)})` : bool(value(n));
+      case 'in': {
+        if (n.list.length === 0) return n.negate ? '1 = 1' : '1 = 0';
+        const v = value(n.value);
+        const items = n.list.map(value);
+        if (items.some((i) => i.type !== v.type)) return refuse('it looks for a value in a list of another type');
+        return `${v.sql}${v.type === 'string' ? ` ${CASED}` : ''} ${n.negate ? 'NOT IN' : 'IN'} (${items.map((i) => i.sql).join(', ')})`;
+      }
+      case 'range': {
+        const v = value(n.value);
+        return `${v.sql}${v.type === 'string' ? ` ${CASED}` : ''} ${n.negate ? 'NOT BETWEEN' : 'BETWEEN'} ${value(n.from).sql} AND ${value(n.to).sql}`;
+      }
+      case 'call':
+        if (n.name.toLowerCase() === 'isnull' && n.args.length === 1) return `${value(n.args[0]!).sql} IS NULL`;
+        if (n.name === '$inRange' && n.args.length === 2) {
+          const x = value(n.args[0]!);
+          const arr = arrayVar(n.args[1]!);
+          if (arr) return `EXISTS (SELECT 1 FROM ${arr.sql} WHERE v = ${x.sql})`;
+          const r = rangeVar(n.args[1]!);
+          if (r) return `${x.sql} BETWEEN ${r.lo} AND ${r.hi}`;
+          if (n.args[1]!.t === 'rangeValue') return `${x.sql} BETWEEN ${value(n.args[1]!.from).sql} AND ${value(n.args[1]!.to).sql}`;
+          return refuse('it looks for a value in a list it does not hold');
+        }
+        return bool(value(n));
+      case 'literal':
+        if (n.vb === 'True') return '1 = 1';
+        if (n.vb === 'False') return '1 = 0';
+        return refuse('it tests a fixed value');
+      default:
+        return bool(value(n));
+    }
+  };
+  const asBool = (p: string, guard: string): V => ({ sql: `CASE ${guard}WHEN ${p} THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END`, type: 'boolean' });
+  /** What Crystal gives for an "if" with no "else": the empty value of the type. */
+  const empty = (t: SqlType) => (t === 'string' ? "N''" : t === 'number' ? '0' : t === 'boolean' ? 'CAST(0 AS bit)' : 'NULL');
+  const sameType = (a: V, b: V): SqlType => {
+    if (a.type === b.type) return a.type;
+    if (isDateType(a.type) && isDateType(b.type)) return 'dateTime';
+    if (a.sql === 'NULL') return b.type;
+    if (b.sql === 'NULL') return a.type;
+    return refuse('its branches give values of different types');
+  };
+  const value = (n: Node): V => {
+    switch (n.t) {
+      case 'literal': {
+        if (/^-?\d+(\.\d+)?(E[+-]?\d+)?$/i.test(n.vb)) return { sql: n.vb, type: 'number' };
+        if (n.vb === 'True' || n.vb === 'False') return { sql: `CAST(${n.vb === 'True' ? 1 : 0} AS bit)`, type: 'boolean' };
+        const t = vbLiteralText(n.vb);
+        if (t !== undefined) return { sql: `N${sqlString(t)}`, type: 'string' };
+        const d = /^CDate\("(.*)"\)$/.exec(n.vb);
+        if (d) {
+          const parsed = new Date(`${d[1]} UTC`);
+          if (Number.isNaN(parsed.getTime())) return refuse('it has a date written in a way SQL may read differently');
+          const iso = parsed.toISOString();
+          const timed = /\d:\d/.test(d[1]!);
+          return timed ? { sql: `CAST('${iso.slice(0, 19)}' AS datetime2(0))`, type: 'dateTime' } : { sql: `CAST('${iso.slice(0, 10)}' AS date)`, type: 'date' };
+        }
+        return refuse(`it uses the value ${n.vb}`);
+      }
+      case 'field': {
+        let outer: V;
+        if (n.ref.startsWith('@')) outer = ctx.formula(n.ref.slice(1)) ?? refuse(`it uses {${n.ref}}, which is not worked out in SQL`);
+        else if (n.ref.startsWith('?')) return refuse('it uses a report parameter');
+        else if (/^[#%]/.test(n.ref) || !n.ref.includes('.')) return refuse(`it uses {${n.ref}}`);
+        else {
+          const dot = n.ref.lastIndexOf('.');
+          const column = ctx.column(n.ref.slice(0, dot), n.ref.slice(dot + 1)) ?? refuse(`{${n.ref}} is not in the query`);
+          outer = { sql: column, type: fieldType(n.ref) };
+        }
+        if (!fieldParams) return outer;
+        // (Inside a function: a parameter, given the field's value where it is called.)
+        const key = n.ref.toLowerCase();
+        let param = fieldParams.get(key);
+        if (!param) {
+          param = { name: `@f${fieldParams.size + 1}`, arg: outer.sql, type: outer.type };
+          fieldParams.set(key, param);
+        }
+        return { sql: param.name, type: param.type };
+      }
+      case 'name': {
+        const key = n.name.toLowerCase();
+        const param = bound[bound.length - 1]?.get(key);
+        if (param) return param;
+        const kept = !bound.length ? ctx.variable?.(key) : undefined;
+        if (kept) return kept;
+        if (key === 'currentdate' || key === 'today') return { sql: 'CAST(GETDATE() AS date)', type: 'date' };
+        if (key === 'currentdatetime') return { sql: 'CAST(GETDATE() AS datetime2(0))', type: 'dateTime' };
+        if (key === 'true' || key === 'false') return { sql: `CAST(${key === 'true' ? 1 : 0} AS bit)`, type: 'boolean' };
+        const weekday = DAYS.findIndex((d) => `cr${d.toLowerCase()}` === key);
+        if (weekday >= 0) return { sql: String(weekday + 1), type: 'number' };
+        return refuse(`it uses ${n.name}`);
+      }
+      case 'unary':
+        if (n.op === '-') return { sql: `(-${num(value(n.arg))})`, type: 'number' };
+        return asBool(cond(n), nullWhen([n]));
+      case 'binary': {
+        if (['=', '<>', '<', '>', '<=', '>=', 'and', 'or', 'startswith', 'like'].includes(n.op)) return asBool(cond(n), nullWhen([n]));
+        const l = value(n.left);
+        const r = value(n.right);
+        if (n.op === '&') {
+          const piece = (v: V) => (v.type === 'string' ? v.sql : v.type === 'number' ? `FORMAT(${v.sql}, 'N2', 'en-US')` : refuse('it joins a date or a true/false value to text'));
+          return { sql: `(${piece(l)} + ${piece(r)})`, type: 'string' };
+        }
+        if (n.op === '+' && l.type === 'string' && r.type === 'string') return { sql: `(${l.sql} + ${r.sql})`, type: 'string' };
+        if ((n.op === '+' || n.op === '-') && isDateType(l.type) && r.type === 'number') return { sql: `DATEADD(day, ${n.op === '-' ? '-' : ''}${whole(r)}, ${l.sql})`, type: l.type };
+        if (n.op === '+' && l.type === 'number' && isDateType(r.type)) return { sql: `DATEADD(day, ${whole(l)}, ${r.sql})`, type: r.type };
+        if (n.op === '-' && isDateType(l.type) && isDateType(r.type)) {
+          if (l.type === 'date' && r.type === 'date') return { sql: `DATEDIFF(day, ${r.sql}, ${l.sql})`, type: 'number' };
+          return refuse('it subtracts date-times');
+        }
+        const a = num(l);
+        const b = num(r);
+        if (n.op === '/') return { sql: `(CAST(${a} AS float) / ${b})`, type: 'number' };
+        if (n.op === '%') return { sql: `(CAST(${a} AS float) / ${b} * 100)`, type: 'number' };
+        if (n.op === '^') return { sql: `POWER(CAST(${a} AS float), ${b})`, type: 'number' };
+        // (Mod keeps the sign of what is divided, as Crystal's does; \\ divides to a whole number toward zero.)
+        if (n.op === 'mod') return { sql: `(${a} - ${b} * ROUND(CAST(${a} AS float) / ${b}, 0, 1))`, type: 'number' };
+        if (n.op === '\\') return { sql: `ROUND(CAST(${a} AS float) / ${b}, 0, 1)`, type: 'number' };
+        if (['+', '-', '*'].includes(n.op)) return { sql: `(${a} ${n.op} ${b})`, type: 'number' };
+        return refuse(`it uses the operator ${n.op}`);
+      }
+      case 'if': {
+        const then = value(n.then);
+        const otherwise = n.else ? value(n.else) : { sql: empty(then.type), type: then.type };
+        const type = sameType(then, otherwise);
+        return { sql: `CASE ${nullWhen([n.cond])}WHEN ${cond(n.cond)} THEN ${then.sql} ELSE ${otherwise.sql} END`, type };
+      }
+      case 'select': {
+        const v = value(n.value);
+        const results = n.cases.map((c) => value(c.result));
+        const otherwise = n.otherwise ? value(n.otherwise) : { sql: empty(results[0]?.type ?? 'string'), type: results[0]?.type ?? 'string' };
+        let type = otherwise.type;
+        for (const r of results) type = sameType({ sql: '', type }, r);
+        // (Each case is a test of the value already: value = item, or within a range.)
+        const whens = n.cases.map((c, i) => `WHEN ${c.match.map(cond).join(' OR ')} THEN ${results[i]!.sql}`);
+        return { sql: `CASE ${nullWhen([n.value])}${whens.join(' ')} ELSE ${otherwise.sql} END`, type };
+      }
+      case 'in':
+      case 'range':
+        return asBool(cond(n), nullWhen([n]));
+      case 'call':
+        return call(n.name.toLowerCase(), n.args);
+      case 'index': {
+        const arr = arrayVar(n.base);
+        if (arr && !n.to) return { sql: `(SELECT v FROM ${arr.sql} WHERE i = ${whole(value(n.from))})`, type: arr.type };
+        // Part of a text: {s}[i] one character, {s}[i to j] from i to j.
+        const base = value(n.base);
+        if (base.type !== 'string') return refuse('it uses a list or a part of one');
+        const from = whole(value(n.from));
+        if (!n.to) return { sql: `SUBSTRING(${base.sql}, ${from}, 1)`, type: 'string' };
+        return { sql: `SUBSTRING(${base.sql}, ${from}, (${whole(value(n.to))}) - (${from}) + 1)`, type: 'string' };
+      }
+      default:
+        return refuse('it uses a list or a part of one');
+    }
+  };
+  const call = (key: string, args: Node[]): V => {
+    const a = () => args.map(value);
+    const one = () => (args.length === 1 ? value(args[0]!) : refuse(`it calls ${key} with ${args.length} values`));
+    switch (key) {
+      case 'isnull':
+        return asBool(cond({ t: 'call', name: 'IsNull', args }), '');
+      case 'not':
+        return asBool(`NOT (${cond(args[0]!)})`, nullWhen(args));
+      case 'uppercase': case 'ucase': return { sql: `UPPER(${text(one())})`, type: 'string' };
+      case 'lowercase': case 'lcase': return { sql: `LOWER(${text(one())})`, type: 'string' };
+      case 'trim': return { sql: `LTRIM(RTRIM(${text(one())}))`, type: 'string' };
+      case 'trimleft': case 'ltrim': return { sql: `LTRIM(${text(one())})`, type: 'string' };
+      case 'trimright': case 'rtrim': return { sql: `RTRIM(${text(one())})`, type: 'string' };
+      case 'length': case 'len': return { sql: `(LEN(${text(one())} + N'x') - 1)`, type: 'number' };
+      case 'left': case 'right': {
+        const [s, n] = a();
+        if (!s || !n || args.length !== 2) return refuse(`it calls ${key} with ${args.length} values`);
+        return { sql: `${key.toUpperCase()}(${text(s)}, ${whole(n)})`, type: 'string' };
+      }
+      case 'mid': {
+        const v = a();
+        if (v.length < 2 || v.length > 3) return refuse(`it calls Mid with ${v.length} values`);
+        return { sql: `SUBSTRING(${text(v[0]!)}, ${whole(v[1]!)}, ${v[2] ? whole(v[2]) : '2147483647'})`, type: 'string' };
+      }
+      case 'instr': {
+        const v = a();
+        if (v.length === 2) return { sql: `CHARINDEX(${text(v[1]!)} ${CASED}, ${text(v[0]!)})`, type: 'number' };
+        if (v.length === 3 && v[0]!.type === 'number') return { sql: `CHARINDEX(${text(v[2]!)} ${CASED}, ${text(v[1]!)}, ${whole(v[0]!)})`, type: 'number' };
+        return refuse('it calls InStr with a compare option');
+      }
+      case 'replace': {
+        const v = a();
+        if (v.length !== 3) return refuse('it calls Replace with a start, count or compare option');
+        return { sql: `REPLACE(${text(v[0]!)} ${CASED}, ${text(v[1]!)}, ${text(v[2]!)})`, type: 'string' };
+      }
+      case 'space': return { sql: `SPACE(${whole(one())})`, type: 'string' };
+      case 'replicatestring': { const [s, n] = a(); return { sql: `REPLICATE(${text(s!)}, ${whole(n!)})`, type: 'string' }; }
+      case 'strreverse': return { sql: `REVERSE(${text(one())})`, type: 'string' };
+      case 'abs': return { sql: `ABS(${num(one())})`, type: 'number' };
+      // (Crystal's currency keeps four decimals, as SQL's money does.)
+      case 'ccur': return { sql: `CAST(${num(one())} AS money)`, type: 'number' };
+      case 'sgn': return { sql: `SIGN(${num(one())})`, type: 'number' };
+      case 'sqr': return { sql: `SQRT(${num(one())})`, type: 'number' };
+      case 'int': return { sql: `FLOOR(${num(one())})`, type: 'number' };
+      case 'round': case 'truncate': {
+        const v = a();
+        if (v.length < 1 || v.length > 2) return refuse(`it calls ${key} with ${v.length} values`);
+        return { sql: `ROUND(${num(v[0]!)}, ${v[1] ? whole(v[1]) : '0'}${key === 'truncate' ? ', 1' : ''})`, type: 'number' };
+      }
+      case 'year': case 'month': case 'day': case 'hour': case 'minute': case 'second': {
+        const v = one();
+        if (!isDateType(v.type)) return refuse(`it calls ${key} on a value that is not a date`);
+        return { sql: `DATEPART(${key}, ${v.sql})`, type: 'number' };
+      }
+      case 'dayofweek': case 'weekday': {
+        if (args.length < 1 || args.length > 2) return refuse('it calls DayOfWeek with other than a date and a first day');
+        const v = value(args[0]!);
+        if (!isDateType(v.type)) return refuse('it calls DayOfWeek on a value that is not a date');
+        // (Sunday 1 to Saturday 7, whatever the server's first day of the week; or counted from the first day given.)
+        const dow = `((DATEDIFF(day, '19000107', ${v.sql}) % 7 + 7) % 7 + 1)`;
+        if (args.length === 1) return { sql: dow, type: 'number' };
+        return { sql: `((${dow} - ${whole(value(args[1]!))} + 7) % 7 + 1)`, type: 'number' };
+      }
+      case 'ubound': {
+        const arr = args.length === 1 ? arrayVar(args[0]!) : undefined;
+        if (!arr) return refuse('it counts a list it does not hold');
+        return { sql: `(SELECT COUNT(*) FROM ${arr.sql})`, type: 'number' };
+      }
+      case 'monthname': {
+        if (args.length !== 1) return refuse('it calls MonthName with an abbreviation option');
+        return { sql: `CHOOSE(${num(one())}, ${MONTHS.map((m) => `N'${m}'`).join(', ')})`, type: 'string' };
+      }
+      case 'weekdayname': {
+        if (args.length !== 1) return refuse('it calls WeekdayName with an abbreviation option');
+        return { sql: `CHOOSE(${num(one())}, ${DAYS.map((m) => `N'${m}'`).join(', ')})`, type: 'string' };
+      }
+      case 'fix': return { sql: `ROUND(${num(one())}, 0, 1)`, type: 'number' };
+      case 'datepart': {
+        const interval = args[0]?.t === 'literal' ? vbLiteralText(args[0].vb) : undefined;
+        const part = interval !== undefined ? DATE_PARTS[interval.toLowerCase()] : undefined;
+        const d = args[1] ? value(args[1]) : undefined;
+        if (!part || !d || !isDateType(d.type) || args.length !== 2 || part === 'week') return refuse('it calls DatePart with an interval SQL counts differently');
+        return { sql: `DATEPART(${part}, ${d.sql})`, type: 'number' };
+      }
+      case 'dateserial': {
+        // (Months and days past the end carry on, as in Crystal: month 13 is January of the next year, day 0 the last.)
+        const v = a();
+        if (v.length !== 3) return refuse('it calls DateSerial with other than a year, a month and a day');
+        return { sql: `DATEADD(day, ${whole(v[2]!)} - 1, DATEADD(month, ${whole(v[1]!)} - 1, DATEFROMPARTS(${whole(v[0]!)}, 1, 1)))`, type: 'date' };
+      }
+      case 'date': case 'cdate': case 'datevalue': {
+        const v = a();
+        if (v.length === 3) return { sql: `DATEFROMPARTS(${v.map(whole).join(', ')})`, type: 'date' };
+        if (v.length === 1 && isDateType(v[0]!.type)) return { sql: `CAST(${v[0]!.sql} AS date)`, type: 'date' };
+        return refuse('it makes a date from text');
+      }
+      case 'dateadd': case 'datediff': {
+        const interval = args[0]?.t === 'literal' ? vbLiteralText(args[0].vb) : undefined;
+        const part = interval !== undefined ? DATE_PARTS[interval.toLowerCase()] : undefined;
+        if (!part) return refuse(`it calls ${key} with the interval ${interval ?? 'worked out'}`);
+        const v = args.slice(1).map(value);
+        if (key === 'datediff' && interval!.toLowerCase() === 'ww' && v.length >= 2 && v.length <= 3 && isDateType(v[0]!.type) && isDateType(v[1]!.type)) {
+          // The times the first day of the week (Sunday unless given) falls after the first date, up to the second:
+          // as Crystal counts, whatever the server's first day of the week.
+          const first = v[2] ? num(v[2]) : '1';
+          const dow = (d: string) => `((DATEDIFF(day, '19000107', ${d}) % 7 + 7) % 7 + 1)`;
+          const count = (x: string, y: string) => `FLOOR((DATEDIFF(day, ${x}, ${y}) + (${dow(x)} - ${first} + 7) % 7) / 7.0)`;
+          return { sql: `(CASE WHEN ${v[1]!.sql} >= ${v[0]!.sql} THEN ${count(v[0]!.sql, v[1]!.sql)} ELSE -${count(v[1]!.sql, v[0]!.sql)} END)`, type: 'number' };
+        }
+        if (key === 'dateadd' && v.length === 2 && isDateType(v[1]!.type)) return { sql: `DATEADD(${part}, ${whole(v[0]!)}, ${v[1]!.sql})`, type: v[1]!.type };
+        if (key === 'datediff' && v.length === 2 && isDateType(v[0]!.type) && isDateType(v[1]!.type)) return { sql: `DATEDIFF(${part}, ${v[0]!.sql}, ${v[1]!.sql})`, type: 'number' };
+        return refuse(`it calls ${key} with a first day of the week or week option`);
+      }
+      case 'totext': case 'cstr': {
+        const v = a();
+        const x = v[0] ?? refuse(`it calls ${key} with nothing`);
+        if (x.type === 'string' && v.length === 1) return x;
+        if (x.type === 'number') {
+          // Crystal's default: two decimals, thousands separated; or as many decimals as asked.
+          if (v.length === 1) return { sql: `FORMAT(${x.sql}, 'N2', 'en-US')`, type: 'string' };
+          if (v.length === 2 && args[1]!.t === 'literal' && /^\d+$/.test(args[1]!.vb)) return { sql: `FORMAT(${x.sql}, 'N${args[1]!.vb}', 'en-US')`, type: 'string' };
+          if (v.length === 2 && v[1]!.type === 'number') return { sql: `FORMAT(${x.sql}, 'N' + CAST(CAST(${v[1]!.sql} AS int) AS varchar(10)), 'en-US')`, type: 'string' };
+          return refuse(`it calls ${key} with a format`);
+        }
+        if (isDateType(x.type) && v.length === 2) {
+          const f = args[1]!.t === 'literal' ? vbLiteralText(args[1]!.vb) : undefined;
+          if (f !== undefined && /^[dMyHhms\/:\-., ]+$/.test(f) && !/(^|[^d])d{3,}|M{3,}/.test(f)) return { sql: `FORMAT(${x.sql}, ${sqlString(f)}, 'en-US')`, type: 'string' };
+          return refuse(`it calls ${key} on a date with a format SQL may write differently`);
+        }
+        return refuse(`it calls ${key} on a ${x.type === 'boolean' ? 'true/false value' : 'date'} without a format`);
+      }
+      case 'cdbl': case 'tonumber': case 'val': {
+        const v = one();
+        // (A number only: text read as a number may be read differently.)
+        return v.type === 'number' ? { sql: `CAST(${v.sql} AS float)`, type: 'number' } : refuse(`it calls ${key} on text`);
+      }
+      default: {
+        // A custom function of one expression: worked out where it is called, with its parameters' values.
+        const source = ctx.customFunction?.(key);
+        if (!source) return refuse(`it calls ${key}, which is not worked out in SQL`);
+        if (depth > 20) return refuse(`it calls ${key} within itself`);
+        let program: Program;
+        try {
+          program = new Parser(tokenize(source)).parseProgram();
+        } catch {
+          return refuse(`it calls ${key}, which could not be read`);
+        }
+        const body = program.body.length === 1 ? statementValue(program.body[0]!) : undefined;
+        const params = program.params ?? [];
+        if (args.length > params.length || params.some((p) => p.array || p.range)) return refuse(`it calls ${key} with values it does not take`);
+        if (!body) {
+          // Statements one after another: a T-SQL function of its own, called with the values given.
+          const fn = customFunctionSql(key, program);
+          if (fn.array) return refuse(`it uses the list ${key} gives other than to hold it`);
+          const values = params.map((p, i) => value(args[i] ?? p.optional ?? refuse(`it calls ${key} without its ${p.name}`)));
+          const guard = nullWhen(args);
+          const call = `${fn.name}(${values.map((v, i) => castTo(v, SQL_VAR_TYPES[params[i]!.vtype]!)).join(', ')})`;
+          return { sql: guard ? `CASE ${guard}ELSE ${call} END` : call, type: fn.type };
+        }
+        const values = new Map<string, V>();
+        params.forEach((p, i) => {
+          const arg = args[i] ?? p.optional ?? refuse(`it calls ${key} without its ${p.name}`);
+          values.set(p.name.toLowerCase(), value(arg));
+        });
+        // (Where a field passed to it is null, Crystal stops there: nothing.)
+        const guard = nullWhen(args);
+        depth++;
+        bound.push(values);
+        try {
+          const out = value(body);
+          return guard ? { sql: `CASE ${guard}ELSE ${out.sql} END`, type: out.type } : out;
+        } finally {
+          bound.pop();
+          depth--;
+        }
+      }
+    }
+  };
+  /** A statement giving one value (an expression, or if / select whose every branch is one), as an expression. */
+  const statementValue = (st: Stmt): Node | undefined => {
+    if (st.s === 'expr') return st.expr;
+    const single = (body: Stmt[] | undefined) => (body && body.length === 1 ? statementValue(body[0]!) : undefined);
+    if (st.s === 'if') {
+      const then = single(st.then);
+      const otherwise = st.else ? single(st.else) : undefined;
+      if (!then || (st.else && !otherwise)) return undefined;
+      return { t: 'if', cond: st.cond, then, ...(otherwise ? { else: otherwise } : {}) };
+    }
+    if (st.s === 'select') {
+      const cases = st.cases.map((c) => ({ match: c.match, result: single(c.body) }));
+      const otherwise = st.otherwise ? single(st.otherwise) : undefined;
+      if (cases.some((c) => !c.result) || (st.otherwise && !otherwise)) return undefined;
+      return { t: 'select', value: st.value, cases: cases as { match: Node[]; result: Node }[], ...(otherwise ? { otherwise } : {}) };
+    }
+    return undefined;
+  };
+  // ---- statements one after another: a T-SQL function ----
+  const customFunctions = new Map<string, { name: string; type: SqlType; array?: boolean }>();
+  /** A custom function of statements as a T-SQL function (once), with its parameters as declared. */
+  const customFunctionSql = (key: string, prog: Program): { name: string; type: SqlType; array?: boolean } => {
+    const known = customFunctions.get(key);
+    if (known) return known;
+    if (!ctx.addFunction) return refuse(`it calls ${key}, which runs statements one after another`);
+    const vars = new Map<string, V & { sqlType: string }>();
+    const params = (prog.params ?? []).map((p) => {
+      const sqlType = SQL_VAR_TYPES[p.vtype] ?? refuse(`it calls ${key}, which takes a ${p.vtype}`);
+      const v = { sql: `@p_${sqlIdent(p.name)}`, type: VAR_TYPES[p.vtype]!, sqlType };
+      vars.set(p.name.toLowerCase(), v);
+      return `${v.sql} ${sqlType}`;
+    });
+    const savedFields = fieldParams;
+    fieldParams = new Map();
+    let built: { body: string; type: SqlType; array?: boolean };
+    try {
+      built = functionBody(prog.body, vars);
+    } finally {
+      fieldParams = savedFields;
+    }
+    const name = ctx.addFunction(`custom:${key}`, (fn) => functionText(fn, params, built, `the custom function ${key}`));
+    const out = { name, type: built.type, array: built.array };
+    customFunctions.set(key, out);
+    return out;
+  };
+  /** A formula of statements: a T-SQL function of the fields it reads, called with them. */
+  const formulaFunction = (prog: Program): V => {
+    if (!ctx.addFunction) return refuse('it keeps values in variables or runs statements one after another');
+    fieldParams = new Map();
+    const built = functionBody(prog.body, new Map());
+    const params = [...fieldParams.values()];
+    fieldParams = undefined;
+    const declared = params.map((p) => `${p.name} ${SQL_RESULT_TYPES[p.type]}`);
+    const name = ctx.addFunction(`formula:${source}`, (fn) => functionText(fn, declared, built, 'a formula'));
+    return { sql: `${name}(${params.map((p) => p.arg).join(', ')})`, type: built.type };
+  };
+  const functionText = (name: string, params: string[], built: { body: string; type: SqlType; array?: boolean }, what: string) => [
+    `-- Worked out from ${what} (Crystal statements one after another, as T-SQL).`,
+    `CREATE FUNCTION ${name} (${params.join(', ')})`,
+    built.array ? `RETURNS @result TABLE (i int PRIMARY KEY, v ${SQL_RESULT_TYPES[built.type]})` : `RETURNS ${SQL_RESULT_TYPES[built.type]}`,
+    'AS',
+    'BEGIN',
+    built.body,
+    'END',
+  ].join('\n');
+  /** The T-SQL of statements: its variables declared first, its value the value of its last statement. */
+  const functionBody = (body: Stmt[], vars: Map<string, V & { sqlType: string }>): { body: string; type: SqlType; array?: boolean } => {
+    const arrayFrame = new Map<string, { sql: string; type: SqlType; sqlType: string }>();
+    const rangeFrame = new Map<string, { lo: string; hi: string; type: SqlType }>();
+    // Variables: any used before it is given a value keeps a value from record to record (not per record).
+    const assigned = new Set<string>(vars.keys());
+    const order: Stmt[] = [];
+    const flat = (list: Stmt[]) => {
+      for (const st of list) {
+        order.push(st);
+        if (st.s === 'if') { flat(st.then); flat(st.else ?? []); }
+        if (st.s === 'select') { st.cases.forEach((c) => flat(c.body)); flat(st.otherwise ?? []); }
+        if (st.s === 'for' || st.s === 'while') flat(st.body);
+      }
+    };
+    flat(body);
+    for (const st of order) {
+      if (st.s === 'decl') {
+        const v = SQL_VAR_TYPES[st.vtype];
+        if (!v) return refuse(`it uses a ${st.vtype}`);
+        if (st.array) {
+          if (!arrayFrame.has(st.name.toLowerCase())) arrayFrame.set(st.name.toLowerCase(), { sql: `@a_${sqlIdent(st.name)}`, type: VAR_TYPES[st.vtype]!, sqlType: v });
+          continue;
+        }
+        if (st.range) {
+          if (!rangeFrame.has(st.name.toLowerCase())) rangeFrame.set(st.name.toLowerCase(), { lo: `@r_${sqlIdent(st.name)}_lo`, hi: `@r_${sqlIdent(st.name)}_hi`, type: VAR_TYPES[st.vtype]! });
+          continue;
+        }
+        if (!vars.has(st.name.toLowerCase())) vars.set(st.name.toLowerCase(), { sql: `@v_${sqlIdent(st.name)}`, type: VAR_TYPES[st.vtype]!, sqlType: v });
+        if (st.scope !== 'local' && !st.init && !assigned.has(st.name.toLowerCase())) {
+          // ("NumberVar x;" then reading x: the value it kept from before.)
+          const readsFirst = order.slice(order.indexOf(st) + 1).find((o) => statementReads(o, st.name) || (o.s === 'assign' && o.name.toLowerCase() === st.name.toLowerCase()));
+          if (readsFirst && !(readsFirst.s === 'assign' && readsFirst.name.toLowerCase() === st.name.toLowerCase() && !nodeReads(readsFirst.value, st.name))) {
+            return refuse('it keeps a value from record to record');
+          }
+        }
+        // ("NumberVar c := c + 1": the value it kept from the record before, plus one.)
+        if (st.init && st.scope !== 'local' && !assigned.has(st.name.toLowerCase()) && nodeReads(st.init, st.name)) return refuse('it keeps a value from record to record');
+        if (st.init) assigned.add(st.name.toLowerCase());
+      }
+      if (st.s === 'assign') {
+        if (arrayFrame.has(st.name.toLowerCase()) || rangeFrame.has(st.name.toLowerCase())) continue;
+        if (st.index) return refuse('it gives a value to part of a list it does not hold');
+        if (!vars.has(st.name.toLowerCase())) return refuse(`it gives a value to ${st.name}, which it does not declare`);
+        if (!assigned.has(st.name.toLowerCase()) && nodeReads(st.value, st.name) && vars.get(st.name.toLowerCase())) {
+          const decl = order.find((o) => o.s === 'decl' && o.name.toLowerCase() === st.name.toLowerCase()) as Extract<Stmt, { s: 'decl' }> | undefined;
+          if (decl && decl.scope !== 'local') return refuse('it keeps a value from record to record');
+        }
+        assigned.add(st.name.toLowerCase());
+      }
+      if (st.s === 'redim' && !arrayFrame.has(st.name.toLowerCase())) return refuse('it sizes a list it does not hold');
+    }
+    const lines: string[] = [];
+    let resultType: SqlType | undefined;
+    let resultArray: string | undefined;
+    let loops = 0;
+    let sized = false;
+    bound.push(new Map([...vars.entries()].map(([k, v]) => [k, { sql: v.sql, type: v.type }])));
+    arrays.push(arrayFrame);
+    ranges.push(rangeFrame);
+    /** A list given to an array variable: another array, a custom function giving one, or items. */
+    const fillArray = (target: { sql: string; type: SqlType }, from: Node, ind: string) => {
+      const src = arrayVar(from);
+      if (src) {
+        if (src.sql !== target.sql) lines.push(`${ind}DELETE FROM ${target.sql};`, `${ind}INSERT INTO ${target.sql} (i, v) SELECT i, v FROM ${src.sql};`);
+        return;
+      }
+      if (from.t === 'call' && ctx.customFunction?.(from.name.toLowerCase())) {
+        const fnKey = from.name.toLowerCase();
+        const prog = new Parser(tokenize(ctx.customFunction(fnKey)!)).parseProgram();
+        const fn = customFunctionSql(fnKey, prog);
+        if (!fn.array) return refuse(`it holds what ${fnKey} gives as a list, which it is not`);
+        const params = prog.params ?? [];
+        const values = params.map((p, i) => castTo(value(from.args[i] ?? p.optional ?? refuse(`it calls ${fnKey} without its ${p.name}`)), SQL_VAR_TYPES[p.vtype]!));
+        lines.push(`${ind}DELETE FROM ${target.sql};`, `${ind}INSERT INTO ${target.sql} (i, v) SELECT i, v FROM ${fn.name}(${values.join(', ')});`);
+        return;
+      }
+      if (from.t === 'array') {
+        lines.push(`${ind}DELETE FROM ${target.sql};`);
+        from.items.forEach((item, i) => lines.push(`${ind}INSERT INTO ${target.sql} (i, v) VALUES (${i + 1}, ${value(item).sql});`));
+        return;
+      }
+      return refuse('it gives a list a value that is not one');
+    };
+    const guardFor = (nodes: Node[], ind: string) => {
+      const refs = new Set<string>();
+      const collect = (n: Node) => {
+        if (n.t === 'field' && !n.ref.startsWith('@') && !n.ref.startsWith('?') && !tested.has(n.ref.toLowerCase())) refs.add(n.ref.toLowerCase());
+        if (!(n.t === 'call' && n.name.toLowerCase() === 'isnull')) childNodes(n).forEach(collect);
+      };
+      nodes.forEach(collect);
+      const params = [...refs].map((r) => { value({ t: 'field', ref: r }); return fieldParams!.get(r)!.name; });
+      if (params.length) lines.push(`${ind}IF ${params.map((p) => `${p} IS NULL`).join(' OR ')} RETURN NULL;`);
+    };
+    const setResult = (v: V, ind: string) => {
+      resultType = resultType ? sameType({ sql: '', type: resultType }, v) : v.type;
+      lines.push(`${ind}SET @result = ${v.sql};`);
+    };
+    const assign = (name: string, v: V, ind: string) => {
+      const target = vars.get(name.toLowerCase())!;
+      if (target.type !== v.type && !(isDateType(target.type) && isDateType(v.type))) return refuse(`it gives ${name} a value of another type`);
+      lines.push(`${ind}SET ${target.sql} = ${v.sql};`);
+    };
+    const emit = (list: Stmt[], ind: string, tail: boolean): void => {
+      list.forEach((st, i) => {
+        const last = tail && i === list.length - 1;
+        switch (st.s) {
+          case 'timing':
+            return;
+          case 'redim': {
+            const arr = arrayFrame.get(st.name.toLowerCase())!;
+            sized = true;
+            guardFor([st.size], ind);
+            lines.push(`${ind}SET @size = ${whole(value(st.size))};`);
+            if (!st.preserve) lines.push(`${ind}DELETE FROM ${arr.sql};`);
+            else lines.push(`${ind}DELETE FROM ${arr.sql} WHERE i > @size;`);
+            lines.push(`${ind}SET @k = 1;`, `${ind}WHILE @k <= @size`, `${ind}BEGIN`,
+              `${ind}  IF NOT EXISTS (SELECT 1 FROM ${arr.sql} WHERE i = @k) INSERT INTO ${arr.sql} (i, v) VALUES (@k, ${empty(arr.type)});`,
+              `${ind}  SET @k = @k + 1;`, `${ind}END`);
+            return;
+          }
+          case 'decl': {
+            const arr = arrayFrame.get(st.name.toLowerCase());
+            const range = rangeFrame.get(st.name.toLowerCase());
+            if (arr || range) {
+              if (st.init && arr) fillArray(arr, st.init, ind);
+              if (st.init && range) {
+                if (st.init.t !== 'rangeValue') return refuse('it gives a range a value that is not one');
+                lines.push(`${ind}SET ${range.lo} = ${value(st.init.from).sql};`, `${ind}SET ${range.hi} = ${value(st.init.to).sql};`);
+              }
+              if (last && arr) resultArray = arr.sql;
+              return;
+            }
+            if (!st.init) {
+              if (last) setResult({ sql: vars.get(st.name.toLowerCase())!.sql, type: vars.get(st.name.toLowerCase())!.type }, ind);
+              return;
+            }
+            guardFor([st.init], ind);
+            assign(st.name, value(st.init), ind);
+            if (last) setResult({ sql: vars.get(st.name.toLowerCase())!.sql, type: vars.get(st.name.toLowerCase())!.type }, ind);
+            return;
+          }
+          case 'assign': {
+            const arr = arrayFrame.get(st.name.toLowerCase());
+            const range = rangeFrame.get(st.name.toLowerCase());
+            if (arr && st.index) {
+              guardFor([st.value, st.index], ind);
+              const v = value(st.value);
+              lines.push(`${ind}UPDATE ${arr.sql} SET v = ${v.sql} WHERE i = ${whole(value(st.index))};`);
+              if (last) setResult(v, ind);
+              return;
+            }
+            if (arr) {
+              guardFor([st.value], ind);
+              fillArray(arr, st.value, ind);
+              if (last) resultArray = arr.sql;
+              return;
+            }
+            if (range) {
+              if (st.value.t !== 'rangeValue') return refuse('it gives a range a value that is not one');
+              guardFor([st.value], ind);
+              lines.push(`${ind}SET ${range.lo} = ${value(st.value.from).sql};`, `${ind}SET ${range.hi} = ${value(st.value.to).sql};`);
+              return;
+            }
+            guardFor([st.value], ind);
+            assign(st.name, value(st.value), ind);
+            if (last) setResult({ sql: vars.get(st.name.toLowerCase())!.sql, type: vars.get(st.name.toLowerCase())!.type }, ind);
+            return;
+          }
+          case 'expr':
+            if (!last) return;
+            if (arrayVar(st.expr)) {
+              resultArray = arrayVar(st.expr)!.sql;
+              return;
+            }
+            guardFor([st.expr], ind);
+            setResult(st.expr.t === 'binary' && ['=', '<>', '<', '>', '<=', '>=', 'and', 'or'].includes(st.expr.op) ? asBool(cond(st.expr), '') : value(st.expr), ind);
+            return;
+          case 'if': {
+            guardFor([st.cond], ind);
+            lines.push(`${ind}IF ${cond(st.cond)}`, `${ind}BEGIN`);
+            emit(st.then, `${ind}  `, last);
+            lines.push(`${ind}END`);
+            if (st.else || last) {
+              lines.push(`${ind}ELSE`, `${ind}BEGIN`);
+              if (st.else) emit(st.else, `${ind}  `, last);
+              if (last && !st.else) lines.push(`${ind}  SET @result = ${empty(resultType ?? 'string')};`);
+              lines.push(`${ind}END`);
+            }
+            return;
+          }
+          case 'select': {
+            guardFor([st.value], ind);
+            st.cases.forEach((c, k) => {
+              lines.push(`${ind}${k ? 'ELSE ' : ''}IF ${c.match.map(cond).join(' OR ')}`, `${ind}BEGIN`);
+              emit(c.body, `${ind}  `, last);
+              lines.push(`${ind}END`);
+            });
+            if (st.otherwise || last) {
+              lines.push(`${ind}ELSE`, `${ind}BEGIN`);
+              if (st.otherwise) emit(st.otherwise, `${ind}  `, last);
+              if (last && !st.otherwise) lines.push(`${ind}  SET @result = ${empty(resultType ?? 'string')};`);
+              lines.push(`${ind}END`);
+            }
+            return;
+          }
+          case 'for': {
+            if (last) return refuse('its value is that of a loop');
+            const loopVar = vars.get(st.name.toLowerCase()) ?? refuse(`it loops with ${st.name}, which it does not declare`);
+            const n = ++loops;
+            guardFor([st.from, st.to, ...(st.step ? [st.step] : [])], ind);
+            lines.push(`${ind}SET ${loopVar.sql} = ${num(value(st.from))};`);
+            lines.push(`${ind}SET @to${n} = ${num(value(st.to))};`);
+            const step = st.step ? num(value(st.step)) : '1';
+            lines.push(`${ind}SET @step${n} = ${step};`);
+            lines.push(`${ind}WHILE (@step${n} >= 0 AND ${loopVar.sql} <= @to${n}) OR (@step${n} < 0 AND ${loopVar.sql} >= @to${n})`, `${ind}BEGIN`);
+            emit(st.body, `${ind}  `, false);
+            lines.push(`${ind}  SET ${loopVar.sql} = ${loopVar.sql} + @step${n};`, `${ind}END`);
+            return;
+          }
+          case 'while': {
+            if (last) return refuse('its value is that of a loop');
+            guardFor([st.cond], ind);
+            if (st.post) {
+              lines.push(`${ind}WHILE 1 = 1`, `${ind}BEGIN`);
+              emit(st.body, `${ind}  `, false);
+              lines.push(`${ind}  IF NOT (${cond(st.cond)}) BREAK;`, `${ind}END`);
+            } else {
+              lines.push(`${ind}WHILE ${cond(st.cond)}`, `${ind}BEGIN`);
+              emit(st.body, `${ind}  `, false);
+              lines.push(`${ind}END`);
+            }
+            return;
+          }
+          case 'exit':
+            if (/for|while|do/i.test(st.what)) lines.push(`${ind}BREAK;`);
+            else return refuse(`it exits ${st.what}`);
+            return;
+          default:
+            return refuse('it uses arrays');
+        }
+      });
+    };
+    try {
+      emit(body, '  ', true);
+    } finally {
+      bound.pop();
+      arrays.pop();
+      ranges.pop();
+    }
+    const declarations = [
+      ...[...vars.values()].filter((v) => v.sql.startsWith('@v_')).map((v) => `  DECLARE ${v.sql} ${v.sqlType} = ${empty(v.type)};`),
+      ...[...arrayFrame.values()].map((a) => `  DECLARE ${a.sql} TABLE (i int PRIMARY KEY, v ${a.sqlType});`),
+      ...[...rangeFrame.values()].map((r) => `  DECLARE ${r.lo} ${SQL_RESULT_TYPES[r.type]}, ${r.hi} ${SQL_RESULT_TYPES[r.type]};`),
+      ...Array.from({ length: loops }, (_, i) => `  DECLARE @to${i + 1} float, @step${i + 1} float;`),
+      ...(sized ? ['  DECLARE @size int, @k int;'] : []),
+    ];
+    if (resultArray) {
+      // A list: the function gives a table of index and value.
+      const arr = [...arrayFrame.values()].find((a) => a.sql === resultArray)!;
+      return { body: [...declarations, ...lines, `  INSERT INTO @result (i, v) SELECT i, v FROM ${resultArray};`, '  RETURN;'].join('\n'), type: arr.type, array: true };
+    }
+    if (!resultType) return refuse('it gives no value');
+    return { body: [`  DECLARE @result ${SQL_RESULT_TYPES[resultType]} = ${empty(resultType)};`, ...declarations, ...lines, '  RETURN @result;'].join('\n'), type: resultType };
+  };
+
+  try {
+    if (program) return formulaFunction(program);
+    const top = tree!.t === 'binary' && ['=', '<>', '<', '>', '<=', '>=', 'and', 'or'].includes(tree!.op) || tree!.t === 'in' || tree!.t === 'range'
+      ? asBool(cond(tree!), nullWhen([tree!]))
+      : value(tree!);
+    return top;
+  } catch (e) {
+    if (e instanceof Refused) return { reason: e.message };
+    return { reason: (e as Error).message };
   }
 }
 
