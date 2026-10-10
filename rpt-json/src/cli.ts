@@ -38,7 +38,7 @@ Usage:
   rpt-json to-rdl  <input.rpt|input.json|folder> [output-dir] [--connection "<connection string>"]
                    [--shared-datasource <name>] [--template <house.rdl>] [--separate-subreports]
                    [--page-number] [--parameter name=value]... [--chart-axis-format <format>] [--house <style.json>]
-                   [--conventions <conventions.json> [--prefix <short name>]]
+                   [--conventions <conventions.json> [--prefix <short name>] [--preview]]
                                             Convert to SSRS .rdl files (+ subreports) and a review checklist;
                                             a folder converts every .rpt in it and its subfolders, each written
                                             to the same subfolder of the output folder;
@@ -53,7 +53,9 @@ Usage:
                                             --conventions reshapes each report as a team's template: their
                                             names, title and totals as table rows, a no-data row, their data
                                             source and parameters, looks read from their style dataset;
-                                            --prefix gives the report's items a short name of their own
+                                            --prefix gives the report's items a short name of their own;
+                                            --preview also writes <name>.preview.rdl, whose dataset runs the
+                                            query itself, to preview before the procedure is created
   rpt-json to-rdl  --template <house.rdl> --combine <output.rdl> <input.rpt|folder>...
                                             Combine several reports into one .rdl, one block per report
   rpt-json headers <input.rpt|input.json|folder> [output-file] [--json | --csv] [--all]
@@ -205,7 +207,8 @@ async function main(argv: string[]): Promise<number> {
     }
     const conventionsPath = takeOption(args, '--conventions');
     const prefix = takeOption(args, '--prefix');
-    let reshape: ((rdl: string, name: string) => { rdl: string; review: { item: string; message: string }[]; settled: string[] }) | undefined;
+    const preview = takeFlag(args, '--preview');
+    let reshape: ((rdl: string, name: string, extra?: { sqlFunctions?: string[] }) => { rdl: string; review: { item: string; message: string }[]; settled: string[]; files?: Record<string, string> }) | undefined;
     if (conventionsPath) {
       const { readConventions, applyConventions } = await import('./ssrs/conventions.ts');
       let conv: ReturnType<typeof readConventions>;
@@ -214,7 +217,7 @@ async function main(argv: string[]): Promise<number> {
       } catch (err) {
         throw new Error(`conventions ${conventionsPath}: ${(err as Error).message}`);
       }
-      reshape = (rdl, name) => applyConventions(rdl, name, conv, prefix);
+      reshape = (rdl, name, extra) => applyConventions(rdl, name, conv, prefix, { ...extra, preview });
       // The house style step's layout work (tables, bands and frames reaching the page's rules), without its looks:
       // the team's looks come from their style dataset.
       if (!restyle) {
@@ -227,6 +230,7 @@ async function main(argv: string[]): Promise<number> {
       }
     }
     if (prefix && !conventionsPath) throw new Error('to-rdl: --prefix goes with --conventions');
+    if (preview && !conventionsPath) throw new Error('to-rdl: --preview goes with --conventions');
     const templatePath = takeOption(args, '--template');
     if (conventionsPath && templatePath) throw new Error('to-rdl: --conventions reshapes the converted layout and --template replaces it; use one or the other');
     if (housePath && templatePath) throw new Error('to-rdl: --house keeps the Crystal layout and --template replaces it; use one or the other');
@@ -288,7 +292,7 @@ async function main(argv: string[]): Promise<number> {
         let base = original;
         const convert = (name: string) => (template
           ? [convertDocumentsWithTemplate(template, [{ doc, name: original }], name)]
-          : convertDocumentToSsrs(doc, name, { connectionString, sharedDataSource, separateSubreports, pageNumber, parameterValues, chartAxisFormat, restyle, reshape }));
+          : convertDocumentToSsrs(doc, name, { connectionString, sharedDataSource, separateSubreports, pageNumber, parameterValues, chartAxisFormat, restyle, reshape, formulasInQuery: !!conventionsPath }));
         let reports = convert(base);
         // Two inputs whose names clean up to the same file name ("A B" and "A_B") get a numbered suffix.
         for (let n = 2; reports.some((r) => written.has(r.fileName.toLowerCase())); n++) {
@@ -299,6 +303,8 @@ async function main(argv: string[]): Promise<number> {
         for (const r of reports) written.add(r.fileName.toLowerCase());
         for (const report of reports) {
           if (report.rdl) await writeFile(join(targetDir, report.fileName), report.rdl);
+          // Files beside it (a team template's stored procedure, its custom code).
+          for (const [ending, text] of Object.entries(report.files ?? {})) await writeFile(join(targetDir, report.fileName.replace(/\.rdl$/i, ending)), text);
         }
         const reviewPath = join(targetDir, `${reports[0]?.fileName.replace(/\.rdl$/, '') ?? base}.review.md`);
         await writeFile(reviewPath, reviewMarkdown(basename(file), reports));
@@ -418,3 +424,4 @@ main(process.argv.slice(2)).then(
     process.exitCode = 2;
   },
 );
+

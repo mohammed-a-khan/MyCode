@@ -306,7 +306,7 @@ const unplace = (item: XmlElement) => removeChildren(item, ['Top', 'Left', 'Heig
 // ---------------------------------------------------------------------------------------------------------------
 
 /** Reshapes a converted report as a template following the conventions. */
-export function applyConventions(rdl: string, reportName: string, conv: Conventions, prefix?: string): { rdl: string; review: ReviewNote[]; settled: string[] } {
+export function applyConventions(rdl: string, reportName: string, conv: Conventions, prefix?: string, extra: { sqlFunctions?: string[]; preview?: boolean } = {}): { rdl: string; review: ReviewNote[]; settled: string[]; files?: Record<string, string> } {
   const review: ReviewNote[] = [];
   const root = parseXml(rdl);
   const report = root.name === 'Report' ? root : descendants(root).find((e) => e.name === 'Report')!;
@@ -637,11 +637,67 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     // Column names: the field each column shows in its data row, else its heading.
     const rows = rowsOf(tablix);
     const kinds = rowLeaves(tablix).map((l) => l.kind);
+    // Rows of column headings (Crystal's, or fixed text only in a group's header).
+    const headingRow = (row: XmlElement, i: number) => {
+      const texts = descendants(row).filter((e) => e.name === 'Textbox' && !isBlank(e));
+      return (kinds[i] === 'heading' && !texts.some((e) => roles.get(e) === 'title'))
+        || (kinds[i] === 'groupHeading' && texts.length > 1 && texts.every((e) => fixedText(e) !== undefined));
+    };
+    // A heading across columns: in its first column, the others given empty headings drawn alike. Where reports are
+    // combined, columns are found by their headings, one each, and a row with cells across columns is left out when the
+    // columns are put in order (so headings and values would part).
+    rows.forEach((row, i) => {
+      if (!headingRow(row, i)) return;
+      const cells = cellsOf(row);
+      for (let c = 0; c < cells.length; c++) {
+        const contents = child(cells[c]!, 'CellContents');
+        const span = Number(textOf(child(contents ?? el('x'), 'ColSpan')) || 1);
+        let tb = cellItem(cells[c]!);
+        // (A plain box holding just the heading: the heading itself, placed by its padding.)
+        if (tb?.name === 'Rectangle' && span > 1 && !child(tb, 'Visibility') && !drawnAs(tb)) {
+          const inner = childElements(child(tb, 'ReportItems') ?? el('x')).filter((e) => ITEMS.has(e.name));
+          if (inner.length === 1 && inner[0]!.name === 'Textbox') {
+            const text = inner[0]!;
+            const spanWidth = widths.slice(c, c + span).reduce((a, b) => a + b, 0);
+            pad(text, { left: len(text, 'Left'), top: len(text, 'Top'), right: Math.max(0, spanWidth - len(text, 'Left') - len(text, 'Width')) });
+            unplace(text);
+            contents!.children = contents!.children.map((x) => (x === tb ? text : x));
+            tb = text;
+          }
+        }
+        if (span < 2 || span >= columns || !tb || tb.name !== 'Textbox' || fixedText(tb) === undefined) continue;
+        // (Too long for its first column: on more lines, where the row has room for them.)
+        const lines = Math.ceil(textWidth(tb, true) / Math.max(0.01, widths[c]!) - 0.01);
+        const sizes = descendants(tb).filter((e) => e.name === 'FontSize' && !textOf(e).startsWith('=')).map((e) => (inches(textOf(e)) ?? 0) * 72);
+        const lineHeight = (Math.max(DESIGN_FONT, ...sizes) * DESIGN_LEADING) / 72;
+        if (lines > 1 && lines * lineHeight > len(row, 'Height') + 0.01) {
+          review.push({ item: `Table ${T}`, message: `the heading "${fixedText(tb)}" is over columns ${c + 1} to ${c + span} and too long for one: where reports are combined, those columns cannot be chosen apart` });
+          continue;
+        }
+        if (textAlignOf(tb) !== 'Left' || lines > 1) review.push({ item: `Table ${T}`, message: `the heading "${fixedText(tb)}" was over columns ${c + 1} to ${c + span}; it is over column ${c + 1} only${lines > 1 ? `, on ${lines} lines` : ''} (reports combined need a heading for each column)` });
+        removeChildren(contents!, ['ColSpan']);
+        const st = childElements(tb, 'Style')[0];
+        const right = st ? childElements(st, 'RightBorder')[0] : undefined;
+        if (st) removeChildren(st, ['RightBorder']);
+        for (let k = 1; k < span; k++) {
+          const blank = newTextbox(`__heading_${c + k}`, '', '0pt');
+          if (st) {
+            const copy = structuredClone(st);
+            removeChildren(copy, ['LeftBorder', 'RightBorder']);
+            if (k === span - 1 && right) copy.children.push(structuredClone(right));
+            blank.children = blank.children.filter((x) => typeof x !== 'object' || (x as XmlElement).name !== 'Style');
+            blank.children.push(copy);
+          }
+          cells[c + k]!.children = [el('CellContents', blank)];
+        }
+      }
+    });
     // A table without column headings, or placing its lines by formula (a statement's indented labels), is lines of
     // text, not rows of data: its rows are not banded.
     const statement = !rows.some((row, i) => kinds[i] === 'heading' && !descendants(row).some((e) => roles.get(e) === 'title')) || rows.some((row, i) => kinds[i] === 'detail'
       && descendants(row).some((e) => e.name === 'Textbox' && textOf(child(childElements(e, 'Style')[0] ?? el('x'), 'PaddingLeft')).startsWith('=')));
     const colNames: (string | undefined)[] = [];
+    const fromField: boolean[] = [];
     const textboxIn = (cell: XmlElement | undefined) => {
       const item = cell ? cellItem(cell) : undefined;
       if (!item) return undefined;
@@ -654,6 +710,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
         const tb = textboxIn(cellsOf(row)[c]);
         if (!tb || isBlank(tb)) continue;
         name = fieldOf(tb) ?? ownWord(tb);
+        if (fieldOf(tb)) fromField[c] = true;
         if (name) break;
       }
       if (!name) {
@@ -670,6 +727,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       colNames.push(name);
     }
     // Each text in its row: named after its column, given its looks.
+    const headingCols = new Set<string>();
     rows.forEach((row, i) => {
       const kind = kinds[i]!;
       let labelled = false;
@@ -677,6 +735,12 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       // headings, which is how reports are combined finds and relabels columns.
       const rowTexts = descendants(row).filter((e) => e.name === 'Textbox' && !isBlank(e));
       const headingsHere = kind === 'groupHeading' && rowTexts.length > 1 && rowTexts.every((e) => fixedText(e) !== undefined);
+      const headingsRow = headingRow(row, i);
+      // (Columns whose heading has text: an empty one is not named after them too.)
+      for (const [c, cell] of cellsOf(row).entries()) {
+        const tb = textboxIn(cell);
+        if (headingsRow && tb && !isBlank(tb) && colNames[c]) headingCols.add(colNames[c]!);
+      }
       cellsOf(row).forEach((cell, c) => {
         let item = cellItem(cell);
         if (!item) return;
@@ -721,6 +785,11 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           if (named.has(tb)) return tb.attributes.Name;
           const col = fieldOf(tb) ?? colNames[c] ?? ownWord(tb) ?? `col${c + 1}`;
           if (kind === 'noData') return rename(tb, 'noData', { T });
+          // (An empty heading over a column of a field's values: the heading of that column, to be given a label.)
+          if (isBlank(tb) && headingsRow && fromField[c] && !headingCols.has(colNames[c]!)) {
+            headingCols.add(colNames[c]!);
+            return rename(tb, 'heading', { T, col: colNames[c]! });
+          }
           if (isBlank(tb)) return rename(tb, 'blank', { T, col });
           const totalled = TOTALLED.test(valueOf(tb));
           switch (kind) {
@@ -781,6 +850,18 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           tableCells.add(tb);
           if (!isBlank(tb)) roles.set(tb, 'headingFirst');
         }
+      }
+    }
+
+    // For setting up which columns show where reports are combined: each column's number and the name its heading
+    // goes by; rows with cells across some of the columns are not put in order with them.
+    if (headingCols.size) {
+      const list = colNames.map((n, c) => `${c + 1} ${headingCols.has(n ?? '') ? n : '(no heading)'}`).join(', ');
+      review.push({ item: `Table ${T}`, message: `columns, by number: ${list}` });
+      const across = rows.map((row, i) => ({ i, spans: cellsOf(row).map((cell) => Number(textOf(child(child(cell, 'CellContents') ?? el('x'), 'ColSpan')) || 1)) }))
+        .filter((r) => r.spans.some((n) => n > 1 && n < columns));
+      if (across.length) {
+        review.push({ item: `Table ${T}`, message: `row(s) ${across.map((r) => r.i + 1).join(', ')} have cells across some columns: where reports are combined they keep their order when columns are put in another order, and lose their last cells when columns are hidden; keep those columns in place` });
       }
     }
   }
@@ -847,6 +928,32 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       items.children = [wrapper];
     }
   }
+  // Where reports are combined, hiding columns takes the last columns off every table in the box, not only the first
+  // (whose columns are the ones chosen): each other table gets as many thin empty columns at its end as could be taken,
+  // and keeps its own.
+  const boxTables = body ? descendants(body).filter((e) => e.name === 'Tablix') : [];
+  const chosen = boxTables[0];
+  const spare = chosen && descendants(chosen).some((e) => headings.has(e)) ? widthsOf(chosen).length - 1 : 0;
+  for (const t of spare > 0 ? boxTables.slice(1) : []) {
+    const columns = childElements(child(t, 'TablixBody/TablixColumns')!, 'TablixColumn');
+    const members = child(t, 'TablixColumnHierarchy/TablixMembers');
+    const last = columns[columns.length - 1];
+    // (Columns in groups of their own: the number taken cannot be known.)
+    if (!last || !members || descendants(members).some((e) => e.name === 'Group') || len(last, 'Width') <= spare * SPARE_WIDTH + 0.05) continue;
+    setChild(last, 'Width', inch(len(last, 'Width') - spare * SPARE_WIDTH));
+    const T = t.attributes.Name ?? '';
+    for (let k = 0; k < spare; k++) {
+      child(t, 'TablixBody/TablixColumns')!.children.push(el('TablixColumn', el('Width', inch(SPARE_WIDTH))));
+      members.children.push(el('TablixMember'));
+      for (const row of rowsOf(t)) {
+        const tb = newTextbox('__spare', '', '0pt');
+        tb.attributes.Name = names.make(fill('blank', { T }));
+        named.add(tb);
+        child(row, 'TablixCells')!.children.push(el('TablixCell', el('CellContents', tb)));
+      }
+    }
+  }
+
   // Names stay unique: an item kept under its Crystal name gives way to a new one taken.
   const seen = new Set<string>();
   for (const e of descendants(report).filter((x) => (ITEMS.has(x.name) || x.name === 'Group') && x.attributes.Name)) {
@@ -886,17 +993,44 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     if (v !== t) e.children = [v];
   }
   dropUnused(report, conv, review);
+  // Custom code: only what the report still calls (formulas worked out in the query need none).
+  const codeEl = child(report, 'Code');
+  if (codeEl) {
+    const called = new Set(descendants(report).flatMap((e) => (textOf(e).startsWith('=') ? [...textOf(e).matchAll(/\bCode\.(\w+)/g)].map((m) => m[1]!) : [])));
+    const kept = usedCode(textOf(codeEl), called);
+    if (kept.trim()) codeEl.children = [kept];
+    else report.children = report.children.filter((c) => c !== codeEl);
+  }
+  // Custom code: where reports are combined it has to be added to the combined report by hand, alongside the code of
+  // other reports; its functions and the values it keeps take the report's name in front, so no two reports' clash.
+  if (codeEl && report.children.includes(codeEl)) {
+    let code = textOf(codeEl);
+    const own = new Set<string>();
+    for (const m of code.matchAll(/^\s*(?:(?:Public|Private|Shared|Friend|Overloads)\s+)*(?:Function|Sub)\s+(\w+)/gim)) own.add(m[1]!);
+    // (Values kept between calls: declared outside any function.)
+    let depth = 0;
+    for (const line of code.split(/\r?\n/)) {
+      if (/^\s*(?:(?:Public|Private|Shared|Friend|Overloads)\s+)*(?:Function|Sub)\s+\w+/i.test(line)) depth++;
+      else if (/^\s*End\s+(?:Function|Sub)\b/i.test(line)) depth--;
+      else if (depth === 0) for (const m of line.matchAll(/^\s*(?:Dim|Private|Public|Shared|Friend|Const)\s+(?:Shared\s+|ReadOnly\s+|Const\s+)*(\w+)/gi)) own.add(m[1]!);
+    }
+    const renamed = new Map([...own].filter((n) => !n.toLowerCase().startsWith(`${S}_`.toLowerCase())).map((n) => [n, `${S}_${n}`]));
+    if (renamed.size) {
+      const word = new RegExp(`\\b(${[...renamed.keys()].join('|')})\\b`, 'g');
+      // (Not inside quoted text.)
+      code = code.split(/("(?:[^"]|"")*")/).map((part, i) => (i % 2 ? part : part.replace(word, (n) => renamed.get(n) ?? n))).join('');
+      codeEl.children = [code];
+      for (const e of descendants(report)) {
+        const t = e.children.length === 1 && typeof e.children[0] === 'string' ? (e.children[0] as string) : '';
+        if (t.startsWith('=') && t.includes('Code.')) e.children = [t.replace(/\bCode\.(\w+)/g, (m, n: string) => (renamed.has(n) ? `Code.${renamed.get(n)}` : m))];
+      }
+    }
+  }
   // What a combined report takes from each template is its box and its datasets: what else this one still needs is
   // listed, to be added where the reports are combined (or taken out).
   if (child(report, 'Code')) {
     const used = [...new Set(descendants(report).flatMap((e) => (textOf(e).startsWith('=') ? [...textOf(e).matchAll(/\bCode\.(\w+)/g)].map((m) => m[1]!) : [])))].sort();
-    review.push({ item: 'Custom code', message: `the report uses custom code${used.length ? ` (${used.join(', ')})` : ''}; where reports are combined only the box and its datasets are taken, so these functions must be in the combined report too (or written as expressions here)` });
-  }
-  // Where reports are combined, hiding a column takes the last columns off every table in the box: one with more
-  // than one table loses columns from each.
-  const boxTables = body ? descendants(body).filter((e) => e.name === 'Tablix') : [];
-  if (boxTables.length > 1 && boxTables.some((t) => descendants(t).some((e) => headings.has(e)))) {
-    review.push({ item: 'Tables', message: `the box holds ${boxTables.length} tables: where reports are combined, hiding columns takes the last columns off each of them; choose columns only where one table has them, or keep the others as they are` });
+    review.push({ item: 'Custom code', message: `the report uses custom code${used.length ? ` (${used.join(', ')})` : ''}; where reports are combined only the box and its datasets are taken, so its code (written beside the report, .code.vb) must be added once to the combined report's code` });
   }
   if (conv.parameters.length) {
     for (const p of childElements(child(report, 'ReportParameters') ?? el('x'), 'ReportParameter')) {
@@ -909,8 +1043,122 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
   const pictures = childElements(child(report, 'EmbeddedImages') ?? el('x'), 'EmbeddedImage').map((i) => i.attributes.Name);
   if (pictures.length) review.push({ item: 'Pictures', message: `the report shows embedded pictures (${pictures.join(', ')}): where reports are combined they must be embedded there too` });
 
+  // Files beside the template: its custom code, and the stored procedure (with its functions) its dataset reads,
+  // which the dataset then calls, as the team's templates do.
+  const files: Record<string, string> = {};
+  const codeLeft = child(report, 'Code');
+  if (codeLeft) files['.code.vb'] = textOf(codeLeft);
+  const procedures = proceduresFor(report, conv, extra.sqlFunctions ?? []);
+  if (procedures) {
+    files['.sql'] = procedures.text;
+    // A copy to preview before the procedures exist: its datasets still run their queries themselves (the functions
+    // they call, at the top of .sql, are needed all the same).
+    if (extra.preview) files['.preview.rdl'] = toXml(root);
+    for (const procedure of procedures.list) {
+      const query = child(procedure.dataSet, 'Query')!;
+      const params = childElements(child(query, 'QueryParameters') ?? el('x'), 'QueryParameter');
+      const standard = conv.parameters.filter((p) => childElements(child(report, 'ReportParameters') ?? el('x'), 'ReportParameter').some((r) => r.attributes.Name === p.name))
+        .filter((p) => !params.some((q) => q.attributes.Name?.toLowerCase() === `@${p.name}`.toLowerCase()))
+        .map((p) => el('QueryParameter', { Name: `@${p.name}` }, el('Value', `=Parameters!${p.name}.Value`)));
+      query.children = [
+        ...childElements(query, 'DataSourceName'),
+        el('QueryParameters', ...standard, ...params),
+        el('CommandType', 'StoredProcedure'),
+        el('CommandText', procedure.name),
+      ];
+    }
+  }
   // Notes the conversion made that no longer apply (the shared data source replaces the connection).
-  return { rdl: toXml(root), review, settled: conv.dataSource ? ['Data source'] : [] };
+  return { rdl: toXml(root), review, settled: conv.dataSource ? ['Data source'] : [], ...(Object.keys(files).length ? { files } : {}) };
+}
+
+/** The functions (and the values they keep) of VB code that the names called reach, in their order. */
+function usedCode(code: string, called: Set<string>): string {
+  // Blocks: each function or sub to its End, and each line outside them.
+  const blocks: { name?: string; text: string }[] = [];
+  let current: { name?: string; text: string } | undefined;
+  for (const line of code.split(/\r?\n/)) {
+    const start = /^\s*(?:(?:Public|Private|Shared|Friend|Overloads)\s+)*(?:Function|Sub)\s+(\w+)/i.exec(line);
+    if (!current && start) current = { name: start[1], text: line };
+    else if (current) {
+      current.text += `\n${line}`;
+      if (/^\s*End\s+(?:Function|Sub)\b/i.test(line)) {
+        blocks.push(current);
+        current = undefined;
+      }
+    } else blocks.push({ text: line });
+  }
+  if (current) blocks.push(current);
+  const keep = new Set<string>();
+  const queue = [...called];
+  while (queue.length) {
+    const name = queue.pop()!;
+    if (keep.has(name.toLowerCase())) continue;
+    const block = blocks.find((b) => b.name?.toLowerCase() === name.toLowerCase());
+    if (!block) continue;
+    keep.add(name.toLowerCase());
+    for (const other of blocks) if (other.name && !keep.has(other.name.toLowerCase()) && new RegExp(`\\b${other.name}\\b`).test(block.text)) queue.push(other.name);
+  }
+  const kept = blocks.filter((b) => b.name && keep.has(b.name.toLowerCase()));
+  // (A line outside the functions: kept where a kept function uses what it declares.)
+  return blocks.filter((b) => {
+    if (b.name) return keep.has(b.name.toLowerCase());
+    const declared = /^\s*(?:Dim|Private|Public|Shared|Friend|Const)\s+(?:Shared\s+|ReadOnly\s+|Const\s+)*(\w+)/i.exec(b.text)?.[1];
+    return declared ? kept.some((k) => new RegExp(`\\b${declared}\\b`).test(k.text)) : !!b.text.trim() && kept.length > 0;
+  }).map((b) => b.text).join('\n').trim();
+}
+
+/**
+ * The stored procedure a team's template reads, drafted from its main dataset's query (the report's tables, its
+ * selection, its formulas worked out as columns), with the functions the query calls: to review and deploy.
+ */
+/**
+ * The stored procedures a template's datasets would call: one per dataset running a query of its own (the report's,
+ * and those of subreports placed in it), each that query with the team's standard parameters and the query's own,
+ * after the functions they use. The main dataset's first.
+ */
+function proceduresFor(report: XmlElement, conv: Conventions, functions: string[]): { text: string; list: { name: string; dataSet: XmlElement }[] } | undefined {
+  const regionSet = descendants(report).find((e) => e.name === 'Tablix' && child(e, 'DataSetName'));
+  const sets = descendants(report).filter((e) => e.name === 'DataSet' && e.attributes.Name !== conv.style?.dataset)
+    .filter((d) => {
+      const query = child(d, 'Query');
+      return !!textOf(child(query, 'CommandText')) && textOf(child(query, 'CommandType')) !== 'StoredProcedure';
+    })
+    .sort((x, y) => Number(y.attributes.Name === textOf(child(regionSet, 'DataSetName'))) - Number(x.attributes.Name === textOf(child(regionSet, 'DataSetName'))));
+  if (!sets.length) return undefined;
+  const SQL_TYPES: Record<string, string> = { DateTime: 'datetime', Integer: 'int', Float: 'float', Boolean: 'bit', String: 'nvarchar(100)' };
+  const schema = conv.style?.command.includes('.') ? conv.style.command.slice(0, conv.style.command.lastIndexOf('.')) : 'dbo';
+  const list = sets.map((dataSet) => ({ name: `${schema}.${dataSet.attributes.Name}`, dataSet }));
+  const procedure = ({ name, dataSet }: { name: string; dataSet: XmlElement }) => {
+    const query = child(dataSet, 'Query');
+    const standard = conv.parameters.map((p) => `    @${p.name} ${SQL_TYPES[p.dataType ?? 'String'] ?? 'nvarchar(100)'}`);
+    const own = childElements(child(query, 'QueryParameters') ?? el('x'), 'QueryParameter')
+      .map((p) => p.attributes.Name ?? '')
+      .filter((n) => n && !conv.parameters.some((s) => `@${s.name}`.toLowerCase() === n.toLowerCase()))
+      .map((n) => `    ${n} nvarchar(4000) -- the report's own (check its type)`);
+    const params = [...standard, ...own];
+    return [
+      `-- Called by the report's dataset ${dataSet.attributes.Name}.`,
+      `CREATE PROCEDURE ${name}`,
+      params.map((p, i) => (i < params.length - 1 ? p.replace(/( --|$)/, ',$1') : p)).join('\n'),
+      'AS',
+      'BEGIN',
+      '    SET NOCOUNT ON;',
+      textOf(child(query, 'CommandText')).split(/\r?\n/).map((l) => `    ${l}`).join('\n') + ';',
+      'END',
+      'GO',
+      '',
+    ];
+  };
+  const lines = [
+    `-- The procedure${list.length > 1 ? 's' : ''} the report's dataset${list.length > 1 ? 's call' : ' calls'}: the Crystal report's tables and selection,`,
+    '-- with its formulas worked out as columns (each under the Crystal formula it replaces), and the functions it uses.',
+    '-- A first draft: review it, add what the team\'s procedures add (filters on the standard parameters), deploy it.',
+    '',
+    ...functions.flatMap((f) => [f, 'GO', '']),
+    ...list.flatMap(procedure),
+  ];
+  return { text: lines.join('\n'), list };
 }
 
 /** Whether an item lies in a table inside a container (named with that table). */
@@ -1086,12 +1334,15 @@ function textAlignOf(textbox: XmlElement): string {
   return (format && /[#0]|^[NCP]\d*$/i.test(textOf(format))) || /^=\s*(Sum|Count|Avg)\(/i.test(valueOf(textbox)) ? 'Right' : 'Left';
 }
 
-/** About how wide a text box's fixed text is drawn (inches); unknown (0) for text worked out when the report runs. */
-function textWidth(textbox: XmlElement): number {
+/**
+ * About how wide a text box's fixed text is drawn (inches): as the designer draws it, or (printed) at its own size;
+ * unknown (0) for text worked out when the report runs.
+ */
+function textWidth(textbox: XmlElement, printed = false): number {
   const text = fixedText(textbox);
   if (text === undefined) return 0;
   const sizes = descendants(textbox).filter((e) => e.name === 'FontSize' && !textOf(e).startsWith('=')).map((e) => (inches(textOf(e)) ?? 0) * 72);
-  const size = Math.max(DESIGN_FONT, ...sizes);
+  const size = printed && sizes.length ? Math.max(...sizes) : Math.max(DESIGN_FONT, ...sizes);
   const style = childElements(textbox, 'Style')[0];
   const padding = ['PaddingLeft', 'PaddingRight'].reduce((a, k) => a + (inches(textOf(child(style, k))) ?? 0), 0);
   return Math.max(...text.split(/\r?\n/).map((line) => line.length)) * size * 0.55 / 72 + padding;
@@ -1108,6 +1359,8 @@ function moveBelow(container: XmlElement, item: XmlElement, oldBottom: number, b
 const DESIGN_FONT = 10;
 const DESIGN_LEADING = 1.4;
 let designText = false;
+/** The width of a thin empty column (inches). */
+const SPARE_WIDTH = 0.01;
 
 /** Fits the items in a container (see above); returns where the lowest ends. */
 function fitItems(container: XmlElement | undefined): number {
@@ -1308,3 +1561,4 @@ function applyStyleRoles(report: XmlElement, style: NonNullable<Conventions['sty
     el('Query', el('DataSourceName', dataSourceName), style.commandType ? el('CommandType', style.commandType) : null, el('CommandText', style.command)),
     el('Fields', ...[...used].sort().map((f) => el('Field', { Name: f }, el('DataField', f), el('rd:TypeName', 'System.String'))))));
 }
+

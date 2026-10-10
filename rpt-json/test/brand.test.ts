@@ -299,6 +299,9 @@ describe('house style', () => {
     // Bars coloured one by one take the house palette too.
     assert.match(styled, /Dim palette\(\) As String = \{"#1F4E79", "#F2A541"\}/);
     assert.ok(!styled.includes('#D9D9D9'), 'the plot has the house background');
+    // Bars coloured by their place (a template's query column): the house palette too.
+    const placed = applyHouseStyle('<Report><Body><ReportItems><Chart Name="B"><Style><Color>=Choose((Fields!B_Point.Value - 1) Mod 3 + 1, "#000001", "#000002", "#000003")</Color></Style></Chart></ReportItems></Body></Report>', style);
+    assert.match(placed, /<Color>=Choose\(\(Fields!B_Point\.Value - 1\) Mod 2 \+ 1, "#1F4E79", "#F2A541"\)<\/Color>/);
     // A line chart keeps Crystal's line colours (a value in blue against its limit in red).
     const lines = { ...definition, layout: [{ name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 3000, objects: [
       { kind: 'chart' as const, name: 'Lines', position: { x: 0, y: 0 }, size: { width: 4000, height: 2800 }, chart: { family: 1, graphType: 13, values: ['Sum of Orders.Amount', 'Max of Orders.Amount'], onChangeOf: 'Orders.Name' } }] }] }] };

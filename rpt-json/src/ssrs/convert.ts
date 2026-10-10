@@ -12,6 +12,8 @@ export interface ConvertedReport {
   storage: string;
   rdl: string;
   review: ReviewNote[];
+  /** Files to write beside the .rdl, by the ending that replaces ".rdl" (".sql", ".code.vb"). */
+  files?: Record<string, string>;
 }
 
 export interface SsrsOptions {
@@ -27,10 +29,12 @@ export interface SsrsOptions {
   parameterValues?: Record<string, string>;
   /** Number format for chart value axes the .rpt does not show (e.g. "0.00%"). */
   chartAxisFormat?: string;
+  /** Formulas worked out per record become columns of the query where SQL gives exactly the same. */
+  formulasInQuery?: boolean;
   /** A last step over each report's RDL (a house style laid over the Crystal layout, ...). */
   restyle?: (rdl: string) => string;
   /** The very last step: the report reshaped as a team's template (names, structure, looks), with notes. */
-  reshape?: (rdl: string, reportName: string) => { rdl: string; review: ReviewNote[]; settled?: string[] };
+  reshape?: (rdl: string, reportName: string, extra?: { sqlFunctions?: string[] }) => { rdl: string; review: ReviewNote[]; settled?: string[]; files?: Record<string, string> };
 }
 
 const safeFileName = (name: string) => name.replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'Report';
@@ -69,7 +73,7 @@ export function convertDocumentToSsrs(doc: CfbDocument, baseName: string, option
         review: [{ item: 'Report', message: `could not be decoded: ${(model.errors ?? []).join('; ')}` }],
       };
     }
-    const { rdl, review, referenced } = convertToRdl(model.definition, model.dataSource, {
+    const { rdl, review, referenced, sqlFunctions } = convertToRdl(model.definition, model.dataSource, {
       reportName,
       connectionString: options.connectionString,
       sharedDataSource: options.sharedDataSource,
@@ -77,18 +81,21 @@ export function convertDocumentToSsrs(doc: CfbDocument, baseName: string, option
       pageNumber: options.pageNumber,
       parameterValues: options.parameterValues,
       chartAxisFormat: options.chartAxisFormat,
+      formulasInQuery: options.formulasInQuery,
       subreports: model.storage ? new Map() : subreports,
       subreport: Boolean(model.storage),
       images: embeddedImages(storageAt(doc.root, model.storage)),
     });
     let out = rdl && options.restyle ? options.restyle(rdl) : rdl;
+    let files: Record<string, string> | undefined;
     if (out && options.reshape) {
-      const shaped = options.reshape(out, reportName);
+      const shaped = options.reshape(out, reportName, { sqlFunctions });
       out = shaped.rdl;
+      files = shaped.files;
       const settled = new Set(shaped.settled ?? []);
       review.splice(0, review.length, ...review.filter((n) => !settled.has(n.item)), ...shaped.review);
     }
-    return { fileName: `${reportName}.rdl`, storage: model.storage, rdl: out, review, referenced };
+    return { fileName: `${reportName}.rdl`, storage: model.storage, rdl: out, review, referenced, files };
   });
   // Only the subreports the main report refers to need an .rdl of their own: those placed inside it need none, nor
   // those it never prints (in a section always suppressed). All are kept where the main report could not be converted.

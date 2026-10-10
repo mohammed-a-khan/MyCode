@@ -210,6 +210,36 @@ In name patterns `{S}` is the report's name, `{T}` its table's, `{col}` the colu
 unique by adding `_2`, `_3`, ... The review notes list what was left out (page header and footer) and each parameter
 mapped from Crystal's.
 
+Templates are made to be combined into one report, a box and its datasets at a time:
+
+- each column has one heading of its own (a heading Crystal set across columns stays over the first of them), and
+  the review notes list each table's columns by number, for choosing and ordering columns;
+- every dataset is named after the report, and so are the custom code's functions and the values it keeps: a
+  report using custom code gets it beside it (`.code.vb`), to be added once to the combined report's code;
+- a table after the first in a report gets as many thin empty columns at its end as the first has columns less one,
+  so that columns taken off the end of every table when the first one's are hidden are those.
+
+Formulas worked out per record become columns of the report's query, in T-SQL giving exactly the same (text compared
+with case as Crystal does, decimals in division, nothing where a field it reads is null, the empty value of an `if`
+without `else`, custom functions of one expression worked out where they are called), each under the Crystal formula
+it replaces; the report reads them as plain fields. Formulas and custom functions of several statements (local
+variables, arrays, loops, `select`) become T-SQL functions of the report's (`dbo.<report>_<formula>`), called from
+the query. A number kept from record to record as the report prints (set in a group's header, added to in each
+record or each deeper group) becomes a window over the report's groups: a running `SUM() OVER (PARTITION BY ...
+ORDER BY ...)` in the report's order, or a `DENSE_RANK()` counting groups.
+
+Beside the template, `.sql` holds those functions and a first draft of the stored procedure (`CREATE PROCEDURE
+<schema>.<dataset>`, the team's standard parameters and the query's own), and the template's dataset calls that
+procedure, as the team's templates do. With `--preview`, `<name>.preview.rdl` is written too: the same template, its dataset
+running the query itself, to preview the report before the procedure is created (the functions at the top of
+`.sql` are needed all the same). Charts need no custom code either: Crystal's value-axis scale is three
+columns of the query (worked out by a function of the report's over the chart's values), and a bar chart's colour per
+bar comes from a column giving each bar's place in the chart's order. A custom function of a single value (an
+expression, or an `if`/`select` choosing one) used in formatting is written in place as an expression. What SQL
+cannot give exactly (a value kept across records in no order of the report's own, page numbers, parameters in
+formulas) stays in the report, listed in the review notes with why; only what still needs custom code is written to
+`.code.vb`.
+
 ### House templates
 
 `--template house.rdl` lays each report out in the style of an existing SSRS report instead of copying the Crystal

@@ -30,7 +30,7 @@ import type {
 } from '../crystal/model.ts';
 import { classifyAreas, type ClassifiedAreas } from '../crystal/areas.ts';
 import { detailColumnHeadings } from '../crystal/headers.ts';
-import { CODE_HELPERS, SPECIAL_FIELDS, translateFormula, translateToSql, vbString, type FormulaContext, type Translation } from './formula.ts';
+import { CODE_HELPERS, formulaToSql, layOutSql, printRole, SPECIAL_FIELDS, translateFormula, translateToSql, vbString, type FormulaContext, type SqlType, type Translation } from './formula.ts';
 import { child, childElements, el, escapeXml, textOf, toXml, type XmlChild, type XmlElement } from './xml.ts';
 
 export interface RdlOptions {
@@ -65,6 +65,11 @@ export interface RdlOptions {
   subreport?: boolean;
   /** Internal: build the report as items inside another report (a subreport in a page header/footer). */
   inline?: InlineTarget;
+  /**
+   * Formulas worked out per record become columns of the report's query where SQL gives exactly the same (as a
+   * stored procedure for the report would return them), instead of fields worked out in the report.
+   */
+  formulasInQuery?: boolean;
 }
 
 export interface InlineTarget {
@@ -134,6 +139,8 @@ export interface RdlResult {
   inlinedOnly?: number[];
   /** Subreports ("Subdocument N" numbers) the report refers to as subreports, each needing an .rdl of its own. */
   referenced?: number[];
+  /** T-SQL functions the report's query calls (formulas of statements worked out in SQL), to create with it. */
+  sqlFunctions?: string[];
 }
 
 /** One detail column of a report laid out as a plain list (see buildBlock). */
@@ -239,6 +246,9 @@ const PARAMETER_TYPES: Record<string, string> = {
   string: 'String', integer: 'Integer', number: 'Float', currency: 'Float', boolean: 'Boolean',
   date: 'DateTime', dateTime: 'DateTime', time: 'DateTime',
 };
+/** Where a formula is printed or read: the kind of area (report, page, group header or footer, details) and its group. */
+interface Placement { kind: 'RH' | 'PH' | 'GH' | 'D' | 'GF' | 'RF' | 'PF'; level: number }
+const SQL_TYPE_NAMES: Record<SqlType, string> = { number: 'System.Double', string: 'System.String', date: 'System.DateTime', dateTime: 'System.DateTime', boolean: 'System.Boolean' };
 const FORMATS: Record<string, string> = { currency: 'N2', number: 'N2', integer: 'N0', date: 'd', dateTime: 'g' };
 
 const SUMMARY_OPERATIONS: Record<string, string> = {
@@ -410,6 +420,18 @@ class RdlBuilder {
   private readonly imageNames = new NameSet();
   private readonly fields = new Map<string, DatasetField>();
   private readonly calculated: { name: string; expression: string }[] = [];
+  /** Formulas worked out in the query: column name, SQL, type and the Crystal formula. */
+  private readonly queryFormulas = new Map<string, { name: string; sql: string; type: SqlType; text: string; formula: string; comment?: string }>();
+  /** Formulas' SQL (or null where there is none), and why not. */
+  private readonly formulaSqlCache = new Map<string, { sql: string; type: SqlType } | null>();
+  private readonly formulasNotInQuery: { formula: string; reason: string }[] = [];
+  /** Formulas worked out per record in the report, where the others are in the query. */
+  private readonly formulasInReport: string[] = [];
+  /** T-SQL functions the query calls, by what they work out. */
+  private readonly sqlFunctions = new Map<string, { name: string; text: string }>();
+  private readonly sqlFunctionNames = new NameSet();
+  /** The formula being worked out in SQL (to name a function it needs). */
+  private sqlFormulaName = '';
   private readonly formulaResults = new Map<string, string | null>();
   private readonly parameterNames = new Map<string, string>();
   /** Parameter names are their own namespace, so a subreport's parameters match the main report's. */
@@ -549,6 +571,9 @@ class RdlBuilder {
     dataset: () => this.dataset,
     runningTotal: (name) => this.runningTotalExpression(name, `Running total {#${name}}`),
     customFunction: (name) => this.customFunction(name),
+    customFunctionText: (name) => this.definition.formulas.find((f) => f.name.toLowerCase() === name.toLowerCase() && isCustomFunction(f.text))?.text,
+    // (A template takes no custom code where it can do without.)
+    inlineFunctions: () => !!this.options.formulasInQuery,
     parameterRange: (name) => this.parameterRange(name),
     parameterMultiple: (name) => this.parameterInfo(name)?.allowMultiple === true,
     nextValue: (ref) => this.nextValue(ref),
@@ -651,6 +676,18 @@ class RdlBuilder {
       this.formulaResults.set(key, 'Nothing');
       return 'Nothing';
     }
+    // Worked out as the report prints (a running total or count kept in a variable): a column of the query, where
+    // SQL gives the same over the report's groups.
+    if (this.queryFromTables && printRole(formula.text)) {
+      const sql = this.formulaSql(formula.name);
+      if (sql) {
+        const fieldName = this.fieldNames.make(`F_${formula.name}`);
+        this.queryFormulas.set(key, { name: fieldName, sql: sql.sql, type: sql.type, text: formula.text, formula: formula.name });
+        this.formulaResults.set(key, `Fields!${fieldName}.Value`);
+        return `Fields!${fieldName}.Value`;
+      }
+      this.formulasInReport.push(formula.name);
+    }
     const t = translateFormula(formula.text, this.formulaContext, { codeName: this.codeNames.make(`F_${formula.name}`) });
     this.addCode(t);
     for (const issue of t.issues) this.note(`Formula {@${formula.name}}`, issue);
@@ -671,11 +708,258 @@ class RdlBuilder {
       result = `(${expression})`;
     } else {
       const fieldName = this.fieldNames.make(`F_${formula.name}`);
-      this.calculated.push({ name: fieldName, expression: t.expression });
+      const sql = this.formulaSql(formula.name);
+      if (sql) this.queryFormulas.set(key, { name: fieldName, sql: sql.sql, type: sql.type, text: formula.text, formula: formula.name });
+      else {
+        this.calculated.push({ name: fieldName, expression: t.expression });
+        if (this.queryFromTables) this.formulasInReport.push(formula.name);
+      }
       result = `Fields!${fieldName}.Value`;
     }
     this.formulaResults.set(key, result);
     return result;
+  }
+
+  /** Whether the report's query is built here from its tables (so formulas can be columns of it). */
+  private get queryFromTables(): boolean {
+    return !!this.options.formulasInQuery && !this.options.inline && this.source.tables.length > 0 && this.source.tables.every((t) => t.kind === 'table');
+  }
+
+  /** A formula as SQL over the report's tables, where it gives exactly the same per record (see formulaToSql). */
+  private formulaSql(name: string): { sql: string; type: SqlType } | undefined {
+    if (!this.queryFromTables) return undefined;
+    const key = name.toLowerCase();
+    if (this.formulaSqlCache.has(key)) return this.formulaSqlCache.get(key) ?? undefined;
+    const formula = this.definition.formulas.find((f) => f.name.toLowerCase() === key);
+    if (!formula || isCustomFunction(formula.text)) return undefined;
+    this.formulaSqlCache.set(key, null); // cycle guard
+    const outer = this.sqlFormulaName;
+    this.sqlFormulaName = formula.name;
+    const at = printRole(formula.text) ? this.placementOf(this.placements().formulas.get(key) ?? []) : undefined;
+    const out = this.sqlOf(formula.text, at);
+    this.sqlFormulaName = outer;
+    if ('reason' in out) {
+      this.formulasNotInQuery.push({ formula: formula.name, reason: out.reason });
+      return undefined;
+    }
+    this.formulaSqlCache.set(key, out);
+    return out;
+  }
+
+  /** Crystal text as SQL over the report's tables; print-time variables as their values where it is printed. */
+  private sqlOf(text: string, at: Placement | undefined): ReturnType<typeof formulaToSql> {
+    return formulaToSql(text, {
+      column: (table, field) => {
+        const f = this.findField(table, field);
+        return f ? `${this.quote(f.table)}.${this.quote(f.column)}` : undefined;
+      },
+      columnType: (table, field) => this.findField(table, field)?.type,
+      formula: (other) => this.formulaSql(other),
+      customFunction: (fn) => this.definition.formulas.find((f) => f.name.toLowerCase() === fn.toLowerCase() && isCustomFunction(f.text))?.text,
+      addFunction: (fnKey, text) => this.addSqlFunction(fnKey, fnKey.startsWith('custom:') ? fnKey.slice(7) : this.sqlFormulaName, text),
+      variable: at ? (name) => this.printValue(name.toLowerCase(), at) : undefined,
+    });
+  }
+
+  /** A field of the query (a column, or a formula worked out in it, per record) as SQL, for windows over the rows. */
+  private columnSql(expression: string): string | undefined {
+    const name = /^Fields!(\w+)\.Value$/.exec(expression.trim())?.[1];
+    if (!name) return undefined;
+    const field = [...this.fields.values()].find((f) => f.name === name);
+    if (field) return `${this.quote(field.table)}.${this.quote(field.column)}`;
+    const formula = [...this.queryFormulas.values()].find((f) => f.name === name);
+    return formula && !/\bOVER\s*\(/i.test(formula.sql) ? formula.sql : undefined;
+  }
+
+  /**
+   * A chart's value axis as Crystal scales it, from the smallest to the largest of its values over every row: three
+   * columns of the query (from, to and step), by a function of the report's. Their names.
+   */
+  private scaleColumns(chartName: string, values: string[]): string[] {
+    const extreme = (fn: 'MIN' | 'MAX') => values.map((v) => `CAST(ISNULL(${fn}(${v}) OVER (), 0) AS float)`)
+      .reduce((acc, e) => (acc ? `CASE WHEN ${e} ${fn === 'MIN' ? '<' : '>'} ${acc} THEN ${e} ELSE ${acc} END` : e), '');
+    const scale = this.addSqlFunction('chart:scale', 'ChartScale', (name) => [
+      `-- A chart's value axis as Crystal scales it, for values from @lo to @hi: its start (@part 0), end (1) or step (2).`,
+      '-- The step is the first of 1, 2, 4 or 5 times a power of ten that covers the values in eight steps or fewer.',
+      `CREATE FUNCTION ${name}(@lo float, @hi float, @part int)`,
+      'RETURNS float',
+      'AS',
+      'BEGIN',
+      '  DECLARE @swap float, @power int, @k int, @step float, @bottom float, @top float;',
+      '  IF @hi < @lo',
+      '  BEGIN',
+      '    SET @swap = @lo;',
+      '    SET @lo = @hi;',
+      '    SET @hi = @swap;',
+      '  END;',
+      '  IF @hi - @lo < 1E-12 SET @hi = @lo + CASE WHEN @lo = 0 THEN 1 ELSE ABS(@lo) / 10 END;',
+      '  SET @power = FLOOR(LOG10((@hi - @lo) / 8)) - 1;',
+      '  WHILE 1 = 1',
+      '  BEGIN',
+      '    SET @k = 1;',
+      '    WHILE @k <= 4',
+      '    BEGIN',
+      '      SET @step = CHOOSE(@k, 1, 2, 4, 5) * POWER(CAST(10 AS float), @power);',
+      '      SET @bottom = FLOOR(@lo / @step + 1E-9) * @step;',
+      '      SET @top = CEILING(@hi / @step - 1E-9) * @step;',
+      '      IF (@top - @bottom) / @step <= 8.000001 RETURN CASE @part WHEN 0 THEN @bottom WHEN 1 THEN @top ELSE @step END;',
+      '      SET @k = @k + 1;',
+      '    END;',
+      '    SET @power = @power + 1;',
+      '  END;',
+      '  RETURN NULL;',
+      'END',
+    ].join('\n'));
+    return ['From', 'To', 'Step'].map((part, i) => {
+      const name = this.fieldNames.make(`${chartName}_Axis${part}`);
+      this.queryFormulas.set(`chart:${name}`, {
+        name, sql: `${scale}(${extreme('MIN')}, ${extreme('MAX')}, ${i})`, type: 'number', text: '', formula: chartName,
+        comment: `chart ${chartName}: its value axis, ${['from', 'to', 'step'][i]} (as Crystal scales it over the values)`,
+      });
+      return name;
+    });
+  }
+
+  /** Each bar's place among a chart's categories, in its order (a column of the query); its name. */
+  private pointColumn(chartName: string, category: string, descending: boolean): string | undefined {
+    const sql = this.columnSql(category);
+    if (!sql) return undefined;
+    const name = this.fieldNames.make(`${chartName}_Point`);
+    this.queryFormulas.set(`chart:${name}`, {
+      name, sql: `DENSE_RANK() OVER (ORDER BY ${sql}${descending ? ' DESC' : ''})`, type: 'number', text: '', formula: chartName,
+      comment: `chart ${chartName}: each bar's place in the chart's order (its colour the palette's colour there)`,
+    });
+    return name;
+  }
+
+  /** A T-SQL function of the report's (named after the report), made once per key; its name. */
+  private addSqlFunction(fnKey: string, base: string, text: (name: string) => string): string {
+    const known = this.sqlFunctions.get(fnKey);
+    if (known) return known.name;
+    const fn = `dbo.${this.quote(this.sqlFunctionNames.make(sanitizeName(`${this.options.reportName}_${base}`)))}`;
+    // (Added before its text, so a function calling itself finds its name.)
+    this.sqlFunctions.set(fnKey, { name: fn, text: '' });
+    this.sqlFunctions.get(fnKey)!.text = text(fn);
+    return fn;
+  }
+
+  // ---- variables kept from record to record, as SQL over the report's groups ----
+
+  private placementCache?: { formulas: Map<string, Placement[]>; conditions: Map<number, Placement[]> };
+  /** Where each formula is printed, and where each formatting formula is read: the kind of area and its group. */
+  private placements(): { formulas: Map<string, Placement[]>; conditions: Map<number, Placement[]> } {
+    if (this.placementCache) return this.placementCache;
+    const formulas = new Map<string, Placement[]>();
+    const conditions = new Map<number, Placement[]>();
+    const areas = classifyAreas(this.definition.layout, this.options.subreport);
+    const add = <K>(map: Map<K, Placement[]>, key: K, at: Placement) => map.set(key, [...(map.get(key) ?? []), at]);
+    const visit = (sections: SectionInfo[], at: Placement) => {
+      for (const section of sections) {
+        for (const ref of Object.values(section.conditions ?? {})) add(conditions, ref.index, at);
+        for (const obj of section.objects) {
+          if (obj.field?.startsWith('@')) add(formulas, obj.field.slice(1).toLowerCase(), at);
+          for (const ref of Object.values(obj.conditions ?? {})) add(conditions, ref.index, at);
+        }
+      }
+    };
+    visit(areas.reportHeader, { kind: 'RH', level: 0 });
+    visit(areas.pageHeader, { kind: 'PH', level: 0 });
+    for (const [level, sections] of areas.groupHeaders) visit(sections, { kind: 'GH', level });
+    visit(areas.detail, { kind: 'D', level: Infinity });
+    for (const [level, sections] of areas.groupFooters) visit(sections, { kind: 'GF', level });
+    visit(areas.reportFooter, { kind: 'RF', level: 0 });
+    visit(areas.pageFooter, { kind: 'PF', level: 0 });
+    this.placementCache = { formulas, conditions };
+    return this.placementCache;
+  }
+
+  /** The one place (kind and group) of a formula printed or read, or undefined where it is in more than one. */
+  private placementOf(list: Placement[]): Placement | undefined {
+    const first = list[0];
+    return first && list.every((p) => p.kind === first.kind && p.level === first.level) ? first : undefined;
+  }
+
+  /** A group's value in SQL and its order, for windows over the report's groups. */
+  private groupKey(level: number): { sql: string; descending: boolean } | undefined {
+    const field = this.groupFields[level - 1];
+    if (!field) return undefined;
+    const order = this.definition.groupSorts?.find((g) => g.field.toLowerCase() === field.toLowerCase())?.order;
+    if (order === 2) return undefined;
+    let sql: string | undefined;
+    if (field.startsWith('@')) sql = this.formulaSql(field.slice(1))?.sql;
+    else {
+      const dot = field.lastIndexOf('.');
+      const f = dot > 0 ? this.findField(field.slice(0, dot), field.slice(dot + 1)) : undefined;
+      sql = f ? `${this.quote(f.table)}.${this.quote(f.column)}` : undefined;
+    }
+    return sql ? { sql, descending: order === 1 } : undefined;
+  }
+
+  /**
+   * A number variable's value where it is read: set to a constant in a group header (or the report header), then
+   * added to in each record or in a deeper group's header. Its value is the constant plus a running total (or count)
+   * over the records (or groups) before, within the group it restarts in, in the report's order.
+   */
+  private printValue(variable: string, at: Placement): { sql: string; type: 'number' } | undefined {
+    const resets: { at: Placement; value: number }[] = [];
+    const adds: { at: Placement; amount: string }[] = [];
+    for (const f of this.definition.formulas) {
+      const role = printRole(f.text);
+      if (!role || role.role === 'read' || role.variable !== variable) continue;
+      for (const p of this.placements().formulas.get(f.name.toLowerCase()) ?? []) {
+        if (role.role === 'reset') resets.push({ at: p, value: role.value });
+        else adds.push({ at: p, amount: role.amount });
+      }
+    }
+    // (Reset once, at one group level or the report header; added to in one place.)
+    const reset = resets[0];
+    if (resets.some((r) => r.at.kind !== reset!.at.kind || r.at.level !== reset!.at.level || r.value !== reset!.value)) return undefined;
+    if (reset && reset.at.kind !== 'GH' && reset.at.kind !== 'RH') return undefined;
+    const k = reset?.at.kind === 'GH' ? reset.at.level : 0;
+    const start = reset?.value ?? 0;
+    if (adds.length === 0 || adds.some((a) => a.at.kind !== adds[0]!.at.kind || a.at.level !== adds[0]!.at.level || a.amount !== adds[0]!.amount)) return undefined;
+    const add = adds[0]!;
+    const keys: { sql: string; descending: boolean }[] = [];
+    for (let level = 1; level <= this.groupFields.length; level++) {
+      const key = this.groupKey(level);
+      if (!key) return undefined;
+      keys.push(key);
+    }
+    const by = (from: number, to: number) => keys.slice(from, to).map((g) => `${g.sql}${g.descending ? ' DESC' : ''}`);
+    const partition = (to: number) => (to > 0 ? `PARTITION BY ${keys.slice(0, to).map((g) => g.sql).join(', ')}` : '');
+    const over = (to: number, order: string[], frame = '') => `OVER (${[partition(to), order.length ? `ORDER BY ${order.join(', ')}${frame}` : ''].filter(Boolean).join(' ')})`;
+    const plus = (sql: string) => (start ? `(${start} + ${sql})` : sql);
+    const level = at.kind === 'D' ? Infinity : at.kind === 'RF' || at.kind === 'RH' ? 0 : at.level;
+    if (!['GH', 'GF', 'D', 'RF', 'RH'].includes(at.kind) || level < k) return undefined;
+    // (In the header of the group it restarts in, or the report header: just set.)
+    if (at.kind === 'RH' || (at.kind === 'GH' && at.level === k)) return { sql: String(start), type: 'number' };
+    if (add.at.kind === 'D') {
+      const amount = this.sqlOf(add.amount, undefined);
+      if ('reason' in amount || amount.type !== 'number') return undefined;
+      const e = amount.sql;
+      if (at.kind === 'D') {
+        const sorts = (this.definition.sorts ?? []).filter((s) => !s.bySummary).map((s) => {
+          const dot = s.field.lastIndexOf('.');
+          const f = dot > 0 ? this.findField(s.field.slice(0, dot), s.field.slice(dot + 1)) : undefined;
+          return f ? `${this.quote(f.table)}.${this.quote(f.column)}${s.descending ? ' DESC' : ''}` : undefined;
+        });
+        // (Record by record in the report's order: none where the records are in no order but the database's.)
+        const order = [...by(k, keys.length), ...(sorts as string[])];
+        if (sorts.some((x) => !x) || order.length === 0) return undefined;
+        return { sql: plus(`SUM(${e}) ${over(k, order, ' ROWS UNBOUNDED PRECEDING')}`), type: 'number' };
+      }
+      if (at.kind === 'GF' || at.kind === 'RF') return { sql: plus(`SUM(${e}) ${over(k, by(k, level))}`), type: 'number' };
+      // A group's header: what the groups before it in the restarting group added.
+      return { sql: plus(`(SUM(${e}) ${over(k, by(k, level))} - SUM(${e}) ${over(level, [])})`), type: 'number' };
+    }
+    if (add.at.kind === 'GH' && add.at.level > k) {
+      // Added to in each header of a deeper group: by how many of those groups there are so far.
+      const step = Number(add.amount);
+      if (!Number.isFinite(step) || level < add.at.level) return undefined;
+      const rank = `DENSE_RANK() ${over(k, by(k, add.at.level))}`;
+      return { sql: plus(step === 1 ? rank : `${step} * ${rank}`), type: 'number' };
+    }
+    return undefined;
   }
 
   /** A formatting-condition formula (by name and position in the formula list), translated for a property. */
@@ -692,6 +976,21 @@ class RdlBuilder {
     const formula = { text };
     // Suppress conditions (Object_Visibility, Section_Visibility, ...) are True/False.
     const boolean = !colors && /visib|suppress|new_?page|keep_?together/i.test(ref.name);
+    // Worked out as the report prints (a variable kept from record to record): a column of the query, where SQL
+    // gives the same where the condition is read.
+    if (this.queryFromTables && printRole(text) && scope === 'row') {
+      const key = `#${ref.index}`;
+      let column = this.queryFormulas.get(key)?.name;
+      if (!column) {
+        const at = this.placementOf(this.placements().conditions.get(ref.index) ?? []);
+        const sql = at ? this.sqlOf(text, at) : { reason: 'it is read in more than one kind of place' };
+        if ('sql' in sql && (sql.type === 'boolean' || !boolean)) {
+          column = this.fieldNames.make(`C_${ref.name}_${ref.index}`);
+          this.queryFormulas.set(key, { name: column, sql: sql.sql, type: sql.type, text, formula: `${ref.name} #${ref.index}` });
+        } else this.formulasInReport.push(`${ref.name} #${ref.index}`);
+      }
+      if (column) return boolean ? `=(Fields!${column}.Value = True)` : `=Fields!${column}.Value`;
+    }
     const t = translateFormula(formula.text, this.formulaContext, { colors, boolean, codeName: this.codeNames.make(`C_${ref.name}_${ref.index}`) });
     this.addCode(t);
     for (const issue of t.issues) this.note(`${item}: formula ${ref.name}`, issue);
@@ -1672,11 +1971,16 @@ class RdlBuilder {
     const onePerPoint = allRows && (values.length === 1 || !seriesExpression) && categoryExpression && categoryExpression !== 'Nothing'
       ? `CountRows() = CountDistinct(CStr(${categoryExpression}) & "|" & CStr(${seriesExpression && seriesExpression !== 'Nothing' ? seriesExpression : '""'}))`
       : undefined;
-    if (onePerPoint && !this.codeFunctions.includes(AXIS_CODE)) this.codeFunctions.push(AXIS_CODE);
+    // In the query, where the chart reads every row it returns (a chart in the body, the record selection in its
+    // WHERE): the scale worked out over the values there, three columns read by the axis (no custom code).
+    const inQuery = this.queryFromTables && hidden !== undefined && (!this.definition.selectionFormulas.record || !!this.whereClause());
+    const rowSql = onePerPoint && inQuery ? allRows!.map((r) => this.columnSql(r)) : [];
+    const scaleColumns = rowSql.length && rowSql.every(Boolean) ? this.scaleColumns(chartName, rowSql as string[]) : undefined;
+    if (onePerPoint && !scaleColumns && !this.codeFunctions.includes(AXIS_CODE)) this.codeFunctions.push(AXIS_CODE);
     // Over all the chart's values (a price and its limit alike).
     const extreme = (fn: 'Min' | 'Max') => (allRows ?? []).map((r) => `CDbl(IIf(IsNothing(${fn}(${r})), 0, ${fn}(${r})))`)
       .reduce((acc, e) => (acc ? `Math.${fn}(${acc}, ${e})` : e), '');
-    const crystalScale = (part: number) => `Code.CrAxis(${extreme('Min')}, ${extreme('Max')}, ${part})`;
+    const crystalScale = (part: number) => scaleColumns ? `First(Fields!${scaleColumns[part]}.Value)` : `Code.CrAxis(${extreme('Min')}, ${extreme('Max')}, ${part})`;
     // For the axis's minimum (0.4), maximum (1.6) and interval (0.2).
     const part = (factor: number) => ({ 0.4: 0, 1.6: 1 }[factor] ?? 2);
     const own = (factor: number) => !raw || style.type !== 'Column' ? 'Double.NaN' : factor === 0.4 ? `IIf(${lowest} = 0, 0, Double.NaN)` : 'Double.NaN';
@@ -1729,10 +2033,16 @@ class RdlBuilder {
     // One value over categories, as bars: Crystal gives each bar its own colour, in its palette's order (SSRS
     // would colour the whole series alike), and shows no legend for it.
     const barPerPoint = style.type === 'Column' && values.length === 1 && !seriesExpression && !!categoryExpression && categoryExpression !== 'Nothing';
-    if (barPerPoint) {
+    // In the query: each bar's place among the chart's categories, in the chart's order (it sorts by it), its colour
+    // the palette's colour at that place.
+    const pointColumn = barPerPoint && inQuery && chart.categoryOrder !== 2 ? this.pointColumn(chartName, categoryExpression!, chart.categoryOrder === 1) : undefined;
+    if (barPerPoint && !pointColumn) {
       this.codeMembers.crPointColors = 'New System.Collections.Hashtable';
       if (!this.codeFunctions.includes(POINT_COLOR_CODE)) this.codeFunctions.push(POINT_COLOR_CODE);
     }
+    const pointColor = pointColumn
+      ? `=Choose((Fields!${pointColumn}.Value - 1) Mod ${CRYSTAL_PALETTE.length} + 1, ${CRYSTAL_PALETTE.map((c) => `"${c}"`).join(', ')})`
+      : `=Code.CrPointColor(${vbString(chartName)}, ${categoryExpression})`;
 
     // Data labels as Crystal shows them: the category, the value (in the chart's number format), or both.
     // A bar chart of the angled look prints its percentages whole, inside the bars (otherwise as its format says, above).
@@ -1768,7 +2078,7 @@ class RdlBuilder {
           el('ChartDataPointValues', el('Y', isPie ? `=IIf(CDbl(IIf(IsNothing(${value.expression}), 0, ${value.expression})) = 0, Nothing, ${value.expression})` : `=${value.expression}`)),
           dataLabel(value.expression),
           // Crystal draws lines thick (SSRS takes a line's width from its data points).
-          el('Style', barPerPoint ? el('Color', `=Code.CrPointColor(${vbString(chartName)}, ${categoryExpression})`) : null,
+          el('Style', barPerPoint ? el('Color', pointColor) : null,
             // Crystal outlines each bar and pie slice in black.
             isLine ? el('Border', el('Width', '1.5pt')) : el('Border', el('Color', 'Black'), el('Style', 'Solid'), el('Width', '0.5pt'))),
           // A distinct marker shape per line, clearly visible.
@@ -1813,9 +2123,10 @@ class RdlBuilder {
           // Crystal's order: as the data comes (no sort), or ascending/descending by value.
           // "In original order" is the order of the records after the report's record sort, which a chart group
           // would otherwise lose: sorted by the record sort fields (by the first record of each category).
-          chart.categoryOrder === 2 ? this.recordOrder() : el('SortExpressions', el('SortExpression',
-            el('Value', `=${this.categorySortValue(category!, categoryExpression)}`),
-            chart.categoryOrder === 1 ? el('Direction', 'Descending') : null)),
+          chart.categoryOrder === 2 ? this.recordOrder() : pointColumn ? el('SortExpressions', el('SortExpression', el('Value', `=Min(Fields!${pointColumn}.Value)`)))
+            : el('SortExpressions', el('SortExpression',
+              el('Value', `=${this.categorySortValue(category!, categoryExpression)}`),
+              chart.categoryOrder === 1 ? el('Direction', 'Descending') : null)),
           el('Label', `=${categoryExpression}`))
         : el('ChartMember', el('Label', chart.title ?? '')))),
       el('ChartSeriesHierarchy', el('ChartMembers', ...seriesHierarchy)),
@@ -2812,6 +3123,8 @@ class RdlBuilder {
     const select = [
       ...used.map((f) => `  ${this.quote(f.table)}.${this.quote(f.column)} AS ${this.quote(f.name)}`),
       ...[...this.sqlExpressions.values()].map((e) => `  ${e.sql} AS ${this.quote(e.name)}`),
+      // (Each with the Crystal formula it works out, on one line.)
+      ...[...this.queryFormulas.values()].map((f) => `  -- ${f.comment ?? `{@${f.formula}}: ${f.text.replace(/\s+/g, ' ').trim().slice(0, 300)}`}\n  ${layOutSql(f.sql, '    ')} AS ${this.quote(f.name)}`),
       ...[...this.nextColumns.values()].map((n) => `  LEAD(${this.quote(n.field.table)}.${this.quote(n.field.column)}) OVER (ORDER BY ${orderColumns.length ? orderColumns.join(', ') : '(SELECT NULL)'}) AS ${this.quote(n.name)}`),
     ].join(',\n');
     const byAlias = new Map(tables.map((t) => [t.alias.toLowerCase(), t]));
@@ -3169,6 +3482,10 @@ class RdlBuilder {
   private finishDataset(): void {
     if (this.datasetParts) return;
     const query = this.query();
+    if (this.formulasInReport.length) {
+      const why = (name: string) => this.formulasNotInQuery.find((n) => n.formula.toLowerCase() === name.toLowerCase())?.reason ?? 'it uses another formula that is not';
+      this.note('Formulas', `worked out in the report, not in the query (SQL would not give exactly the same): ${this.formulasInReport.map((f) => `{@${f}} (${why(f)})`).join('; ')}`);
+    }
     const filters = this.selectionFilter();
     const datasetFields = [...this.fields.values()].filter((f) => f.used || query.fieldsFromAll || ![...this.fields.values()].some((x) => x.used));
     this.datasetParts = { query, filters, datasetFields };
@@ -3187,6 +3504,7 @@ class RdlBuilder {
           query.noData ? el('Field', { Name: 'NoData' }, el('rd:TypeName', 'System.Int32'), el('DataField', 'NoData')) : null,
           ...datasetFields.map((f) => el('Field', { Name: f.name }, el('rd:TypeName', TYPE_NAMES[f.type] ?? 'System.String'), el('DataField', query.fieldsFromAll ? f.column : f.name))),
           ...[...this.sqlExpressions.values()].map((e) => el('Field', { Name: e.name }, el('rd:TypeName', 'System.Object'), el('DataField', e.name))),
+          ...[...this.queryFormulas.values()].map((f) => el('Field', { Name: f.name }, el('rd:TypeName', SQL_TYPE_NAMES[f.type]), el('DataField', f.name))),
           ...[...this.nextColumns.values()].map((n) => el('Field', { Name: n.name }, el('rd:TypeName', TYPE_NAMES[n.field.type] ?? 'System.Object'), el('DataField', n.name))),
           ...(this.othersGroup && !query.fieldsFromAll ? [
             el('Field', { Name: this.othersGroup.total }, el('rd:TypeName', 'System.Decimal'), el('DataField', this.othersGroup.total)),
@@ -3926,7 +4244,16 @@ class RdlBuilder {
     }
     const inlinedOnly = [...this.inlinedSubreports].filter((n) => !this.referencedSubreports.has(n));
     const rdl = this.withoutBodyPageNumbers(this.resolveShared(toXml(report)));
-    return { rdl, review: this.review, ...(inlinedOnly.length ? { inlinedOnly } : {}), referenced: [...this.referencedSubreports] };
+    // (Only the functions of formulas worked out in the query, and those they call, in the order they were made:
+    // each after those it calls.)
+    const all = [...this.sqlFunctions.values()];
+    const reached = new Set(all.filter((f) => rdl.includes(f.name)));
+    for (let grew = true; grew;) {
+      grew = false;
+      for (const f of all) if (!reached.has(f) && [...reached].some((g) => g.text.includes(f.name))) reached.add(f), (grew = true);
+    }
+    const used = all.filter((f) => reached.has(f));
+    return { rdl, review: this.review, ...(inlinedOnly.length ? { inlinedOnly } : {}), referenced: [...this.referencedSubreports], ...(used.length ? { sqlFunctions: used.map((f) => f.text) } : {}) };
   }
 }
 
