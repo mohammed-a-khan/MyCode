@@ -64,12 +64,14 @@ declare module 'node:fs/promises' {
   export function readdir(path: string): Promise<string[]>;
   export function mkdir(path: string, options?: { recursive?: boolean }): Promise<string | undefined>;
   export function stat(path: string): Promise<{ isDirectory(): boolean; isFile(): boolean; size: number }>;
+  export function lstat(path: string): Promise<{ isDirectory(): boolean; isFile(): boolean; isSymbolicLink(): boolean; size: number }>;
 }
 
 declare module 'node:path' {
   export function basename(path: string, suffix?: string): string;
   export function join(...paths: string[]): string;
   export function resolve(...paths: string[]): string;
+  export function relative(from: string, to: string): string;
 }
 
 declare module 'node:zlib' {
