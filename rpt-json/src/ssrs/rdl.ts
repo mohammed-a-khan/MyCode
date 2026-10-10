@@ -1265,6 +1265,7 @@ class RdlBuilder {
       images: info.images,
       parameterValues: this.options.parameterValues,
       chartAxisFormat: this.options.chartAxisFormat,
+      simpleRules: this.options.simpleRules,
       inline: { dataset, itemNames: this.itemNames, imageNames: this.imageNames, codeNames: this.codeNames },
     });
     const result = mode === 'page' ? child.buildInline() : child.buildEmbedded();
