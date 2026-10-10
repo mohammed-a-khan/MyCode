@@ -38,7 +38,7 @@ Usage:
   rpt-json to-rdl  <input.rpt|input.json|folder> [output-dir] [--connection "<connection string>"]
                    [--shared-datasource <name>] [--template <house.rdl>] [--separate-subreports]
                    [--page-number] [--parameter name=value]... [--chart-axis-format <format>] [--house <style.json>]
-                   [--conventions <conventions.json>]
+                   [--conventions <conventions.json> [--prefix <short name>]]
                                             Convert to SSRS .rdl files (+ subreports) and a review checklist;
                                             a folder converts every .rpt in it and its subfolders, each written
                                             to the same subfolder of the output folder;
@@ -52,7 +52,8 @@ Usage:
                                             heading bands, border and chart colours from a JSON file;
                                             --conventions reshapes each report as a team's template: their
                                             names, title and totals as table rows, a no-data row, their data
-                                            source and parameters, looks read from their style dataset
+                                            source and parameters, looks read from their style dataset;
+                                            --prefix gives the report's items a short name of their own
   rpt-json to-rdl  --template <house.rdl> --combine <output.rdl> <input.rpt|folder>...
                                             Combine several reports into one .rdl, one block per report
   rpt-json headers <input.rpt|input.json|folder> [output-file] [--json | --csv] [--all]
@@ -203,6 +204,7 @@ async function main(argv: string[]): Promise<number> {
       restyle = (rdl) => house.applyHouseStyle(rdl, style);
     }
     const conventionsPath = takeOption(args, '--conventions');
+    const prefix = takeOption(args, '--prefix');
     let reshape: ((rdl: string, name: string) => { rdl: string; review: { item: string; message: string }[]; settled: string[] }) | undefined;
     if (conventionsPath) {
       const { readConventions, applyConventions } = await import('./ssrs/conventions.ts');
@@ -212,8 +214,9 @@ async function main(argv: string[]): Promise<number> {
       } catch (err) {
         throw new Error(`conventions ${conventionsPath}: ${(err as Error).message}`);
       }
-      reshape = (rdl, name) => applyConventions(rdl, name, conv);
+      reshape = (rdl, name) => applyConventions(rdl, name, conv, prefix);
     }
+    if (prefix && !conventionsPath) throw new Error('to-rdl: --prefix goes with --conventions');
     const templatePath = takeOption(args, '--template');
     if (conventionsPath && templatePath) throw new Error('to-rdl: --conventions reshapes the converted layout and --template replaces it; use one or the other');
     if (housePath && templatePath) throw new Error('to-rdl: --house keeps the Crystal layout and --template replaces it; use one or the other');

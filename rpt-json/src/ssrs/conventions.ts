@@ -17,6 +17,7 @@
  *                "cellRect": "{T}_{col}_Box",
  *                "line": "{S}_Line{n}", "image": "{S}_Image{n}", "chart": "{S}_Chart{n}", "group": "{S}_Group{n}",
  *                "details": "{S}_Details" },
+ *     "prefixes": { "Long_Report_File_Name": "Short" },
  *     "dataset": "{S}_Data",
  *     "dataSource": { "name": "Shared", "reference": "Shared" },
  *       (or, to preview on a machine not connected to the report server, a connection of its own:
@@ -55,6 +56,8 @@ const STYLE_PROPS = ['FontFamily', 'FontSize', 'FontWeight', 'Color', 'Backgroun
 
 export interface Conventions {
   names: Record<NameKey, string>;
+  /** Short names for reports ({S}), by report (file) name; others use their file name. */
+  prefixes: Record<string, string>;
   dataset?: string;
   dataSource?: { name: string; reference?: string; connectString?: string };
   parameters: { name: string; match: RegExp; prompt?: string; dataType?: string }[];
@@ -102,7 +105,9 @@ export function readConventions(json: string): Conventions {
     if (typeof value !== 'string' || !value.trim()) throw new Error(`"${key}" must be a non-empty text`);
     return value.trim();
   };
-  const o = object('', raw, ['names', 'dataset', 'dataSource', 'parameters', 'page', 'pageBands', 'noData', 'documentMap', 'style'])!;
+  const o = object('', raw, ['names', 'prefixes', 'dataset', 'dataSource', 'parameters', 'page', 'pageBands', 'noData', 'documentMap', 'style'])!;
+  const pre = object('prefixes', o.prefixes) ?? {};
+  const prefixes = Object.fromEntries(Object.entries(pre).map(([k, v]) => [k.toLowerCase(), text(`prefixes.${k}`, v)!]));
   const names = { ...DEFAULT_NAMES };
   const n = object('names', o.names, NAME_KEYS);
   for (const k of NAME_KEYS) if (n?.[k] !== undefined) names[k] = text(`names.${k}`, n[k])!;
@@ -142,6 +147,7 @@ export function readConventions(json: string): Conventions {
   }
   return {
     names,
+    prefixes,
     dataset: text('dataset', o.dataset),
     dataSource: ds ? {
       name: text('dataSource.name', ds.name, true)!,
@@ -298,11 +304,11 @@ const unplace = (item: XmlElement) => removeChildren(item, ['Top', 'Left', 'Heig
 // ---------------------------------------------------------------------------------------------------------------
 
 /** Reshapes a converted report as a template following the conventions. */
-export function applyConventions(rdl: string, reportName: string, conv: Conventions): { rdl: string; review: ReviewNote[]; settled: string[] } {
+export function applyConventions(rdl: string, reportName: string, conv: Conventions, prefix?: string): { rdl: string; review: ReviewNote[]; settled: string[] } {
   const review: ReviewNote[] = [];
   const root = parseXml(rdl);
   const report = root.name === 'Report' ? root : descendants(root).find((e) => e.name === 'Report')!;
-  const S = snake(reportName) || 'Report';
+  const S = snake(prefix ?? conv.prefixes[reportName.toLowerCase()] ?? reportName) || 'Report';
   const names = new Names();
   const itemRenames = new Map<string, string>();
   const scopeRenames = new Map<string, string>();
@@ -600,7 +606,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       while (at < top.length && leaves[at]?.member === top[at] && leaves[at]!.kind === 'heading') at++;
       const what = (titleText ?? reportName.replace(/_/g, ' ')).trim();
       const message = conv.noData.replace(/\{TITLE\}/g, what.toUpperCase()).replace(/\{title\}/g, what);
-      const row = spanningRow(0.2, newTextbox('__nodata', `="${message.replace(/"/g, '""')}"`), columns);
+      const row = spanningRow(0.2, newTextbox('__nodata', message), columns);
       child(tablix, 'TablixBody/TablixRows')!.children.splice(at, 0, row);
       const repeat = at > 0 && textOf(child(top[at - 1]!, 'RepeatOnNewPage')) === 'true';
       const member = el('TablixMember', el('KeepWithGroup', 'After'), repeat ? el('RepeatOnNewPage', 'true') : null, el('Visibility', el('Hidden', '=CountRows() > 0')));
@@ -777,6 +783,8 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
   // table, a row holding a box, a row of text drawn shorter than its text) is drawn at its full size, and what lies
   // under it moves down as far, so nothing overlaps in the designer and the printed report stays the same.
   if (body) {
+    unwrapPlain(child(body, 'ReportItems'));
+    minTextRow = conv.style ? MIN_TEXT_ROW : 0;
     const bottom = fitItems(child(body, 'ReportItems'));
     if (bottom > len(body, 'Height')) setChild(body, 'Height', inch(bottom));
   }
@@ -791,7 +799,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     const nameFree = (e: XmlElement) => {
       for (const d of descendants(e).filter((x) => ITEMS.has(x.name) && !inTables.has(x))) {
         if (d.name === 'Textbox') {
-          const below = tablixes.length > 0 && len(d, 'Top') >= tablixBottom - 0.01 && parents.get(d) === items;
+          const below = tablixes.length > 0 && len(d, 'Top') >= tablixBottom - 0.01 && !!items && childElements(items).includes(d);
           if (below && !footerDone && !isBlank(d)) {
             footerDone = true;
             rename(d, 'footer');
@@ -898,7 +906,11 @@ function fitTablix(tablix: XmlElement): number {
       if (!item) continue;
       if (item.name === 'Rectangle') need = Math.max(need, fitItems(child(item, 'ReportItems')));
       else if (item.name === 'Tablix') need = Math.max(need, len(item, 'Height') + fitTablix(item));
-      else if (item.name === 'Textbox' && fixedText(item) && !child(item, 'Visibility') && textOf(child(item, 'CanShrink')) !== 'true') need = Math.max(need, textHeight(item) ?? 0);
+      else if (item.name === 'Textbox' && !child(item, 'Visibility') && textOf(child(item, 'CanShrink')) !== 'true') {
+        if (fixedText(item)) need = Math.max(need, textHeight(item) ?? 0);
+        // (Text in the house's fonts, worked out when the report runs: a row at least as tall as a line of it.)
+        if (!isBlank(item)) need = Math.max(need, minTextRow);
+      }
     }
     if (need > height + 0.001) {
       setChild(row, 'Height', inch(need));
@@ -907,6 +919,41 @@ function fitTablix(tablix: XmlElement): number {
   }
   if (grown) setChild(tablix, 'Height', inch(len(tablix, 'Height') + grown));
   return grown;
+}
+
+/** The least height of a row of text whose size the style dataset gives (inches). */
+const MIN_TEXT_ROW = 0.2;
+let minTextRow = 0;
+
+/**
+ * A plain box (no border, fill, show/hide rule, page break or document map entry: a Crystal subreport's frame) gives
+ * way to what it holds, placed where it was; the template holds its tables directly.
+ */
+function unwrapPlain(container: XmlElement | undefined): void {
+  if (!container) return;
+  for (let again = true; again;) {
+    again = false;
+    for (const e of childElements(container)) {
+      if (e.name !== 'Rectangle') continue;
+      const style = childElements(e, 'Style')[0];
+      const bordered = /^(solid|dashed|dotted|double)/i.test(textOf(child(style, 'Border/Style')))
+        || BORDER_SIDES.some((side) => /^(solid|dashed|dotted|double)/i.test(textOf(child(style, `${side}/Style`))));
+      const fill = textOf(child(style, 'BackgroundColor'));
+      const plain = !bordered && (!fill || /^(transparent|#00ffffff)$/i.test(fill)) && !child(e, 'Visibility') && !child(e, 'PageBreak')
+        && !child(e, 'DocumentMapLabel') && !child(e, 'Bookmark') && !child(e, 'ActionInfo');
+      const inner = childElements(child(e, 'ReportItems') ?? el('x')).filter((x) => ITEMS.has(x.name));
+      if (!plain || !inner.length) continue;
+      const top = len(e, 'Top');
+      const left = len(e, 'Left');
+      for (const x of inner) {
+        setChild(x, 'Top', inch(len(x, 'Top') + top));
+        setChild(x, 'Left', inch(len(x, 'Left') + left));
+      }
+      container.children = container.children.flatMap((c) => (c === e ? inner : [c]));
+      again = true;
+      break;
+    }
+  }
 }
 
 /** Fits the items in a container (see above); returns where the lowest ends. */
