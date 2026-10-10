@@ -570,6 +570,26 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       }
     }
 
+    // Crystal's blank band where there is no data (copies of the data rows, shown only then): the team's message row
+    // takes its place, as in their templates (the copies would read as doubled rows in the designer).
+    {
+      const blank = rowLeaves(tablix).map((l, i) => ({ ...l, i })).filter((l) => l.kind === 'noData');
+      if (blank.length) {
+        const rowsEl = child(tablix, 'TablixBody/TablixRows')!;
+        const all = rowsOf(tablix);
+        let dropped = 0;
+        for (const l of blank) {
+          const holder = descendants(child(tablix, 'TablixRowHierarchy')!).find((e) => e.name === 'TablixMembers' && e.children.includes(l.member));
+          // (Only where the row's member is not the last of its list: a list may not be left empty.)
+          if (!holder || childElements(holder, 'TablixMember').length < 2) continue;
+          holder.children = holder.children.filter((c) => c !== l.member);
+          dropped += len(all[l.i]!, 'Height');
+          rowsEl.children = rowsEl.children.filter((c) => c !== all[l.i]);
+        }
+        setChild(tablix, 'Height', inch(Math.max(0.01, len(tablix, 'Height') - dropped)));
+      }
+    }
+
     // A row shown only when there is no data, under the headings.
     const leaves = rowLeaves(tablix);
     if (textOf(child(tablix, 'DataSetName')) && !leaves.some((l) => l.kind === 'noData')) {
