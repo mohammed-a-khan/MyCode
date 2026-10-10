@@ -11,8 +11,24 @@ import { chartStructure } from './crystal/chartinfo.ts';
 import { layoutSummary } from './crystal/layoutinfo.ts';
 import { checkRdlWidths } from './ssrs/widthcheck.ts';
 import { extractHeaders, formatHeadersCsv, formatHeadersText, type HeaderText } from './crystal/headers.ts';
-import { mkdir, readdir, stat } from 'node:fs/promises';
+import { lstat, mkdir, readdir, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+
+/**
+ * Every .rpt in a folder and its subfolders, in name order, each with its subfolder relative to the top ("" for the
+ * top itself). Links to folders are not followed (a link back up the tree would never end).
+ */
+async function findReports(top: string, folder = ''): Promise<{ file: string; folder: string }[]> {
+  const found: { file: string; folder: string }[] = [];
+  const dir = folder ? join(top, folder) : top;
+  for (const name of (await readdir(dir)).sort()) {
+    const path = join(dir, name);
+    const info = await lstat(path);
+    if (info.isDirectory()) found.push(...await findReports(top, folder ? join(folder, name) : name));
+    else if (/\.rpt$/i.test(name) && (info.isFile() || (info.isSymbolicLink() && (await stat(path)).isFile()))) found.push({ file: path, folder });
+  }
+  return found;
+}
 
 const USAGE = `Crystal Reports .rpt <-> JSON converter
 
@@ -22,7 +38,10 @@ Usage:
   rpt-json to-rdl  <input.rpt|input.json|folder> [output-dir] [--connection "<connection string>"]
                    [--shared-datasource <name>] [--template <house.rdl>] [--separate-subreports]
                    [--page-number] [--parameter name=value]... [--chart-axis-format <format>] [--house <style.json>]
+                   [--conventions <conventions.json>]
                                             Convert to SSRS .rdl files (+ subreports) and a review checklist;
+                                            a folder converts every .rpt in it and its subfolders, each written
+                                            to the same subfolder of the output folder;
                                             --template lays each report out in the style of an existing .rdl;
                                             --page-number adds "Page N" at the right of the page footer;
                                             --parameter converts for that parameter value: what its suppress
@@ -30,12 +49,16 @@ Usage:
                                             --chart-axis-format sets the value-axis format of charts whose
                                             format the .rpt does not show, e.g. "0.00%";
                                             --house keeps the Crystal layout in a house style: fonts, title and
-                                            heading bands, border and chart colours from a JSON file
+                                            heading bands, border and chart colours from a JSON file;
+                                            --conventions reshapes each report as a team's template: their
+                                            names, title and totals as table rows, a no-data row, their data
+                                            source and parameters, looks read from their style dataset
   rpt-json to-rdl  --template <house.rdl> --combine <output.rdl> <input.rpt|folder>...
                                             Combine several reports into one .rdl, one block per report
   rpt-json headers <input.rpt|input.json|folder> [output-file] [--json | --csv] [--all]
                                             List header text: report/page/group headers, column headings,
-                                            chart titles (--all adds footers, details and field objects)
+                                            chart titles (--all adds footers, details and field objects);
+                                            a folder lists every .rpt in it and its subfolders
   rpt-json inspect <input.rpt>              Print decoded metadata (no stream data)
   rpt-json charts  <input.rpt>              Print how each chart is stored, with all names and text hidden
   rpt-json layout  <input.rpt> <text>...    Print the layout of each subreport showing one of the texts (or "#N" for
@@ -179,7 +202,20 @@ async function main(argv: string[]): Promise<number> {
       }
       restyle = (rdl) => house.applyHouseStyle(rdl, style);
     }
+    const conventionsPath = takeOption(args, '--conventions');
+    let reshape: ((rdl: string, name: string) => { rdl: string; review: { item: string; message: string }[]; settled: string[] }) | undefined;
+    if (conventionsPath) {
+      const { readConventions, applyConventions } = await import('./ssrs/conventions.ts');
+      let conv: ReturnType<typeof readConventions>;
+      try {
+        conv = readConventions((await readFile(conventionsPath)).toString('utf8'));
+      } catch (err) {
+        throw new Error(`conventions ${conventionsPath}: ${(err as Error).message}`);
+      }
+      reshape = (rdl, name) => applyConventions(rdl, name, conv);
+    }
     const templatePath = takeOption(args, '--template');
+    if (conventionsPath && templatePath) throw new Error('to-rdl: --conventions reshapes the converted layout and --template replaces it; use one or the other');
     if (housePath && templatePath) throw new Error('to-rdl: --house keeps the Crystal layout and --template replaces it; use one or the other');
     const combine = takeOption(args, '--combine');
     let template: HouseTemplate | undefined;
@@ -191,9 +227,9 @@ async function main(argv: string[]): Promise<number> {
       }
       if (connectionString || sharedDataSource) console.error('NOTE --connection and --shared-datasource are ignored with --template: the template\'s data source is used');
     }
-    const expand = async (path: string) => ((await stat(path)).isDirectory()
-      ? (await readdir(path)).filter((f) => /\.rpt$/i.test(f)).sort().map((f) => join(path, f))
-      : [path]);
+    // A folder: every .rpt in it and its subfolders.
+    const expandAll = async (path: string) => ((await stat(path)).isDirectory() ? findReports(path) : [{ file: path, folder: '' }]);
+    const expand = async (path: string) => (await expandAll(path)).map((f) => f.file);
     const load = async (file: string) => {
       const raw = await readFile(file);
       return file.toLowerCase().endsWith('.json') ? jsonToDocument(JSON.parse(raw.toString('utf8'))) : readCfb(raw);
@@ -220,21 +256,26 @@ async function main(argv: string[]): Promise<number> {
     }
 
     const [input, outputDir = '.'] = positionals(args, 'to-rdl', 2);
-    if (!input) throw new Error('to-rdl needs an input .rpt/.json file or a folder of .rpt files');
-    const inputs = await expand(input);
-    if (inputs.length === 0) throw new Error(`no .rpt files in ${input}`);
+    if (!input) throw new Error('to-rdl needs an input .rpt/.json file or a folder of .rpt files (subfolders included)');
+    const inputs = await expandAll(input);
+    if (inputs.length === 0) throw new Error(`no .rpt files in ${input} or its subfolders`);
     await mkdir(outputDir, { recursive: true });
     let failures = 0;
-    // Output names already written in this run (Windows file names ignore case).
-    const written = new Set<string>();
-    for (const file of inputs) {
+    // Output names already written in this run, per output folder (Windows file names ignore case).
+    const writtenIn = new Map<string, Set<string>>();
+    for (const { file, folder } of inputs) {
+      // Reports in subfolders are written to the same subfolders of the output folder.
+      const targetDir = folder ? join(outputDir, folder) : outputDir;
+      const written = writtenIn.get(targetDir.toLowerCase()) ?? new Set<string>();
+      writtenIn.set(targetDir.toLowerCase(), written);
       try {
+        if (folder) await mkdir(targetDir, { recursive: true });
         const doc = await load(file);
         const original = basename(file).replace(/\.(rpt|json)$/i, '');
         let base = original;
         const convert = (name: string) => (template
           ? [convertDocumentsWithTemplate(template, [{ doc, name: original }], name)]
-          : convertDocumentToSsrs(doc, name, { connectionString, sharedDataSource, separateSubreports, pageNumber, parameterValues, chartAxisFormat, restyle }));
+          : convertDocumentToSsrs(doc, name, { connectionString, sharedDataSource, separateSubreports, pageNumber, parameterValues, chartAxisFormat, restyle, reshape }));
         let reports = convert(base);
         // Two inputs whose names clean up to the same file name ("A B" and "A_B") get a numbered suffix.
         for (let n = 2; reports.some((r) => written.has(r.fileName.toLowerCase())); n++) {
@@ -244,9 +285,9 @@ async function main(argv: string[]): Promise<number> {
         if (base !== original) console.error(`NOTE ${file}: written as ${reports[0]?.fileName} (another report already produced that name)`);
         for (const r of reports) written.add(r.fileName.toLowerCase());
         for (const report of reports) {
-          if (report.rdl) await writeFile(join(outputDir, report.fileName), report.rdl);
+          if (report.rdl) await writeFile(join(targetDir, report.fileName), report.rdl);
         }
-        const reviewPath = join(outputDir, `${reports[0]?.fileName.replace(/\.rdl$/, '') ?? base}.review.md`);
+        const reviewPath = join(targetDir, `${reports[0]?.fileName.replace(/\.rdl$/, '') ?? base}.review.md`);
         await writeFile(reviewPath, reviewMarkdown(basename(file), reports));
         const items = reports.reduce((n, r) => n + r.review.length, 0);
         console.error(`OK   ${file}: ${reports.filter((r) => r.rdl).length} report(s), ${items} review item(s)`);
@@ -255,6 +296,7 @@ async function main(argv: string[]): Promise<number> {
         console.error(`FAIL ${file}: ${(err as Error).message}`);
       }
     }
+    if (inputs.length > 1) console.error(`${inputs.length - failures} of ${inputs.length} report(s) converted${failures ? `, ${failures} failed` : ''}`);
     return failures > 0 ? 1 : 0;
   }
 
@@ -296,17 +338,15 @@ async function main(argv: string[]): Promise<number> {
     if (asJson && asCsv) throw new Error('headers: choose either --json or --csv');
     differentFiles(input, output);
     const folder = (await stat(input)).isDirectory();
-    const inputs = folder
-      ? (await readdir(input)).filter((f) => /\.rpt$/i.test(f)).sort().map((f) => join(input, f))
-      : [input];
-    if (inputs.length === 0) throw new Error(`no .rpt files in ${input}`);
+    const inputs = folder ? await findReports(input) : [{ file: input, folder: '' }];
+    if (inputs.length === 0) throw new Error(`no .rpt files in ${input} or its subfolders`);
     const items: HeaderText[] = [];
     let failures = 0;
-    for (const file of inputs) {
+    for (const { file, folder: sub } of inputs) {
       try {
         const raw = await readFile(file);
         const doc = file.toLowerCase().endsWith('.json') ? jsonToDocument(JSON.parse(raw.toString('utf8'))) : readCfb(raw);
-        items.push(...extractHeaders(buildMetadata(doc).reports ?? [], { all, file: folder ? basename(file) : undefined }));
+        items.push(...extractHeaders(buildMetadata(doc).reports ?? [], { all, file: folder ? (sub ? join(sub, basename(file)) : basename(file)) : undefined }));
       } catch (err) {
         failures++;
         console.error(`FAIL ${file}: ${(err as Error).message}`);

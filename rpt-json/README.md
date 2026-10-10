@@ -29,12 +29,13 @@ JavaScript to `dist/`; run it with `node dist/src/cli.js`.
 node src/cli.ts to-json  report.rpt report.json          # full JSON (original bytes + decoded + model)
 node src/cli.ts to-rpt   report.json rebuilt.rpt
 node src/cli.ts to-rdl   report.rpt out/                 # SSRS .rdl (+ subreports) and a review checklist
-node src/cli.ts to-rdl   reports/ out/                   # every .rpt in a folder
+node src/cli.ts to-rdl   reports/ out/                   # every .rpt in a folder and its subfolders
 node src/cli.ts to-rdl   report.rpt out/ --house style.json                # Crystal layout, house fonts and colours
 node src/cli.ts to-rdl   report.rpt out/ --template house.rdl              # in the style of an existing report
+node src/cli.ts to-rdl   reports/ out/ --conventions team.json            # as a team's report templates
 node src/cli.ts to-rdl   --template house.rdl --combine out/All.rdl a.rpt b.rpt   # several reports in one .rdl
 node src/cli.ts headers  report.rpt                      # header text: titles, labels, column headings
-node src/cli.ts headers  reports/ headers.csv --csv      # every report in a folder, as CSV (or --json)
+node src/cli.ts headers  reports/ headers.csv --csv      # every report in a folder and its subfolders, as CSV (or --json)
 node src/cli.ts inspect  report.rpt                      # just the readable model and stream catalog
 node src/cli.ts charts   report.rpt                      # how each chart is stored, names hidden (to share safely)
 node src/cli.ts layout   report.rpt "Some title" ...       # layout of the subreports showing those texts, names hidden (--sections: every main-report section)
@@ -58,6 +59,7 @@ node src/cli.ts verify   report.rpt                      # round-trip checks (se
 | `--parameter name=value` | `to-rdl` | Convert for that parameter value: sections and objects its suppress formulas hide are left out (they take no space, as in Crystal); repeat for more parameters |
 | `--chart-axis-format <format>` | `to-rdl` | Value-axis number format (e.g. `"0.00%"`) for charts whose format the `.rpt` does not show (it is in Crystal's encrypted chart data); charts with value labels use their labels' format |
 | `--house <style.json>` | `to-rdl` | Keep the Crystal layout in a house style: fonts, title and heading bands, border and chart colours (see below) |
+| `--conventions <file.json>` | `to-rdl` | Reshape each report as a team's report template: their names, structure, data source, parameters and style dataset (see below) |
 | `--template <file.rdl>` | `to-rdl` | Lay each report out in the style of an existing SSRS report (see below)     |
 | `--combine <out.rdl>` | `to-rdl`  | With `--template`: put every input report into one `.rdl`, one block each     |
 
@@ -73,7 +75,11 @@ for f in reports/*.rpt; do node src/cli.ts verify "$f"; done
 
 ## Converting to SSRS
 
-`to-rdl` writes one `.rdl` per report and a `<name>.review.md` checklist. Subreports outside the table (report
+`to-rdl` writes one `.rdl` per report and a `<name>.review.md` checklist. Given a folder, it converts every `.rpt` in
+the folder and all its subfolders, and writes each report's files to the same subfolder of the output folder, so
+`reports/North/Sales.rpt` becomes `out/North/Sales.rdl`, and reports of the same name in different folders do
+not overwrite each other. It ends with a count of the reports converted and failed; one that fails to convert does
+not stop the others. Subreports outside the table (report
 header/footer, page header/footer) are built into the report, each reading its own dataset, so there is nothing to
 deploy alongside it. A subreport inside the table (in a group header or the details) runs once per row; it stays a
 separate `<name>_Subdocument_N.rdl` shown through a subreport item. `--separate-subreports` keeps every subreport
@@ -156,6 +162,53 @@ Font sizes stay as in Crystal. Where the house font or weight is wider than Crys
 enough to fit where Crystal put it, so a heading does not wrap where Crystal's did not. `--house` cannot be combined
 with `--template`, which replaces the layout. The house style module is optional: where `src/ssrs/brand.ts` is not
 installed, `--house` says so.
+
+### Team templates
+
+`--conventions team.json` keeps the Crystal layout (column widths, row heights, text, formats, groups, sorts,
+show/hide rules) and reshapes each report the way a team builds its own SSRS report templates, so a developer can open
+it, point its dataset at their procedure and carry on:
+
+- every item named by the team's patterns: the table, its title, each column's heading, value, subtotal and total
+  (named after the field the column shows), blank cells, groups, the footnote under the table;
+- the whole body in one rectangle; the title above the table becomes the table's first row, the totals printed under
+  the table its last row; a row shown only when there is no data, under the headings;
+- the team's shared data source, the main dataset under their name, the report parameters mapped to their standard
+  ones (by name pattern; missing ones added), the team's page size and font; page header and footer left out;
+- fonts, colours and fills read at run time from the team's style dataset, by role (title, headings, data, numbers,
+  group rows, totals, footnote), with alternating row fills; colours Crystal works out by formula, or red, are kept.
+
+The file gives the team's names and patterns; everything it leaves out keeps a plain default:
+
+```json
+{
+  "names": { "rect": "{S}_Box_{n}", "table": "{S}_Grid_{n}", "title": "{S}_Title",
+             "heading": "{T}_{col}_Head", "value": "{T}_{col}_Val", "subtotal": "{T}_{col}_Sub",
+             "total": "{T}_{col}_All", "noData": "{T}_Empty", "group": "{S}_g{n}", "details": "{S}_g{n}" },
+  "dataset": "{S}_Rows",
+  "dataSource": { "name": "Shared", "reference": "Shared" },
+  "parameters": [ { "name": "as_of", "match": "as.?of", "prompt": "as of", "dataType": "DateTime" } ],
+  "page": { "width": "11in", "height": "8.5in", "margin": "0.25in", "font": "Georgia" },
+  "noData": "No {title} for this period",
+  "documentMap": true,
+  "style": { "dataset": "Theme", "commandType": "StoredProcedure", "command": "dbo.theme_get",
+             "field": "{role}_{prop}",
+             "props": { "FontFamily": "font", "FontSize": "size", "FontWeight": "weight", "Color": "ink",
+                        "BackgroundColor": "fill", "VerticalAlign": "valign" },
+             "roles": { "title": "Title", "heading": "Head", "headingFirst": "Head1", "body": "Body",
+                        "bodyFirst": "Body1", "number": "Num", "group": "Grp", "totalLabel": "TotL",
+                        "totalValue": "TotV", "footer": "Foot", "text": "Plain" },
+             "rowBands": { "odd": "Odd", "even": "Even" }, "border": "Line_{side}" }
+}
+```
+
+`dataSource` names the team's shared data source on the report server (`reference`). To preview on a machine
+not connected to the report server, give the database instead: `{ "name": "Shared", "connectString": "Data
+Source=server;Initial Catalog=database" }` (Windows sign-in).
+
+In name patterns `{S}` is the report's name, `{T}` its table's, `{col}` the column and `{n}` a number; names are made
+unique by adding `_2`, `_3`, ... The review notes list what was left out (page header and footer) and each parameter
+mapped from Crystal's.
 
 ### House templates
 

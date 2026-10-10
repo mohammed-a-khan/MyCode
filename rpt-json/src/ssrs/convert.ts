@@ -29,6 +29,8 @@ export interface SsrsOptions {
   chartAxisFormat?: string;
   /** A last step over each report's RDL (a house style laid over the Crystal layout, ...). */
   restyle?: (rdl: string) => string;
+  /** The very last step: the report reshaped as a team's template (names, structure, looks), with notes. */
+  reshape?: (rdl: string, reportName: string) => { rdl: string; review: ReviewNote[]; settled?: string[] };
 }
 
 const safeFileName = (name: string) => name.replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'Report';
@@ -79,7 +81,14 @@ export function convertDocumentToSsrs(doc: CfbDocument, baseName: string, option
       subreport: Boolean(model.storage),
       images: embeddedImages(storageAt(doc.root, model.storage)),
     });
-    return { fileName: `${reportName}.rdl`, storage: model.storage, rdl: rdl && options.restyle ? options.restyle(rdl) : rdl, review, referenced };
+    let out = rdl && options.restyle ? options.restyle(rdl) : rdl;
+    if (out && options.reshape) {
+      const shaped = options.reshape(out, reportName);
+      out = shaped.rdl;
+      const settled = new Set(shaped.settled ?? []);
+      review.splice(0, review.length, ...review.filter((n) => !settled.has(n.item)), ...shaped.review);
+    }
+    return { fileName: `${reportName}.rdl`, storage: model.storage, rdl: out, review, referenced };
   });
   // Only the subreports the main report refers to need an .rdl of their own: those placed inside it need none, nor
   // those it never prints (in a section always suppressed). All are kept where the main report could not be converted.
