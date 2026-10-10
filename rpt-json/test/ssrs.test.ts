@@ -417,36 +417,14 @@ describe('layout conversion', () => {
     assertBalancedXml(rdl);
     const amount = rdl.slice(rdl.indexOf('<Textbox Name="Amt">'), rdl.indexOf('</Textbox>', rdl.indexOf('<Textbox Name="Amt">')));
     assert.ok(!/BottomBorder/.test(amount), 'not the whole cell\'s border');
-    // Moved by the X position formula (a computed place): drawn in pieces across the cell, each drawn where it falls
-    // within the moved line.
-    const pieces = rdl.match(/<Line Name="Amt_Below(_\d+)?">/g) ?? [];
-    assert.equal(pieces.length, Math.ceil(5576 / 72));
-    assert.match(rdl, /<Line Name="Amt_Below_2">\s*<Top>0.139in<\/Top>\s*<Left>0.05in<\/Left>\s*<Height>0in<\/Height>\s*<Width>0.05in<\/Width>\s*<Style>\s*<Border>\s*<Color>Black<\/Color>\s*<Style>=IIf\(\(\(0 \+ IIf\(IsNothing\([^<]*\) &lt;= 108 AndAlso 108 &lt;= \(2000 \+ [^<]*\)\), IIf\(IsNothing\([^<]*, "None"\)<\/Style>/);
+    // Moved by the X position formula by whole steps (1.15in per level): drawn in pieces cut where the line can start
+    // and end (0, 1.15, 1.389 (the field's width), 2.3, 2.539, ...), each drawn whole where it lies within the moved line.
+    const pieces = [...rdl.matchAll(/<Line Name="Amt_Below(?:_\d+)?">\s*<Top>[^<]*<\/Top>\s*<Left>([^<]*)<\/Left>\s*<Height>0in<\/Height>\s*<Width>([^<]*)<\/Width>/g)]
+      .map((m) => [parseFloat(m[1]!), parseFloat(m[2]!)]);
+    assert.deepEqual(pieces.map(([l]) => l), [0, 1.15, 1.389, 2.3, 2.539, 3.45, 3.689]);
+    assert.match(rdl, /<Line Name="Amt_Below_2">\s*<Top>0.139in<\/Top>\s*<Left>1.15in<\/Left>\s*<Height>0in<\/Height>\s*<Width>0.239in<\/Width>\s*<Style>\s*<Border>\s*<Color>Black<\/Color>\s*<Style>=IIf\(\(\(0 \+ IIf\(IsNothing\([^<]*\) &lt;= 1828 AndAlso 1828 &lt;= \(2000 \+ [^<]*\)\), IIf\(IsNothing\([^<]*, "None"\)<\/Style>/);
     // Never hidden (SSRS would slide the pieces beside a hidden one across into its place).
     assert.ok(!/<Line Name="Amt_Below[^"]*">\s*<Top>[^<]*<\/Top>\s*<Left>[^<]*<\/Left>\s*<Height>[^<]*<\/Height>\s*<Width>[^<]*<\/Width>\s*<Visibility>/.test(rdl));
-  });
-
-  it('draws a moved line under a field as the field\'s underline when asked for simple rules', () => {
-    const definition: ReportDefinition = {
-      ...emptyDefinition(),
-      formulas: [
-        { name: 'Bottom_Line_Style', index: 1, kind: 'conditionalFormat', text: 'if {Orders.Region} = "Total" then crSingleLine else crNoLine', referencedFields: [] },
-        { name: 'DeltaX_Value_Formula', index: 2, kind: 'conditionalFormat', text: '(if IsNull({Orders.Amount}) then 0 else 1) * 1.15 * 1440', referencedFields: [] },
-      ],
-      layout: [
-        { name: 'DetailArea1', sections: [{ name: 'D', height: 220, objects: [
-          { kind: 'field', name: 'Name', field: 'Orders.Customer', position: { x: 0, y: 0 }, size: { width: 7000, height: 200 } },
-          { kind: 'field', name: 'Amt', field: 'Orders.Amount', position: { x: 7751, y: 0 }, size: { width: 2000, height: 200 }, align: 'right',
-            conditions: { bottomLine: { name: 'Bottom_Line_Style', index: 1 }, deltaX: { name: 'DeltaX_Value_Formula', index: 2 } } },
-          { kind: 'field', name: 'Tag', field: 'Orders.Region', position: { x: 13327, y: 0 }, size: { width: 650, height: 200 } },
-        ] }] },
-      ],
-    };
-    const { rdl } = convertToRdl(definition, source, { reportName: 'Rule', simpleRules: true });
-    assertBalancedXml(rdl);
-    assert.ok(!/<Line Name="Amt_Below/.test(rdl), 'no line pieces');
-    const amount = rdl.slice(rdl.indexOf('<Textbox Name="Amt">'), rdl.indexOf('</Textbox>', rdl.indexOf('<Textbox Name="Amt">')));
-    assert.match(amount, /<TextDecoration>=IIf\(IIf\(IsNothing\([^<]*\), "None", [^<]*\) = "None", "None", "Underline"\)<\/TextDecoration>/);
   });
 
   it('keeps a table reaching out to a rule within the printable page', () => {

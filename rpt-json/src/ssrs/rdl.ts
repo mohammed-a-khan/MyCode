@@ -57,12 +57,6 @@ export interface RdlOptions {
    * data), e.g. "0.00%"; charts with value labels use their labels' format.
    */
   chartAxisFormat?: string;
-  /**
-   * A line along a field that formulas move or widen (a statement's underline under an indented figure) is drawn as
-   * the field's own underline (or overline) instead of short line pieces across the cell: simpler to edit, the line
-   * then as long as the figure rather than the field.
-   */
-  simpleRules?: boolean;
   /** Subreports by their "Subdocument N" number: RDL name and link parameters (Crystal "Pm-" parameters). */
   subreports?: Map<number, SubreportInfo>;
   /** Image bytes by their "Embedding N" number. */
@@ -219,6 +213,21 @@ const twipsToInches = (twips: number) => twips / TWIPS_PER_INCH;
 /** The gap Crystal leaves between a rule along a field's top and its text (twips). */
 const RULE_GAP = 40;
 const RULE_PIECE = 72;
+
+/**
+ * The step (twips) a field's X position formula moves it by, where it moves it by whole steps only: a whole number
+ * (an indent level, Nothing as 0) times a fixed width in inches, times 1440. Undefined for any other formula.
+ */
+function stepOf(dx: string | undefined, dw: string | undefined): number | undefined {
+  if (!dx || dw) return undefined;
+  const text = dx.trim();
+  // Null-safe either way: IIf(IsNothing(x), 0, x) * w * 1440, or IIf(IsNothing(x), Nothing, x * w * 1440).
+  const guarded = /^IIf\(IsNothing\(Fields!(\w+)\.Value\), Nothing, \(\(Fields!\1\.Value \* ([\d.]+)\) \* 1440\)\)$/.exec(text);
+  const plain = /^\(*\s*(IIf\(IsNothing\(Fields!(\w+)\.Value\), 0, (?:Fields!\2\.Value|\d+)\)|Fields!\w+\.Value)\s*\*\s*([\d.]+)\s*\)\s*\*\s*1440\s*\)*$/.exec(text);
+  const width = guarded ? Number(guarded[2]) : plain ? Number(plain[3]) : NaN;
+  const step = width * 1440;
+  return Number.isFinite(step) && step >= 60 ? step : undefined;
+}
 const inchesToTwips = (value: number) => value * TWIPS_PER_INCH;
 
 const TYPE_NAMES: Record<string, string> = {
@@ -1265,7 +1274,6 @@ class RdlBuilder {
       images: info.images,
       parameterValues: this.options.parameterValues,
       chartAxisFormat: this.options.chartAxisFormat,
-      simpleRules: this.options.simpleRules,
       inline: { dataset, itemNames: this.itemNames, imageNames: this.imageNames, codeNames: this.codeNames },
     });
     const result = mode === 'page' ? child.buildInline() : child.buildEmbedded();
@@ -2284,7 +2292,6 @@ class RdlBuilder {
             const box = { top: Math.min(twipsToInches(line.position?.y ?? 0), height), left: twipsToInches(x - columnLeft), width: twipsToInches(right - x), height: 0 };
             return this.reportItem({ ...line, size: { width: right - x, height: 0 } }, 'row', area, box);
           });
-          const decorations: { over: boolean; shown: string }[] = [];
           for (const key of ruleFormulas) {
             const style = this.conditionExpression(obj!.conditions![key]!, false, `${obj!.kind} object "${obj!.name}"`, 'row');
             if (!style) continue;
@@ -2306,18 +2313,29 @@ class RdlBuilder {
             // Where the text is: moved with it, unless formulas moving the field place the text from the field's own place.
             const ownLeft = obj!.position!.x - columnLeft + (moving ? 0 : moved);
             const pieces: { x: number; right: number; within?: string }[] = [];
-            if (moving && this.options.simpleRules) {
-              decorations.push({ over: key === 'topLine', shown: `IIf(IsNothing(${style.slice(1)}), "${own}", ${style.slice(1)})` });
-              continue;
-            }
             if (moving) {
               const start = `(${ownLeft} + ${offset(dxValue)})`;
               const end = `(${ownLeft + obj!.size!.width} + ${offset(dxValue)}${dwValue ? ` + ${offset(dwValue)}` : ''})`;
               // Short of the cell's right edge: a piece reaching past it once rounded would widen the column (and a
               // table fitted to the page would print its overflow on a page of its own).
               const inside = cellWidth - 15;
-              for (let x = 0; x < inside; x += RULE_PIECE) {
-                const right = Math.min(x + RULE_PIECE, inside);
+              // A field moved by whole steps (an indent level times a fixed width: Crystal's "level * 1.15 * 1440")
+              // starts and ends only at known places: the line is cut there, a few pieces each drawn whole or not at
+              // all. Otherwise it is cut in short pieces all along the cell.
+              const step = stepOf(dxValue, dwValue);
+              const cuts = new Set<number>([0, inside]);
+              if (step) {
+                for (let k = 0; ownLeft + k * step < inside && k < 200; k++) {
+                  for (const x of [ownLeft + k * step, ownLeft + k * step + obj!.size!.width]) if (x > 0 && x < inside) cuts.add(Math.round(x));
+                }
+              } else {
+                for (let x = RULE_PIECE; x < inside; x += RULE_PIECE) cuts.add(x);
+              }
+              const sorted = [...cuts].sort((a, b) => a - b);
+              for (let i = 0; i + 1 < sorted.length; i++) {
+                const x = sorted[i]!;
+                const right = sorted[i + 1]!;
+                if (right - x < 1) continue;
                 const middle = Math.round((x + right) / 2);
                 pieces.push({ x, right, within: `(${start} <= ${middle} AndAlso ${middle} <= ${end})` });
               }
@@ -2347,23 +2365,6 @@ class RdlBuilder {
           const text = obj || ruled.top || ruled.bottom || ruled.left || ruled.right || background
             ? this.textbox(name, value, this.ruledBorderObject(textObj, ruled), format, 'row', { top: 0, left: 0, width: columnWidth, height }, undefined, ruled, textPadding)
             : null;
-          // Lines drawn as the text's own underline or overline (where Crystal would draw them).
-          if (text && decorations.length) {
-            const under = decorations.find((d) => !d.over) ?? decorations[0]!;
-            const decoration = `=IIf(${under.shown} = "None", "None", "${under.over ? 'Overline' : 'Underline'}")`;
-            const runs: XmlElement[] = [];
-            const walk = (e: XmlElement) => {
-              if (e.name === 'TextRun') runs.push(e);
-              for (const c of e.children) if (c && typeof c === 'object') walk(c as XmlElement);
-            };
-            walk(text);
-            for (const run of runs) {
-              let style = run.children.find((c): c is XmlElement => !!c && typeof c === 'object' && (c as XmlElement).name === 'Style');
-              if (!style) run.children.push((style = el('Style')));
-              style.children = style.children.filter((c) => !(c && typeof c === 'object' && (c as XmlElement).name === 'TextDecoration'));
-              style.children.push(el('TextDecoration', decoration));
-            }
-          }
           return el('TablixCell', el('CellContents', el('Rectangle', { Name: this.itemNames.make(`${name}_Area`) },
             el('ReportItems', ...(text ? [text] : []), ...items.filter((item): item is XmlElement => !!item)),
             el('KeepTogether', 'true'),

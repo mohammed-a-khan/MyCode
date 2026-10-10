@@ -218,19 +218,13 @@ describe('conventions', () => {
     assert.equal(childElements(child(tablix, 'TablixRowHierarchy/TablixMembers')!, 'TablixMember').reduce((a, x) => a + leaves(x), 0), childElements(child(tablix, 'TablixBody/TablixRows')!, 'TablixRow').length);
   });
 
-  it('takes a short name for the report, and lifts tables out of plain frames', () => {
-    const plain = converted().replace(/<Tablix Name="([^"]+)">([\s\S]*?)<\/Tablix>/, (m) => `<Rectangle Name="Frame"><ReportItems>${m}</ReportItems><KeepTogether>true</KeepTogether><Top>0in</Top><Left>0.1in</Left><Height>0.5in</Height><Width>6in</Width><Style><Border><Style>None</Style></Border></Style></Rectangle>`);
-    const out = applyConventions(plain, 'Orders', readConventions(JSON.stringify({ names: { table: '{S}_Grid_{n}', rect: '{S}_Box_{n}' }, prefixes: { orders: 'Ord' } })));
-    const r = parseXml(out.rdl);
-    const tablix = descendants(r).find((e) => e.name === 'Tablix')!;
-    assert.equal(tablix.attributes.Name, 'Ord_Grid_1');
-    const wrapper = childElements(child(descendants(r).find((e) => e.name === 'Body')!, 'ReportItems')!)[0]!;
-    assert.ok(childElements(child(wrapper, 'ReportItems')!).includes(tablix), 'the table sits straight in the report\'s box');
-    assert.ok(!byName(r, 'Frame'));
+  it('takes a short name for the report', () => {
+    const out = applyConventions(converted(), 'Orders', readConventions(JSON.stringify({ names: { table: '{S}_Grid_{n}' }, prefixes: { orders: 'Ord' } })));
+    assert.ok(out.rdl.includes('<Tablix Name="Ord_Grid_1">'));
     assert.equal(applyConventions(converted(), 'Orders', conventions, 'Short').rdl.includes('Short_Grid_1'), true);
   });
 
-  it('keeps what lies under a subreport frame drawn too short below its table once the frame is lifted', () => {
+  it('keeps what lies under a subreport frame drawn too short below its table', () => {
     const box = (name: string, inner: string, top: string, height: string) => `<Rectangle Name="${name}"><ReportItems>${inner}</ReportItems><KeepTogether>true</KeepTogether>`
       + `<Top>${top}</Top><Left>0in</Left><Height>${height}</Height><Width>6in</Width><Style><Border><Style>None</Style></Border></Style></Rectangle>`;
     const note = '<Textbox Name="Below"><CanGrow>true</CanGrow><KeepTogether>true</KeepTogether><Paragraphs><Paragraph><TextRuns><TextRun><Value>Below the table</Value><Style /></TextRun></TextRuns><Style /></Paragraph></Paragraphs>'
@@ -242,8 +236,14 @@ describe('conventions', () => {
     const tablix = descendants(r).find((e) => e.name === 'Tablix')!;
     const below = descendants(r).find((e) => e.name === 'Textbox' && valueIn(e) === 'Below the table')!;
     const inch = (e: XmlElement, n: string) => parseFloat(textOf(child(e, n)));
-    assert.ok(!byName(r, 'FrameA') && !byName(r, 'FrameB'), 'the frames are lifted');
-    assert.ok(inch(below, 'Top') >= inch(tablix, 'Top') + inch(tablix, 'Height') - 0.001, 'the text stays under the table');
+    // The frames stay (they push each other down when the report runs), the first as tall as its table, the second
+    // under it.
+    const frameOf = (e: XmlElement) => descendants(r).find((x) => x.name === 'Rectangle' && x !== e && descendants(x).includes(e) && child(x, 'Top') && !childElements(child(x, 'ReportItems')!).some((c) => c.name === 'Rectangle'))!;
+    const a = frameOf(tablix);
+    const b = frameOf(below);
+    assert.ok(a && b && a !== b, 'each in its own frame');
+    assert.ok(inch(a, 'Height') >= inch(tablix, 'Top') + inch(tablix, 'Height') - 0.001, 'the first frame holds its table');
+    assert.ok(inch(b, 'Top') >= inch(a, 'Top') + inch(a, 'Height'), 'the second frame starts under the first');
   });
 
   it('rejects unknown entries', () => {
