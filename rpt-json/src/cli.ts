@@ -275,7 +275,7 @@ async function main(argv: string[]): Promise<number> {
         let base = original;
         const convert = (name: string) => (template
           ? [convertDocumentsWithTemplate(template, [{ doc, name: original }], name)]
-          : convertDocumentToSsrs(doc, name, { connectionString, sharedDataSource, separateSubreports, pageNumber, parameterValues, chartAxisFormat, restyle, reshape }));
+          : convertDocumentToSsrs(doc, name, { connectionString, sharedDataSource, separateSubreports, pageNumber, parameterValues, chartAxisFormat, restyle, reshape, simpleRules: !!reshape }));
         let reports = convert(base);
         // Two inputs whose names clean up to the same file name ("A B" and "A_B") get a numbered suffix.
         for (let n = 2; reports.some((r) => written.has(r.fileName.toLowerCase())); n++) {

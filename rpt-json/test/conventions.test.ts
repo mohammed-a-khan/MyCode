@@ -173,6 +173,19 @@ describe('conventions', () => {
     }
   });
 
+  it('leaves out datasets, parameters, code and pictures nothing reads any more', () => {
+    const spare = '<DataSet Name="Spare"><Query><DataSourceName>DataSource1</DataSourceName><QueryParameters><QueryParameter Name="@spare_id">'
+      + '<Value>=Parameters!spare_id.Value</Value></QueryParameter></QueryParameters><CommandText>dbo.spare</CommandText></Query>'
+      + '<Fields><Field Name="x"><DataField>x</DataField><Value>=Code.Pad(Fields!x.Value)</Value></Field></Fields></DataSet>';
+    let plain = converted().replace('</DataSets>', `${spare}</DataSets>`);
+    plain = plain.replace('</ReportParameters>', '<ReportParameter Name="spare_id"><DataType>String</DataType><Prompt>spare</Prompt></ReportParameter></ReportParameters>');
+    plain = plain.replace(/<rd:ReportUnitType>/, '<Code>Public Function Pad(a) : Return a : End Function</Code><EmbeddedImages><EmbeddedImage Name="Logo"><MIMEType>image/png</MIMEType><ImageData>iVBORw0KGgo=</ImageData></EmbeddedImage></EmbeddedImages><rd:ReportUnitType>');
+    const out = applyConventions(plain, 'Orders', conventions);
+    for (const gone of ['<DataSet Name="Spare"', 'Name="spare_id"', '<Code>', '<EmbeddedImage ']) assert.ok(!out.rdl.includes(gone), `${gone} left out`);
+    assert.ok(out.rdl.includes('<DataSet Name="Orders_Rows"') && out.rdl.includes('<DataSet Name="Theme"'));
+    assert.ok(out.review.some((n) => n.item === 'Dataset Spare'));
+  });
+
   it('rejects unknown entries', () => {
     assert.throws(() => readConventions('{"nmes": {}}'), /unknown entry "nmes"/);
     assert.throws(() => readConventions('{"names": {"tabel": "x"}}'), /unknown entry "tabel"/);
