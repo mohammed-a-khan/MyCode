@@ -112,7 +112,7 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
           { ...text('KindHeading', 'Kind', 300, 240), position: { x: 300, y: 400 } },
           { ...text('AmountHeading', 'Amount', 4320, 240), position: { x: 4320, y: 400 } }, line('Rule2', 640)] }] },
         { name: 'GroupFooterArea1', sections: [{ name: 'GF', height: 300, objects: [{ ...text('TotalLabel', 'Total:', 300, 200), position: { x: 300, y: 60 } },
-          { ...field('Sum', 'Sum of T.Amount', 4320), position: { x: 4320, y: 60 }, size: { width: 2880, height: 200 }, ...ruled }] }] },
+          { ...field('Sum', 'Sum of T.Amount', 4320), position: { x: 4320, y: 60 }, size: { width: 2000, height: 200 }, ...ruled }] }] },
         { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [field('K', 'T.Kind', 300), field('A', 'T.Amount', 4320)] }] },
       ],
     } as unknown as ReportDefinition;
@@ -128,6 +128,9 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     const total = descendants(root).find((e) => e.attributes.Name === 'Holdings_Tab_1_Amount_TotVal')!;
     assert.equal(textOf(child(childElements(total, 'Style')[0]!, 'PaddingTop')), '2pt');
     assert.equal(textOf(child(childElements(total, 'Style')[0]!, 'VerticalAlign')), 'Top');
+    const totalCell = descendants(root).find((e) => e.name === 'TablixCell' && descendants(e).includes(total))!;
+    assert.equal(childElements(child(totalCell, 'CellContents')!).find((e) => e.name !== 'ColSpan')!.name, 'Rectangle', 'the rule keeps its own width');
+    assert.equal(textOf(child(total, 'Width')), '1.389in');
     const label = descendants(root).find((e) => e.attributes.Name === 'Holdings_Tab_1_TotTxt')!;
     const labelCell = descendants(root).find((e) => e.name === 'TablixCell' && descendants(e).includes(label))!;
     assert.ok(!descendants(labelCell).some((e) => e.name === 'ColSpan'), 'the label in its own column, as the merge reads a totals row');
