@@ -215,8 +215,12 @@ places side by side across the page (a logo beside a title, a subreport beside a
 as one, as Crystal's section does; bands, tables and charts lie one under another, nothing over anything else (SSRS
 moves overlapping items aside in a preview, a document or a workbook); each table is as tall as its rows and as wide
 as its columns, and a column widens to hold what its cell holds; a frame round a title becomes the title's border; a
-rule drawn along a text lies under it, and a rule a formula moves with its figure (an underline indented with it) is
-the figure's own underline or overline, on the same condition, as a team's templates draw it. What is still drawn over something else, reaches past its box or makes the
+rule drawn along a text lies under it, and a rule a formula moves with its figure in whole steps (an underline indented with it
+by level) is drawn by a text box at each place the figure can stand, side by side, each showing the figure and its
+rule (as wide and thick as Crystal's) where the record's level puts it. Text styled from the style dataset is drawn
+by the designer at its default size (10pt): rows printed once get room round it, rows printed for each record just a
+line of it, so that a page holds about as many as Crystal's; frames inside the report's box run on to the next page
+as Crystal's subreports do. What is still drawn over something else, reaches past its box or makes the
 body wider than the page is listed in the review notes.
 
 Templates are made to be combined into one report, a box and its datasets at a time:

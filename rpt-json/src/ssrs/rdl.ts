@@ -2626,6 +2626,7 @@ class RdlBuilder {
           // (In a team's template, a rule moved with the field: the text's own underline or overline, shown where the rule
           // would be drawn.)
           const decorations: { key: string; shown: string }[] = [];
+          let places: { key: string; line: string; step: number; start: number; width: number; last: number; at: string } | undefined;
           const movedRules = obj!.conditions?.deltaX || obj!.conditions?.deltaWidth ? ruleFormulas : [];
           for (const key of ruleFormulas) {
             const style = this.conditionExpression(obj!.conditions![key]!, false, `${obj!.kind} object "${obj!.name}"`, 'row');
@@ -2636,7 +2637,20 @@ class RdlBuilder {
               // (A formula choosing a line or none, "if ... then crSingleLine else crNoLine": shown on its condition.)
               const args = topLevelArgs(style.slice(1));
               const simple = args && args.length === 3 && /^"(?!None")\w+"$/.test(args[1]!.trim()) && args[2]!.trim() === '"None"';
-              decorations.push({ key, shown: simple ? args[0]!.trim() : `IIf(IsNothing(${style.slice(1)}), "${own}", ${style.slice(1)}) <> "None"` });
+              const shown = simple ? args[0]!.trim() : `IIf(IsNothing(${style.slice(1)}), "${own}", ${style.slice(1)}) <> "None"`;
+              // Moved by whole steps (an indent level times a fixed width): the figure stands in one of a few places
+              // across the cell. A text box of its own at each, side by side, showing the figure (and drawing its rule,
+              // as wide and as thick as Crystal's) where the record's level puts it there.
+              const dx = obj!.conditions?.deltaX ? this.conditionExpression(obj!.conditions.deltaX, false, `${obj!.kind} object "${obj!.name}"`, 'row')?.slice(1) : undefined;
+              const step = obj!.conditions?.deltaWidth ? undefined : stepOf(dx, undefined);
+              const start = obj!.position!.x - columnLeft;
+              const width = obj!.size!.width;
+              const last = step ? Math.floor((cellWidth - 15 - start - width) / step) : -1;
+              if (step && dx && start >= 0 && last >= 0 && last < 8) {
+                places = { key, line: simple ? `IIf(${args[0]!.trim()}, ${args[1]!.trim()}, "None")` : `IIf(IsNothing(${style.slice(1)}), "${own}", ${style.slice(1)})`, step, start, width, last, at: `IIf(IsNothing(${dx}), 0, CDbl(${dx}))` };
+                continue;
+              }
+              decorations.push({ key, shown });
               continue;
             }
             // Crystal keeps the text a little below a rule along the field's top (2pt): the rule is drawn that much
@@ -2722,6 +2736,40 @@ class RdlBuilder {
             }
             return tb;
           };
+          if (places && !items.some(Boolean)) {
+            const p = places;
+            // (Its place: the step the record's level gives, from the first to the last that fits in the cell.)
+            // (Read off the level field itself where the step is its value times a width.)
+            const level = /Fields!\w+\.Value/.exec(p.at)?.[0];
+            const index = level
+              ? `IIf(IsNothing(${level}) OrElse ${level} <= 0, 0, IIf(${level} >= ${p.last}, ${p.last}, Round(${level})))`
+              : `IIf(${p.at} <= 0, 0, IIf(Round(${p.at} / ${Math.round(p.step)}) >= ${p.last}, ${p.last}, Round(${p.at} / ${Math.round(p.step)})))`;
+            const plain = { ...textObj!, conditions: Object.fromEntries(Object.entries(textObj!.conditions ?? {}).filter(([k]) => k !== 'deltaX' && k !== 'deltaWidth')) };
+            const boxes = Array.from({ length: p.last + 1 }, (_, k) => {
+              const tb = this.textbox(this.itemNames.make(`${name}_At${k + 1}`), value, plain, format, 'row',
+                { top: 0, left: twipsToInches(p.start + k * p.step), width: twipsToInches(p.width), height }, undefined, {}, undefined);
+              const here = `${index} = ${k}`;
+              const walk = (e: XmlElement) => {
+                for (const c of e.children) {
+                  if (typeof c !== 'object' || c === null) continue;
+                  const x = c as XmlElement;
+                  if (x.name === 'Value') x.children = [`=IIf(${here}, ${String(x.children[0] ?? '').replace(/^=/, '') || 'Nothing'}, Nothing)`];
+                  else walk(x);
+                }
+              };
+              walk(tb);
+              const tbStyle = tb.children.find((c) => typeof c === 'object' && c !== null && (c as XmlElement).name === 'Style') as XmlElement | undefined;
+              const rule = el(p.key === 'topLine' ? 'TopBorder' : 'BottomBorder',
+                el('Color', obj!.border?.color ?? 'Black'),
+                el('Style', `=IIf(${here}, ${p.line}, "None")`),
+                el('Width', `${Math.max(0.25, (obj!.border?.width ?? 20) / 20).toFixed(2)}pt`));
+              if (tbStyle) tbStyle.children.push(rule);
+              else tb.children.push(el('Style', rule));
+              return tb;
+            });
+            return el('TablixCell', el('CellContents', el('Rectangle', { Name: this.itemNames.make(`${name}_Area`) },
+              el('ReportItems', ...boxes), el('KeepTogether', 'true'), el('Style', el('Border', el('Style', 'None'))))));
+          }
           // Only the text left in the cell: the cell holds it alone.
           if (decorations.length && !items.some(Boolean)) {
             return el('TablixCell', el('CellContents', decorate(this.textbox(name, value, this.ruledBorderObject(textObj, ruled), format, 'row', undefined, undefined, ruled, textPadding))));

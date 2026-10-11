@@ -909,6 +909,10 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     widenCells(body);
     const holders = descendants(body).filter((e) => e.name === 'ReportItems' && !descendants(body).some((t) => t.name === 'Tablix' && descendants(t).includes(e)));
     for (const holder of holders.reverse()) band(holder);
+    // A box inside the report's box (a subreport's frame, a band) runs on to the next page as Crystal's subreport
+    // does, rather than moving whole to the next page and leaving the rest of this one blank.
+    for (const box of descendants(child(body, 'ReportItems') ?? el('x')).filter((e) => e.name === 'Rectangle' && child(e, 'Top')
+      && descendants(e).some((d) => d.name === 'Tablix'))) removeChildren(box, ['KeepTogether']);
     // (Then nothing is left over anything else at its full size: what lies lower moves below.)
     const bottom = unpile(child(body, 'ReportItems'));
     if (bottom > len(body, 'Height')) setChild(body, 'Height', inch(bottom));
@@ -975,8 +979,18 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       const item = cells[at] ? cellItem(cells[at]!) : undefined;
       return !cells[at] || !item || (item.name === 'Textbox' && isBlank(item) && !drawnAs(item));
     }) && rowsOf(t).every((row) => cellsOf(row).length === columns.length);
-    const each = emptyLast && len(last, 'Width') / (spare + 1) >= 0.05 ? Math.floor(len(last, 'Width') / (spare + 1) * 1000) / 1000 : SPARE_WIDTH;
-    setChild(last, 'Width', inch(len(last, 'Width') - spare * each));
+    // Each wide enough to be seen and picked (0.15in): taken from the empty last column first, then from the widest
+    // column where it keeps an inch; the table keeps its width.
+    let each = emptyLast ? Math.max(SPARE_SEEN, Math.floor(len(last, 'Width') / (spare + 1) * 1000) / 1000) : SPARE_SEEN;
+    const fromLast = emptyLast ? Math.max(0, len(last, 'Width') - each) : 0;
+    const widest = (emptyLast ? columns.slice(0, -1) : columns).reduce<XmlElement | undefined>((w, c) => (!w || len(c, 'Width') > len(w, 'Width') ? c : w), undefined);
+    const rest = spare * each - Math.min(fromLast, spare * each);
+    if (rest > 0.001 && (!widest || len(widest, 'Width') - rest < 1)) each = SPARE_WIDTH;
+    if (each === SPARE_WIDTH) setChild(last, 'Width', inch(len(last, 'Width') - spare * each));
+    else {
+      if (fromLast) setChild(last, 'Width', inch(len(last, 'Width') - Math.min(fromLast, spare * each)));
+      if (rest > 0.001) setChild(widest!, 'Width', inch(len(widest!, 'Width') - rest));
+    }
     const T = t.attributes.Name ?? '';
     for (let k = 0; k < spare; k++) {
       child(t, 'TablixBody/TablixColumns')!.children.push(el('TablixColumn', el('Width', inch(each))));
@@ -1217,7 +1231,7 @@ function textHeight(textbox: XmlElement, design = false): number | undefined {
   const lines = Math.max(1, descendants(textbox).filter((e) => e.name === 'Paragraph').length);
   const style = childElements(textbox, 'Style')[0];
   const padding = ['PaddingTop', 'PaddingBottom'].reduce((a, k) => a + (inches(textOf(child(style, k))) ?? 0), 0);
-  return (lines * size * (worked ? DESIGN_LEADING : 1.2)) / 72 + padding;
+  return (lines * size * (worked ? designLeading : 1.2)) / 72 + padding;
 }
 
 /**
@@ -1226,9 +1240,13 @@ function textHeight(textbox: XmlElement, design = false): number | undefined {
  */
 function fitTablix(tablix: XmlElement): number {
   let grown = 0;
-  for (const row of rowsOf(tablix)) {
+  const kinds = rowLeaves(tablix).map((l) => l.kind);
+  for (const [r, row] of rowsOf(tablix).entries()) {
     const height = len(row, 'Height');
     let need = 0;
+    // Rows printed once (titles, headings, totals) are drawn with room round the designer's default size; rows printed
+    // for each record or group just hold a line of it, so that a page holds about as many as Crystal's does.
+    designLeading = ['detail', 'groupHeading', 'subtotal'].includes(kinds[r] ?? 'detail') ? DESIGN_TIGHT : DESIGN_LEADING;
     for (const cell of cellsOf(row)) {
       const item = cellItem(cell);
       if (!item) continue;
@@ -1246,6 +1264,7 @@ function fitTablix(tablix: XmlElement): number {
       grown += need - height;
     }
   }
+  designLeading = DESIGN_LEADING;
   if (grown) setChild(tablix, 'Height', inch(len(tablix, 'Height') + grown));
   return grown;
 }
@@ -1611,9 +1630,14 @@ function unpile(container: XmlElement | undefined): number {
 /** The size (pt) and line spacing the designer draws text at where its size is worked out when the report runs. */
 const DESIGN_FONT = 10;
 const DESIGN_LEADING = 1.4;
+/** The line spacing a row printed for each record is given: one line of the designer's default size, no more. */
+const DESIGN_TIGHT = 1.15;
+let designLeading = DESIGN_LEADING;
 let designText = false;
 /** The width of a thin empty column (inches). */
 const SPARE_WIDTH = 0.01;
+/** The width a spare column is given where the table has room for it (inches): seen and picked in the designer. */
+const SPARE_SEEN = 0.15;
 
 /** Fits the items in a container (see above); returns where the lowest ends. */
 function fitItems(container: XmlElement | undefined): number {
