@@ -336,6 +336,32 @@ describe('conventions', () => {
     assert.ok(!out.review.some((n) => /drawn over each other|reaches past its box/.test(n.message)), JSON.stringify(out.review.filter((n) => /drawn over|reaches past/.test(n.message))));
   });
 
+  it('draws a rule moved with its figure as the figure\'s own underline, as a team\'s templates do', () => {
+    // A statement's figure indented by its level, underlined where a flag says: in pieces of line across the cell
+    // otherwise (a line's place cannot be an expression); in a template, the text's underline on the same condition.
+    const statement = { connections: [], links: [], tables: [{ alias: 'S', name: 'S', kind: 'table', fields: [{ name: 'Label', type: 'string' }, { name: 'Amount', type: 'currency' }, { name: 'Level', type: 'number' }, { name: 'Under', type: 'string' }] }] } as DataSourceInfo;
+    const at2 = (x: number, y: number, width: number) => ({ position: { x, y }, size: { width, height: 240 } });
+    const definition = {
+      ...emptyDefinition(),
+      formulas: [
+        { name: 'Group #1 Order', kind: 'internal', text: '', referencedFields: ['S.Label'] },
+        { name: 'DeltaX', index: 1, kind: 'conditionalFormat', text: '{S.Level} * 1.15 * 1440', referencedFields: ['S.Level'] },
+        { name: 'Bottom_Line', index: 2, kind: 'conditionalFormat', text: 'if {S.Under} = "Y" then crSingleLine else crNoLine', referencedFields: ['S.Under'] },
+      ],
+      layout: [
+        { name: 'GroupHeaderArea1', sections: [{ name: 'GH', height: 240, objects: [{ ...text('H1', 'Line', 0), ...at2(0, 0, 3000) }, { ...text('H2', 'Value', 3200), ...at2(3200, 0, 5500) }] }] },
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 300, objects: [{ ...field('L', 'S.Label', 0), ...at2(0, 0, 3000) },
+          { ...field('A', 'S.Amount', 3200), ...at2(3200, 30, 1585), border: { sides: [0, 0, 0, 0], color: '#000000', width: 20 }, conditions: { deltaX: { name: 'DeltaX', index: 1 }, bottomLine: { name: 'Bottom_Line', index: 2 } } },
+          { ...field('Z', 'S.Label', 9000), ...at2(9000, 0, 1000) }] }] },
+      ],
+    } as unknown as ReportDefinition;
+    const plain = convertToRdl(definition, statement, { reportName: 'O' }).rdl;
+    assert.ok((plain.match(/<Line /g) ?? []).length > 1, 'drawn in pieces otherwise');
+    const rdl = convertToRdl(definition, statement, { reportName: 'O', rulesAsText: true }).rdl;
+    assert.ok(!/<Line |<Rectangle Name="A_Area"/.test(rdl), 'no pieces, no box: the cell holds the figure alone');
+    assert.match(rdl, /<TextDecoration>=IIf\(\(RTrim\(Fields!Under\.Value\) = "Y"\), "Underline", "None"\)<\/TextDecoration>/);
+  });
+
   it('draws rows tall enough for text at the designer\'s default size, a rule along the text moving with it', () => {
     const definition: ReportDefinition = {
       ...emptyDefinition(),

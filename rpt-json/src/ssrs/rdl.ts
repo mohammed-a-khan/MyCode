@@ -70,6 +70,11 @@ export interface RdlOptions {
    * stored procedure for the report would return them), instead of fields worked out in the report.
    */
   formulasInQuery?: boolean;
+  /**
+   * Rules a formula moves with a field (an underline indented with its figure) are the text's own underline or
+   * overline, shown by the same formula, as a team's templates draw them, instead of a line drawn in pieces.
+   */
+  rulesAsText?: boolean;
 }
 
 export interface InlineTarget {
@@ -1585,6 +1590,7 @@ class RdlBuilder {
       parameterValues: this.options.parameterValues,
       chartAxisFormat: this.options.chartAxisFormat,
       formulasInQuery: this.options.formulasInQuery,
+      rulesAsText: this.options.rulesAsText,
       inline: { dataset, itemNames: this.itemNames, imageNames: this.imageNames, codeNames: this.codeNames },
     });
     const result = mode === 'page' ? child.buildInline() : child.buildEmbedded();
@@ -2617,9 +2623,22 @@ class RdlBuilder {
             const box = { top: Math.min(twipsToInches(line.position?.y ?? 0), height), left: twipsToInches(x - columnLeft), width: twipsToInches(right - x), height: 0 };
             return this.reportItem({ ...line, size: { width: right - x, height: 0 } }, 'row', area, box);
           });
+          // (In a team's template, a rule moved with the field: the text's own underline or overline, shown where the rule
+          // would be drawn.)
+          const decorations: { key: string; shown: string }[] = [];
+          const movedRules = obj!.conditions?.deltaX || obj!.conditions?.deltaWidth ? ruleFormulas : [];
           for (const key of ruleFormulas) {
             const style = this.conditionExpression(obj!.conditions![key]!, false, `${obj!.kind} object "${obj!.name}"`, 'row');
             if (!style) continue;
+            if (this.options.rulesAsText && movedRules.length === 1 && movedRules.includes(key)) {
+              const sides = obj!.border?.sides ?? [0, 0, 0, 0];
+              const own = BORDER_STYLES[key === 'topLine' ? sides[2] : sides[3]] ?? 'None';
+              // (A formula choosing a line or none, "if ... then crSingleLine else crNoLine": shown on its condition.)
+              const args = topLevelArgs(style.slice(1));
+              const simple = args && args.length === 3 && /^"(?!None")\w+"$/.test(args[1]!.trim()) && args[2]!.trim() === '"None"';
+              decorations.push({ key, shown: simple ? args[0]!.trim() : `IIf(IsNothing(${style.slice(1)}), "${own}", ${style.slice(1)}) <> "None"` });
+              continue;
+            }
             // Crystal keeps the text a little below a rule along the field's top (2pt): the rule is drawn that much
             // higher (the row keeps its height, as Crystal's does), as far as the row's top allows.
             const y = key === 'topLine' ? Math.max(0, obj!.position!.y - RULE_GAP) : obj!.position!.y + obj!.size!.height;
@@ -2687,9 +2706,30 @@ class RdlBuilder {
           // The part of the gap below a rule along the top that the row's top left no room for moves the text down.
           const short = Math.max(0, RULE_GAP - (obj?.position?.y ?? 0));
           const textPadding = ruleFormulas.includes('topLine') && padding && short ? { ...padding, top: (padding.top ?? 0) + short } : padding;
+          const decorate = (tb: XmlElement) => {
+            for (const d of decorations) {
+              const runs: XmlElement[] = [];
+              const walk = (e: XmlElement) => {
+                for (const c of e.children) if (typeof c === 'object' && c !== null) (c as XmlElement).name === 'TextRun' ? runs.push(c as XmlElement) : walk(c as XmlElement);
+              };
+              walk(tb);
+              for (const run of runs) {
+                let runStyle = run.children.find((c) => typeof c === 'object' && c !== null && (c as XmlElement).name === 'Style') as XmlElement | undefined;
+                if (!runStyle) run.children.push(runStyle = el('Style'));
+                runStyle.children = runStyle.children.filter((c) => !(typeof c === 'object' && c !== null && (c as XmlElement).name === 'TextDecoration'));
+                runStyle.children.push(el('TextDecoration', `=IIf(${d.shown}, "${d.key === 'topLine' ? 'Overline' : 'Underline'}", "None")`));
+              }
+            }
+            return tb;
+          };
+          // Only the text left in the cell: the cell holds it alone.
+          if (decorations.length && !items.some(Boolean)) {
+            return el('TablixCell', el('CellContents', decorate(this.textbox(name, value, this.ruledBorderObject(textObj, ruled), format, 'row', undefined, undefined, ruled, textPadding))));
+          }
           const text = obj || ruled.top || ruled.bottom || ruled.left || ruled.right || background
             ? this.textbox(name, value, this.ruledBorderObject(textObj, ruled), format, 'row', { top: 0, left: 0, width: columnWidth, height }, undefined, ruled, textPadding)
             : null;
+          if (text) decorate(text);
           return el('TablixCell', el('CellContents', el('Rectangle', { Name: this.itemNames.make(`${name}_Area`) },
             el('ReportItems', ...(text ? [text] : []), ...items.filter((item): item is XmlElement => !!item)),
             el('KeepTogether', 'true'),
@@ -5241,6 +5281,32 @@ const POINT_COLOR_CODE = [
   '  Return CStr(crPointColors(key))',
   'End Function',
 ].join('\r\n');
+
+/** The arguments of a call written "IIf(a, b, c)" (split at its own commas), or undefined for anything else. */
+function topLevelArgs(expression: string): string[] | undefined {
+  const m = /^IIf\(([\s\S]*)\)$/.exec(expression.trim());
+  if (!m) return undefined;
+  const args: string[] = [];
+  let depth = 0;
+  let quoted = false;
+  let start = 0;
+  const body = m[1]!;
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    if (c === '"') quoted = !quoted;
+    else if (quoted) continue;
+    else if (c === '(') depth++;
+    else if (c === ')') {
+      if (--depth < 0) return undefined;
+    } else if (c === ',' && depth === 0) {
+      args.push(body.slice(start, i));
+      start = i + 1;
+    }
+  }
+  if (depth !== 0 || quoted) return undefined;
+  args.push(body.slice(start));
+  return args;
+}
 
 /** A column of a table holding a stored procedure's rows: the SQL type of its Crystal field. */
 function sqlColumnType(field: { type: string; length?: number }): string {
