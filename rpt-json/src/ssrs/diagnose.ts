@@ -11,7 +11,7 @@
 import { child, childElements, descendants, parseXml, textOf, type XmlElement } from './xml.ts';
 
 export interface Finding {
-  kind: 'code' | 'overlap' | 'cut off' | 'page' | 'expression' | 'name' | 'empty row' | 'merge';
+  kind: 'code' | 'overlap' | 'cut off' | 'page' | 'expression' | 'name' | 'empty row' | 'merge' | 'value';
   item: string;
   message: string;
 }
@@ -31,7 +31,7 @@ const widthsOf = (t: XmlElement) => childElements(child(t, 'TablixBody/TablixCol
 const valueOf = (box: XmlElement) => descendants(box).filter((e) => e.name === 'Value' && !child(e, 'Value')).map(textOf).join('');
 
 /** The checks of one .rdl; `template` adds the team template's own (names, empty rows, the merge's headings). */
-export function diagnoseRdl(xml: string, template = false): Finding[] {
+export function diagnoseRdl(xml: string, template = false, standardParameters: string[] = []): Finding[] {
   const report = parseXml(xml);
   const out: Finding[] = [];
 
@@ -89,6 +89,21 @@ export function diagnoseRdl(xml: string, template = false): Finding[] {
   }
 
   if (!template) return out;
+
+  for (const q of descendants(report).filter((e) => e.name === 'QueryParameter')) {
+    if (/^=\s*Nothing\s*$/i.test(textOf(child(q, 'Value')))) out.push({ kind: 'value', item: `${q.attributes.Name}`, message: 'passed as Nothing: set the value this schedule needs' });
+  }
+  if (standardParameters.length) {
+    const standard = new Set(standardParameters.map((p) => p.toLowerCase()));
+    const defined = descendants(report).filter((e) => e.name === 'ReportParameter').map((e) => e.attributes.Name ?? '');
+    const read = new Set(descendants(report).flatMap((e) => e.children.filter((c): c is string => typeof c === 'string')).flatMap((t) => [...t.matchAll(/Parameters!(\w+)/g)].map((m) => m[1]!)));
+    for (const name of new Set([...defined, ...read])) {
+      if (standard.has(name.toLowerCase())) continue;
+      out.push({ kind: 'merge', item: `Parameter ${name}`, message: read.has(name)
+        ? 'not a parameter of the base report: the merge does not copy parameters, so the merged report will not publish while this is read'
+        : 'not a parameter of the base report: dropped by the merge' });
+    }
+  }
 
   // Headings: the merge and the designer read them as text; an expression shows as «Expr».
   for (const box of descendants(report).filter((e) => e.name === 'Textbox' && /_ColTxt$/i.test(e.attributes.Name ?? ''))) {

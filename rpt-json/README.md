@@ -249,11 +249,11 @@ the query. A number kept from record to record as the report prints (set in a gr
 record or each deeper group) becomes a window over the report's groups: a running `SUM() OVER (PARTITION BY ...
 ORDER BY ...)` in the report's order, or a `DENSE_RANK()` counting groups.
 
-Beside the template, `.sql` holds those functions and a first draft of the stored procedure (`CREATE PROCEDURE
-<schema>.<dataset>`, the team's standard parameters and the query's own), and the template's dataset calls that
-procedure, as the team's templates do. With `--preview`, `<name>.preview.rdl` is written too: the same template, its dataset
-running the query itself, to preview the report before the procedure is created (the functions at the top of
-`.sql` are needed all the same). Charts need no custom code either: Crystal's value-axis scale is three
+The template's datasets run their queries themselves, so it previews as it is, creating the functions its queries
+call when they are missing. Beside it, `.sql` holds those functions and a first draft of a stored procedure per
+dataset (`CREATE PROCEDURE <schema>.<dataset>`, the team's standard parameters and the query's own), to put in the
+datasets' place. A parameter the team's standard ones do not include is written as a fixed value where it is read
+(`--parameter name=value`, else `Nothing`), as the merged report has only the standard ones. Charts need no custom code either: Crystal's value-axis scale is three
 columns of the query (worked out by a function of the report's over the chart's values), and a bar chart's colour per
 bar comes from a column giving each bar's place in the chart's order. A custom function of a single value (an
 expression, or an `if`/`select` choosing one) used in formatting is written in place as an expression. What SQL
