@@ -483,6 +483,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
   for (const tablix of tablixes) {
     const T = rename(tablix, 'table');
     const container = parents.get(tablix);
+    foldMargins(tablix);
     const widths = widthsOf(tablix);
     const columns = widths.length;
     const isNumber = (tb: XmlElement) => {
@@ -638,6 +639,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       rowLeaves(tablix).forEach((l, i) => {
         const row = all[i];
         if (!row || len(row, 'Height') >= 0.1 || child(l.member, 'Group') || !emptyRow(row)) return;
+        if ((all[i - 1] && ruledRow(all[i - 1]!, 'Bottom')) || (all[i + 1] && ruledRow(all[i + 1]!, 'Top'))) return;
         const holder = descendants(child(tablix, 'TablixRowHierarchy')!).find((e) => e.name === 'TablixMembers' && e.children.includes(l.member));
         if (!holder || childElements(holder, 'TablixMember').length < 2 || rowsOf(tablix).length < 2) return;
         holder.children = holder.children.filter((c) => c !== l.member);
@@ -676,7 +678,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
               own.children.unshift(structuredClone(border));
             }
           }
-          pad(tb, { left: len(tb, 'Left'), top: len(tb, 'Top'), right: Math.max(0, spanWidth - len(tb, 'Left') - len(tb, 'Width')) });
+          pad(tb, { left: len(tb, 'Left'), top: ruledAbove(tb) ? 0 : len(tb, 'Top'), right: Math.max(0, spanWidth - len(tb, 'Left') - len(tb, 'Width')) });
           unplace(tb);
           const contents = child(only.cell, 'CellContents')!;
           contents.children = contents.children.map((x) => (x === item ? tb : x));
@@ -737,7 +739,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           if (inner.length === 1 && inner[0]!.name === 'Textbox') {
             const text = inner[0]!;
             const spanWidth = widths.slice(c, c + span).reduce((a, b) => a + b, 0);
-            pad(text, { left: len(text, 'Left'), top: len(text, 'Top'), right: Math.max(0, spanWidth - len(text, 'Left') - len(text, 'Width')) });
+            pad(text, { left: len(text, 'Left'), top: ruledAbove(text) ? 0 : len(text, 'Top'), right: Math.max(0, spanWidth - len(text, 'Left') - len(text, 'Width')) });
             unplace(text);
             contents!.children = contents!.children.map((x) => (x === tb ? text : x));
             tb = text;
@@ -795,6 +797,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
         for (const [i, row] of rows.entries()) {
           if (kinds[i] !== 'heading') continue;
           const tb = textboxIn(cellsOf(row)[c]);
+          if (tb && roles.get(tb) === 'title') continue;
           const t = tb && fixedText(tb);
           if (t) {
             name = snake(t).toLowerCase();
@@ -806,6 +809,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     }
     // Each text in its row: named after its column, given its looks.
     const headingCols = new Set<string>();
+    let footerInTable = false;
     rows.forEach((row, i) => {
       const kind = kinds[i]!;
       let labelled = false;
@@ -822,6 +826,14 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       cellsOf(row).forEach((cell, c) => {
         let item = cellItem(cell);
         if (!item) return;
+        if (item.name === 'Rectangle' && !childElements(child(item, 'ReportItems') ?? el('x')).some((e) => ITEMS.has(e.name)) && !child(item, 'Visibility')) {
+          const blank = newTextbox(`__blank_${c}`, '', '0pt');
+          const st = childElements(item, 'Style')[0];
+          if (st) blank.children = [...blank.children.filter((x) => typeof x !== 'object' || (x as XmlElement).name !== 'Style'), structuredClone(st)];
+          const contents = child(cell, 'CellContents')!;
+          contents.children = contents.children.map((x) => (x === item ? blank : x));
+          item = blank;
+        }
         // A box in a cell holding just one text: the text itself, placed by its padding.
         if (item.name === 'Rectangle') {
           let inner = childElements(child(item, 'ReportItems') ?? el('x')).filter((e) => ITEMS.has(e.name));
@@ -850,7 +862,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
             const tb = inner[0]!;
             const span = Number(textOf(child(child(cell, 'CellContents'), 'ColSpan')) || 1);
             const cellWidth = widths.slice(c, c + span).reduce((a, b) => a + b, 0);
-            pad(tb, { left: len(tb, 'Left'), top: len(tb, 'Top'), right: Math.max(0, cellWidth - len(tb, 'Left') - len(tb, 'Width')) });
+            pad(tb, { left: len(tb, 'Left'), top: ruledAbove(tb) ? 0 : len(tb, 'Top'), right: Math.max(0, cellWidth - len(tb, 'Left') - len(tb, 'Width')) });
             unplace(tb);
             const contents = child(cell, 'CellContents')!;
             contents.children = contents.children.map((x) => (x === item ? tb : x));
@@ -863,6 +875,12 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           if (named.has(tb)) return tb.attributes.Name;
           const col = fieldOf(tb) ?? colNames[c] ?? ownWord(tb) ?? `col${c + 1}`;
           if (kind === 'noData') return rename(tb, 'noData', { T });
+          const across = Number(textOf(child(child(cell, 'CellContents') ?? el('x'), 'ColSpan')) || 1);
+          if (kind === 'total' && !footerInTable && !isBlank(tb) && across >= Math.max(2, columns - 1) && !/\b(Sum|Count|CountDistinct|Avg|RunningValue)\s*\(/i.test(valueOf(tb))) {
+            footerInTable = true;
+            roles.set(tb, 'footer');
+            return rename(tb, 'footer');
+          }
           // (An empty heading over a column of a field's values: the heading of that column, to be given a label.)
           if (isBlank(tb) && headingsRow && fromField[c] && !headingCols.has(colNames[c]!)) {
             headingCols.add(colNames[c]!);
@@ -1567,6 +1585,85 @@ function withFunctions(root: XmlElement, functions: string[]): XmlElement {
     command.children = [[...setup, text].join('\n')];
   }
   return copy;
+}
+
+function foldMargins(tablix: XmlElement): void {
+  const columnsEl = child(tablix, 'TablixBody/TablixColumns');
+  const members = child(tablix, 'TablixColumnHierarchy/TablixMembers');
+  if (!columnsEl || !members || descendants(child(tablix, 'TablixColumnHierarchy')!).some((e) => e.name === 'Group')) return;
+  const spanOf = (cell: XmlElement) => Number(textOf(child(child(cell, 'CellContents') ?? el('x'), 'ColSpan')) || 1);
+  const setSpan = (cell: XmlElement, n: number) => {
+    const contents = child(cell, 'CellContents')!;
+    removeChildren(contents, ['ColSpan']);
+    if (n > 1) contents.children.push(el('ColSpan', String(n)));
+  };
+  const empty = (cell: XmlElement) => descendants(cell).every((e) => (e.name === 'Value' ? !textOf(e).trim() : !/^(Line|Image|Chart|Subreport|Tablix|Map|GaugePanel)$/.test(e.name)));
+  const starts = (cells: XmlElement[]) => {
+    const out: number[] = [];
+    for (let i = 0; i < cells.length;) {
+      const n = spanOf(cells[i]!);
+      for (let k = 0; k < n; k++) out.push(i);
+      i += n;
+    }
+    return out;
+  };
+  for (const side of ['left', 'right'] as const) {
+    const widths = widthsOf(tablix);
+    const n = widths.length;
+    if (n < 3 || members.children.filter((m) => typeof m === 'object').length !== n) return;
+    const k = side === 'left' ? 0 : n - 1;
+    if (widths[k]! > 0.3) continue;
+    const rows = rowsOf(tablix);
+    const fits = rows.every((row) => {
+      const cells = cellsOf(row);
+      if (cells.length !== n) return false;
+      const s = starts(cells)[k]!;
+      return s !== k || spanOf(cells[k]!) > 1 || empty(cells[k]!);
+    });
+    if (!fits) continue;
+    const w = widths[k]!;
+    for (const row of rows) {
+      const cells = cellsOf(row);
+      const holder = child(row, 'TablixCells')!;
+      const s = starts(cells)[k]!;
+      if (side === 'left') {
+        if (spanOf(cells[0]!) > 1) {
+          setSpan(cells[0]!, spanOf(cells[0]!) - 1);
+          holder.children = holder.children.filter((c) => c !== cells[1]);
+        } else {
+          holder.children = holder.children.filter((c) => c !== cells[0]);
+          const item = cellItem(cells[1]!);
+          if (item?.name === 'Textbox') pad(item, { left: w });
+          else if (item?.name === 'Rectangle') for (const e of childElements(child(item, 'ReportItems') ?? el('x')).filter((x) => child(x, 'Left'))) setChild(e, 'Left', inch(len(e, 'Left') + w));
+        }
+      } else if (s < k) {
+        setSpan(cells[s]!, spanOf(cells[s]!) - 1);
+        holder.children = holder.children.filter((c) => c !== cells[k]);
+        const item = cellItem(cells[s]!);
+        if (item?.name === 'Textbox') pad(item, { right: w });
+      } else {
+        holder.children = holder.children.filter((c) => c !== cells[k]);
+        const before = starts(cells)[k - 1]!;
+        const item = cellItem(cells[before]!);
+        if (item?.name === 'Textbox') pad(item, { right: w });
+      }
+    }
+    const columnList = childElements(columnsEl, 'TablixColumn');
+    const into = side === 'left' ? 1 : n - 2;
+    setChild(columnList[into]!, 'Width', inch(widths[into]! + w));
+    columnsEl.children = columnsEl.children.filter((c) => c !== columnList[k]);
+    const memberList = childElements(members, 'TablixMember');
+    members.children = members.children.filter((c) => c !== memberList[k]);
+  }
+}
+
+function ruledRow(row: XmlElement, side: 'Top' | 'Bottom'): boolean {
+  return descendants(row).some((e) => (e.name === `${side}Border` || e.name === 'Border') && /solid|dashed|dotted|double/i.test(textOf(child(e, 'Style'))));
+}
+
+function ruledAbove(textbox: XmlElement): boolean {
+  const style = childElements(textbox, 'Style')[0];
+  return [child(style, 'TopBorder'), child(style, 'Border')].some((b) => b && /solid|dashed|dotted|double/i.test(textOf(child(b, 'Style'))));
 }
 
 /** A row whose cells show nothing: no text, picture, line or rule. */
