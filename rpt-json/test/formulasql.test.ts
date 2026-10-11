@@ -245,6 +245,17 @@ describe('a team template whose values come from a subreport', () => {
     assert.match(open.rdl, /<QueryParameter Name="@part_no">\s*<Value>=Nothing<\/Value>/);
   });
 
+  it('reads a shared value in a condition as the subreport\'s field, without custom code', async () => {
+    const { convertToRdl } = await import('../src/ssrs/rdl.ts');
+    const condition = { name: 'Object_Visibility', index: 9, kind: 'conditionalFormat', text: 'WhilePrintingRecords; shared StringVar note; if note = "Cont" then true', referencedFields: [] };
+    const hiding = { ...main, formulas: [...main.formulas, condition],
+      layout: main.layout.map((a) => (a.name !== 'DetailArea1' ? a : { ...a, sections: a.sections.map((sec) => ({ ...sec, objects: sec.objects.map((o) => ({ ...o, conditions: { suppress: { name: 'Object_Visibility', index: 9 } } })) })) })) };
+    const r = convertToRdl(hiding as never, source as never, { reportName: 'Main', formulasInQuery: true, rulesAsText: true,
+      subreports: new Map([[1, { name: 'Sub1', links: [], definition: header, dataSource: headSource }]]) as never });
+    assert.ok(!r.rdl.includes('<Code>') && !/Code\.\w+/.test(r.rdl), 'no custom code');
+    assert.match(r.rdl, /<Hidden>=[^<]*First\(Fields!Note\.Value, "DataSet_Sub1"\)[^<]*= "Cont"/);
+  });
+
   it('counts and takes the pieces of a split text in SQL', () => {
     const fn = (name: string) => `dbo.[${name}]`;
     const c = { ...ctx, addFunction: (key: string, body: (n: string) => string[]) => { body(fn(key)); return fn(key); } };
