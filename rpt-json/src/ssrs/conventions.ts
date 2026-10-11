@@ -308,7 +308,7 @@ const unplace = (item: XmlElement) => removeChildren(item, ['Top', 'Left', 'Heig
 // ---------------------------------------------------------------------------------------------------------------
 
 /** Reshapes a converted report as a template following the conventions. */
-export function applyConventions(rdl: string, reportName: string, conv: Conventions, prefix?: string, extra: { sqlFunctions?: string[]; preview?: boolean } = {}): { rdl: string; review: ReviewNote[]; settled: string[]; files?: Record<string, string> } {
+export function applyConventions(rdl: string, reportName: string, conv: Conventions, prefix?: string, extra: { sqlFunctions?: string[]; parameterValues?: Record<string, string> } = {}): { rdl: string; review: ReviewNote[]; settled: string[]; files?: Record<string, string> } {
   const review: ReviewNote[] = [];
   const root = parseXml(rdl);
   const report = root.name === 'Report' ? root : descendants(root).find((e) => e.name === 'Report')!;
@@ -1140,6 +1140,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     v = v.replace(/"([^"]*)"/g, (m, n: string) => (scopeRenames.has(n) ? `"${scopeRenames.get(n)}"` : m));
     if (v !== t) e.children = [v];
   }
+  fixParameters(report, conv, extra.parameterValues ?? {}, review);
   dropUnused(report, conv, review);
   // Custom code: only what the report still calls (formulas worked out in the query need none).
   const codeEl = child(report, 'Code');
@@ -1199,25 +1200,9 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
   const procedures = proceduresFor(report, conv, extra.sqlFunctions ?? []);
   if (procedures) {
     files['.sql'] = procedures.text;
-    // A copy to preview before the procedures exist: its datasets still run their queries themselves (the functions
-    // they call, at the top of .sql, are needed all the same).
-    if (extra.preview) files['.preview.rdl'] = toXml(withFunctions(root, extra.sqlFunctions ?? []));
-    for (const procedure of procedures.list) {
-      const query = child(procedure.dataSet, 'Query')!;
-      const params = childElements(child(query, 'QueryParameters') ?? el('x'), 'QueryParameter');
-      const standard = conv.parameters.filter((p) => childElements(child(report, 'ReportParameters') ?? el('x'), 'ReportParameter').some((r) => r.attributes.Name === p.name))
-        .filter((p) => !params.some((q) => q.attributes.Name?.toLowerCase() === `@${p.name}`.toLowerCase()))
-        .map((p) => el('QueryParameter', { Name: `@${p.name}` }, el('Value', `=Parameters!${p.name}.Value`)));
-      query.children = [
-        ...childElements(query, 'DataSourceName'),
-        el('QueryParameters', ...standard, ...params),
-        el('CommandType', 'StoredProcedure'),
-        el('CommandText', procedure.name),
-      ];
-    }
   }
   // Notes the conversion made that no longer apply (the shared data source replaces the connection).
-  return { rdl: toXml(root), review, settled: conv.dataSource ? ['Data source'] : [], ...(Object.keys(files).length ? { files } : {}) };
+  return { rdl: toXml(withFunctions(root, extra.sqlFunctions ?? [])), review, settled: conv.dataSource ? ['Data source'] : [], ...(Object.keys(files).length ? { files } : {}) };
 }
 
 /** The functions (and the values they keep) of VB code that the names called reach, in their order. */
@@ -1518,6 +1503,43 @@ function separate(container: XmlElement, review: ReviewNote[]): void {
  * one aside; only a PDF or a print keeps them so), an item reaching past its box, a body wider than the page leaves
  * room for (SSRS would add a blank page after each page). Each is listed for review.
  */
+function fixParameters(report: XmlElement, conv: Conventions, values: Record<string, string>, review: ReviewNote[]): void {
+  if (!conv.parameters.length) return;
+  const standard = new Set(conv.parameters.map((p) => p.name.toLowerCase()));
+  const list = child(report, 'ReportParameters');
+  const others = childElements(list ?? el('x'), 'ReportParameter').filter((p) => !standard.has((p.attributes.Name ?? '').toLowerCase()));
+  if (!list || !others.length) return;
+  const fixed = new Map<string, string>();
+  for (const p of others) {
+    const name = p.attributes.Name ?? '';
+    const given = Object.entries(values).find(([k]) => k.replace(/^@/, '').toLowerCase() === name.toLowerCase())?.[1]?.trim();
+    const type = textOf(child(p, 'DataType'));
+    const quoted = (v: string) => `"${v.replace(/"/g, '""')}"`;
+    const literal = given === undefined ? 'Nothing'
+      : /^(Integer|Float)$/.test(type) && /^-?\d+(\.\d+)?$/.test(given) ? given
+        : type === 'Boolean' && /^(true|false)$/i.test(given) ? given
+          : type === 'DateTime' ? `CDate(${quoted(given)})` : quoted(given);
+    fixed.set(name.toLowerCase(), literal);
+    review.push({ item: `Parameter ${name}`, message: given === undefined
+      ? 'not a parameter of the base report, which the merge does not copy: passed as Nothing where it is read; set the value this schedule needs'
+      : `not a parameter of the base report, which the merge does not copy: ${given} is written where it is read` });
+  }
+  for (const e of descendants(report)) {
+    const t = e.children.length === 1 && typeof e.children[0] === 'string' ? (e.children[0] as string) : undefined;
+    if (t === undefined || !t.startsWith('=')) continue;
+    const v = t.replace(/Parameters!(\w+)(\.(?:Value|Label))?/g, (m, n: string) => fixed.get(n.toLowerCase()) ?? m);
+    if (v !== t) e.children = [v];
+  }
+  list.children = list.children.filter((c) => !others.includes(c as XmlElement));
+  removeChildren(report, ['ReportParametersLayout']);
+  const kept = childElements(list, 'ReportParameter');
+  if (!kept.length) report.children = report.children.filter((c) => c !== list);
+  else {
+    const layout = parametersLayout(kept.map((p) => p.attributes.Name ?? ''));
+    if (layout) report.children.splice(report.children.indexOf(list) + 1, 0, layout);
+  }
+}
+
 function withFunctions(root: XmlElement, functions: string[]): XmlElement {
   const named = functions.map((text) => ({ text, name: /CREATE\s+FUNCTION\s+(\S+?)\s*\(/i.exec(text)?.[1] ?? '' })).filter((f) => f.name);
   if (!named.length) return root;

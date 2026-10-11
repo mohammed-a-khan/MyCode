@@ -87,4 +87,12 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     const kinds = diagnoseRdl(rdl, true).map((f) => `${f.kind}: ${f.item}`);
     assert.deepEqual(kinds.sort(), ['code: B', 'code: Report', 'cut off: B', 'expression: A_ColTxt', 'name: Rectangle3', 'overlap: A_ColTxt / B'].sort());
   });
+
+  it('lists parameters the base report does not have, which the merge does not copy', () => {
+    const rdl = `<Report><DataSets><DataSet Name="A"><Query><QueryParameters><QueryParameter Name="@extra"><Value>=Parameters!extra.Value</Value></QueryParameter></QueryParameters></Query></DataSet></DataSets>
+<ReportParameters><ReportParameter Name="one"/><ReportParameter Name="extra"/><ReportParameter Name="unread"/></ReportParameters></Report>`;
+    const merge = diagnoseRdl(rdl, true, ['one']).filter((f) => f.kind === 'merge').map((f) => `${f.item}: ${/will not publish/.test(f.message) ? 'blocks' : 'dropped'}`);
+    assert.deepEqual(merge.sort(), ['Parameter extra: blocks', 'Parameter unread: dropped']);
+    assert.equal(diagnoseRdl(rdl, true).filter((f) => f.kind === 'merge').length, 0);
+  });
 });

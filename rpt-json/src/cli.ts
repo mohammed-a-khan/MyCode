@@ -39,7 +39,7 @@ Usage:
   rpt-json to-rdl  <input.rpt|input.json|folder> [output-dir] [--connection "<connection string>"]
                    [--shared-datasource <name>] [--template <house.rdl>] [--separate-subreports]
                    [--page-number] [--parameter name=value]... [--chart-axis-format <format>] [--house <style.json>]
-                   [--conventions <conventions.json> [--prefix <short name>] [--preview]]
+                   [--conventions <conventions.json> [--prefix <short name>]]
                                             Convert to SSRS .rdl files (+ subreports) and a review checklist;
                                             a folder converts every .rpt in it and its subfolders, each written
                                             to the same subfolder of the output folder;
@@ -55,8 +55,8 @@ Usage:
                                             names, title and totals as table rows, a no-data row, their data
                                             source and parameters, looks read from their style dataset;
                                             --prefix gives the report's items a short name of their own;
-                                            --preview also writes <name>.preview.rdl, whose dataset runs the
-                                            query itself, to preview before the procedure is created
+                                            its datasets run their queries themselves; <name>.sql drafts the
+                                            procedures to put in their place
   rpt-json to-rdl  --template <house.rdl> --combine <output.rdl> <input.rpt|folder>...
                                             Combine several reports into one .rdl, one block per report
   rpt-json headers <input.rpt|input.json|folder> [output-file] [--json | --csv] [--all]
@@ -69,7 +69,7 @@ Usage:
                                             Subdocument N) and of main-report sections showing them, one line per
                                             section and object, with all other names and text hidden
                                             (safe to share when a chart does not convert)
-  rpt-json check <input.rdl|folder> [output.txt] [--conventions]
+  rpt-json check <input.rdl|folder> [output.txt] [--conventions] [--parameters <name,name,...>]
                                             Check finished .rdl files: custom code left, items over each other or
                                             cut off, the body wider than the page; with --conventions also headings
                                             shown as «Expr», default names, empty rows and the merge's headings.
@@ -134,8 +134,8 @@ function streamDigests(json: RptJson): Map<string, string> {
 }
 
 /** The check of a finished report, with the custom code written beside it. */
-function checkConverted(rdl: string, files: Record<string, string> | undefined, template: boolean): Finding[] {
-  const findings = diagnoseRdl(rdl, template);
+function checkConverted(rdl: string, files: Record<string, string> | undefined, template: boolean, standardParameters: string[] = []): Finding[] {
+  const findings = diagnoseRdl(rdl, template, standardParameters);
   const code = files?.['.code.vb'];
   if (code?.trim()) findings.unshift({ kind: 'code', item: 'Report', message: `custom code left in the .code.vb file: ${(code.match(/^\s*(?:Public\s+|Private\s+)?(?:Shared\s+)?(?:Function|Sub)\s+\w+/gim) ?? []).length} function(s)` });
   return findings;
@@ -238,7 +238,8 @@ async function main(argv: string[]): Promise<number> {
     }
     const conventionsPath = takeOption(args, '--conventions');
     const prefix = takeOption(args, '--prefix');
-    const preview = takeFlag(args, '--preview');
+    if (takeFlag(args, '--preview')) console.error('NOTE --preview is no longer needed: the template runs its queries itself');
+    let standardParameters: string[] = [];
     let reshape: ((rdl: string, name: string, extra?: { sqlFunctions?: string[] }) => { rdl: string; review: { item: string; message: string }[]; settled: string[]; files?: Record<string, string> }) | undefined;
     if (conventionsPath) {
       const { readConventions, applyConventions } = await import('./ssrs/conventions.ts');
@@ -248,7 +249,8 @@ async function main(argv: string[]): Promise<number> {
       } catch (err) {
         throw new Error(`conventions ${conventionsPath}: ${(err as Error).message}`);
       }
-      reshape = (rdl, name, extra) => applyConventions(rdl, name, conv, prefix, { ...extra, preview });
+      reshape = (rdl, name, extra) => applyConventions(rdl, name, conv, prefix, { ...extra, parameterValues });
+      standardParameters = conv.parameters.map((p) => p.name);
       // The house style step's layout work (tables, bands and frames reaching the page's rules), without its looks:
       // the team's looks come from their style dataset.
       if (!restyle) {
@@ -261,7 +263,6 @@ async function main(argv: string[]): Promise<number> {
       }
     }
     if (prefix && !conventionsPath) throw new Error('to-rdl: --prefix goes with --conventions');
-    if (preview && !conventionsPath) throw new Error('to-rdl: --preview goes with --conventions');
     const templatePath = takeOption(args, '--template');
     if (conventionsPath && templatePath) throw new Error('to-rdl: --conventions reshapes the converted layout and --template replaces it; use one or the other');
     if (housePath && templatePath) throw new Error('to-rdl: --house keeps the Crystal layout and --template replaces it; use one or the other');
@@ -344,7 +345,7 @@ async function main(argv: string[]): Promise<number> {
         const items = reports.reduce((n, r) => n + r.review.length, 0);
         console.error(`OK   ${file}: ${reports.filter((r) => r.rdl).length} report(s), ${items} review item(s)`);
         for (const report of reports.filter((r) => r.rdl)) {
-          const findings = checkConverted(report.rdl, report.files, !!conventionsPath);
+          const findings = checkConverted(report.rdl, report.files, !!conventionsPath, standardParameters);
           const shown = join(folder, report.fileName);
           checks.push(diagnosisText(shown, findings));
           console.error(`CHECK ${shown}: ${diagnosisLine(findings)}`);
@@ -373,6 +374,7 @@ async function main(argv: string[]): Promise<number> {
 
   if (command === 'check') {
     const template = takeFlag(args, '--conventions');
+    const standard = (takeOption(args, '--parameters') ?? '').split(',').map((p) => p.trim()).filter(Boolean);
     const [input, output] = positionals(args, 'check', 2);
     if (!input) throw new Error('check needs an .rdl file or a folder of them');
     const files = (await stat(input)).isDirectory() ? await findFiles(input, /(?<!\.preview)\.rdl$/i) : [input];
@@ -380,7 +382,7 @@ async function main(argv: string[]): Promise<number> {
     for (const file of files) {
       const code = file.replace(/\.rdl$/i, '.code.vb');
       const extra = await readFile(code).then((t) => ({ '.code.vb': t.toString('utf8') }), () => undefined);
-      checks.push(diagnosisText(file, checkConverted((await readFile(file)).toString('utf8'), extra, template)));
+      checks.push(diagnosisText(file, checkConverted((await readFile(file)).toString('utf8'), extra, template, standard)));
     }
     const text = `${checkSummary(checks)}\n`;
     if (output) await writeFile(output, text);

@@ -106,23 +106,16 @@ describe('formulas in the query of a team template', () => {
     const draft = out.files?.['.sql'] ?? '';
     assert.match(draft, /CREATE FUNCTION dbo\.\[Q_Counter\][\s\S]*\nGO\n[\s\S]*CREATE PROCEDURE dbo\.\w+\n    @as_of datetime\nAS\nBEGIN\n    SET NOCOUNT ON;\n    SELECT/);
     assert.match(draft, /AS \[F_Label\][\s\S]*;\nEND\nGO\n$/);
-    // The template's dataset calls the procedure, with the standard parameters, as the team's templates do.
-    // A second dataset of its own (a subreport placed in the report) gets a procedure of its own too.
+    assert.match(out.rdl, /<CommandText>SELECT[\s\S]*AS \[F_Label\]/);
+    assert.ok(!out.rdl.includes('<CommandType>StoredProcedure</CommandType>'), 'the template runs its query itself');
+    assert.equal(out.files?.['.preview.rdl'], undefined);
     const two = rdl.replace(/(<DataSet Name="[^"]*">[\s\S]*?<\/DataSet>)/, (d) => d + d.replace(/<DataSet Name="[^"]*">/, '<DataSet Name="Second">'))
       .replace(/<Value>=Fields!F_Label\.Value<\/Value>/, '<Value>=Fields!F_Label.Value &amp; First(Fields!F_Label.Value, "Second")</Value>');
-    const both = applyConventions(two, 'Q', conv);
-    assert.equal(both.files?.['.sql']?.match(/CREATE PROCEDURE/g)?.length, 2);
-    assert.match(both.rdl, /<CommandType>StoredProcedure<\/CommandType>\s*<CommandText>dbo\.Second<\/CommandText>/);
-    // On request, a copy to preview that runs the query itself.
-    const preview = applyConventions(rdl, 'Q', conv, undefined, { preview: true }).files?.['.preview.rdl'] ?? '';
-    assert.match(preview, /<CommandText>SELECT[\s\S]*AS \[F_Label\]/);
-    assert.ok(!preview.includes('<CommandType>StoredProcedure</CommandType>\n          <CommandText>dbo.'));
-    assert.equal(out.files?.['.preview.rdl'], undefined, 'only when asked');
+    assert.equal(applyConventions(two, 'Q', conv).files?.['.sql']?.match(/CREATE PROCEDURE/g)?.length, 2);
     const fn = 'CREATE FUNCTION dbo.[Q_label](@s nvarchar(max))\nRETURNS nvarchar(max)\nAS\nBEGIN\n  RETURN @s\nEND';
     const called = rdl.replace(/AS \[F_Label\]/, 'AS [F_Label], dbo.[Q_label](N\'x\') AS [F_Other]');
-    const own = applyConventions(called, 'Q', conv, undefined, { preview: true, sqlFunctions: [fn] }).files?.['.preview.rdl'] ?? '';
+    const own = applyConventions(called, 'Q', conv, undefined, { sqlFunctions: [fn] }).rdl;
     assert.match(own, /<CommandText>IF OBJECT_ID\(N'dbo\.\[Q_label\]'\) IS NULL BEGIN TRY EXEC \(N'CREATE FUNCTION dbo\.\[Q_label\][\s\S]*?END TRY BEGIN CATCH END CATCH;\s*EXEC \(N'ALTER FUNCTION dbo\.\[Q_label\][\s\S]*?'\);\s*SELECT/);
-    assert.match(out.rdl, /<QueryParameter Name="@as_of">\s*<Value>=Parameters!as_of.Value<\/Value>\s*<\/QueryParameter>\s*<\/QueryParameters>\s*<CommandType>StoredProcedure<\/CommandType>\s*<CommandText>dbo\.\w+<\/CommandText>/);
   });
 });
 
@@ -234,6 +227,22 @@ describe('a team template whose values come from a subreport', () => {
     assert.ok(!r.rdl.includes('#rows') && !r.rdl.includes('<ReportParameter '), 'no table of its rows, no hidden parameter');
     const note = 'First(Fields!Note.Value, "DataSet_Sub1")';
     assert.ok(r.rdl.includes(`Join(Split(CStr(((${note}))), CStr("&lt;CR&gt;"), -1, CompareMethod.Binary), CStr(Chr(10))) &amp; CStr(Chr(10))`), r.rdl.match(/<Value>=\(IIf[^<]*/)?.[0]);
+  });
+
+  it('writes a parameter the base report lacks as a fixed value where it is read, so the merged report keeps working', async () => {
+    const { convertToRdl } = await import('../src/ssrs/rdl.ts');
+    const { applyConventions, readConventions } = await import('../src/ssrs/conventions.ts');
+    const withPart = { ...header, parameters: [{ name: '@part_no', valueType: 'number', prompt: 'part' }] };
+    const r = convertToRdl(main as never, source as never, { reportName: 'Main', formulasInQuery: true, rulesAsText: true,
+      subreports: new Map([[1, { name: 'Sub1', links: [], definition: withPart, dataSource: headSource }]]) as never });
+    assert.match(r.rdl, /<ReportParameter Name="part_no">/);
+    const conv = readConventions(JSON.stringify({ parameters: [{ name: 'fund', match: 'fund' }] }));
+    const given = applyConventions(r.rdl, 'Main', conv, undefined, { parameterValues: { part_no: '42' } });
+    assert.match(given.rdl, /<QueryParameter Name="@part_no">\s*<Value>=42<\/Value>/);
+    assert.ok(!given.rdl.includes('<ReportParameter Name="part_no">') && !given.rdl.includes('Parameters!part_no'));
+    assert.ok(given.review.some((n) => n.item === 'Parameter part_no' && /42 is written/.test(n.message)));
+    const open = applyConventions(r.rdl, 'Main', conv);
+    assert.match(open.rdl, /<QueryParameter Name="@part_no">\s*<Value>=Nothing<\/Value>/);
   });
 
   it('counts and takes the pieces of a split text in SQL', () => {
