@@ -203,15 +203,21 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
   it('moves columns placed by formulas into a table titled over them, with no column for a hidden field and every total ruled alike', () => {
     const fields = [{ name: 'Name', type: 'string' }, { name: 'G', type: 'string' }, { name: 'Max', type: 'number' }, ...[1, 2, 3].flatMap((i) => [{ name: `H${i}`, type: 'string' }, { name: `P${i}`, type: 'number' }, { name: `B${i}`, type: 'number' }, { name: `S${i}`, type: 'number' }])];
     const src = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields }] } as never;
-    const formulas: { name: string; index: number; kind: string; text: string; referencedFields: string[] }[] = [];
+    const formulas: { name: string; index: number; kind: string; text: string; referencedFields: string[] }[] = [
+      { name: 'all', index: 1, kind: 'formula', text: 'WhileReadingRecords; "All"', referencedFields: [] },
+      { name: 'Group #1 Order', index: 2, kind: 'internal', text: '', referencedFields: ['@all'] }];
     const moved = (i: number) => {
       formulas.push({ name: 'DeltaX_Value_Formula', index: formulas.length + 1, kind: 'conditionalFormat', text: `{T.P${i}} * 1440`, referencedFields: [] });
       return { deltaX: { name: 'DeltaX_Value_Formula', index: formulas.length } };
     };
     const at2 = (x: number, y: number, width: number, height: number) => ({ position: { x, y }, size: { width, height } });
+    const hideZero = () => {
+      formulas.push({ name: 'Section_Visibility', index: formulas.length + 1, kind: 'conditionalFormat', text: 'if {T.B1} = 0 and {T.B2} = 0 then true', referencedFields: [] });
+      return { name: 'Section_Visibility', index: formulas.length };
+    };
     const f = (name: string, ref: string, x: number, y: number, width: number, height: number, extra = {}) => ({ kind: 'field', name, field: ref, style: { size: 8 }, ...at2(x, y, width, height), ...extra });
     const definition = {
-      saveInfo: {}, selectionFormulas: {}, sqlExpressions: [], parameters: [], groups: ['T.G'], sortFields: [], summarizedFields: [], formulas,
+      saveInfo: {}, selectionFormulas: {}, sqlExpressions: [], parameters: [], groups: ['@all'], sortFields: [], summarizedFields: [], formulas,
       layout: [
         { name: 'GroupHeaderArea1', sections: [{ name: 'GH', height: 1200, objects: [
           { kind: 'text', name: 'Title', text: 'Balances by Kind', style: { size: 10 }, ...at2(0, 0, 10080, 288) },
@@ -220,18 +226,21 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
           f('MaxHead', 'T.Max', 9300, 400, 700, 200, { suppressed: true }),
           ...[1, 2, 3].map((i) => f(`Head${i}`, `T.H${i}`, 30, 400, 1155, 600, { conditions: moved(i) })),
           { kind: 'line', name: 'Rule2', ...at2(30, 1100, 10050, 0), border: { sides: [0, 0, 1, 0], width: 60 } }] }] },
-        { name: 'DetailArea1', sections: [{ name: 'D', height: 220, objects: [f('Name', 'T.Name', 50, 0, 3000, 210), f('MaxVal', 'T.Max', 9300, 0, 700, 210, { suppressed: true }),
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 220, conditions: { suppress: hideZero() }, objects: [f('Name', 'T.Name', 50, 0, 3000, 210), f('MaxVal', 'T.Max', 9300, 0, 700, 210, { suppressed: true }),
           ...[1, 2, 3].map((i) => f(`Bal${i}`, `T.B${i}`, 30, 0, 1155, 210, { conditions: moved(i) }))] }] },
         { name: 'GroupFooterArea1', sections: [{ name: 'GF', height: 260, objects: [{ kind: 'text', name: 'Totals', text: 'Totals:', style: { size: 8 }, ...at2(100, 0, 1000, 240) },
           ...[1, 2, 3].map((i) => f(`Sum${i}`, `T.S${i}`, 0, 40, 1185, 166, { conditions: moved(i), border: { sides: [0, 0, 1, 0], width: 20 } }))] }] },
       ],
     } as unknown as ReportDefinition;
-    const out = applyConventions(convertToRdl(definition, src, { reportName: 'Holdings', formulasInQuery: true, rulesAsText: true }).rdl, 'Holdings', conventions).rdl;
+    const styled = { ...conventions, style: { dataset: 'Theme', commandType: 'StoredProcedure', command: 'dbo.theme_get', field: '{role}_{prop}', props: { BackgroundColor: 'fill' }, roles: { title: 'Title', heading: 'Head', body: 'Body', bodyFirst: 'Body', number: 'Body' }, rowBands: { odd: 'Odd', even: 'Even' } } } as never;
+    const out = applyConventions(convertToRdl(definition, src, { reportName: 'Holdings', formulasInQuery: true, rulesAsText: true }).rdl, 'Holdings', styled).rdl;
     const root = parseXml(out);
     assert.ok(descendants(root).some((e) => e.attributes.Name === 'Holdings_SchTitle_Txt'), out.match(/Name="[^"]*"/g)!.join(' '));
     assert.ok(!/Name="[^"]*Max[^"]*"/.test(out), 'no column for the hidden field');
     const totals = descendants(root).filter((e) => e.name === 'Textbox' && /_S\d_SubtotalLabel$/.test(e.attributes.Name ?? ''));
     assert.equal(totals.length, 3, out.match(/Name="[^"]*S\d[^"]*"/g)?.join(" "));
     assert.ok(totals.every((t) => !!child(t, 'Width')), 'each total in a box of its own, the last too');
+    const bands = descendants(root).filter((e) => e.name === 'BackgroundColor' && /Mod 2/.test(textOf(e))).map(textOf);
+    assert.ok(bands.length && bands.every((b) => b.startsWith('=IIF(RunningValue(')), `rows counted as shown: ${bands[0]}`);
   });
 });
