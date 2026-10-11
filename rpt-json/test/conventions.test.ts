@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 import type { DataSourceInfo, ReportDefinition, ReportObject } from '../src/crystal/model.ts';
 import { applyConventions, readConventions } from '../src/ssrs/conventions.ts';
 import { convertToRdl } from '../src/ssrs/rdl.ts';
-import { child, childElements, descendants, parseXml, textOf, type XmlElement } from '../src/ssrs/xml.ts';
+import { child, childElements, descendants, el, parseXml, textOf, type XmlElement } from '../src/ssrs/xml.ts';
 
 const source: DataSourceInfo = {
   connections: [],
@@ -244,6 +244,96 @@ describe('conventions', () => {
     assert.ok(a && b && a !== b, 'each in its own frame');
     assert.ok(inch(a, 'Height') >= inch(tablix, 'Top') + inch(tablix, 'Height') - 0.001, 'the first frame holds its table');
     assert.ok(inch(b, 'Top') >= inch(a, 'Top') + inch(a, 'Height'), 'the second frame starts under the first');
+
+    // A second frame drawn over the first (Crystal's frames overlapping, or one frame holding the table and a second
+    // frame within the table's reach): it lies under the table all the same.
+    for (const [where, top] of [['beside', '0.1in'], ['inside', '0.1in']] as const) {
+      let piled = converted().replace(/<Tablix Name="[^"]+">[\s\S]*?<\/Tablix>/, (m) => box('FrameA', m.replace(/(<\/TablixRowHierarchy>[\s\S]*?<Top>)[^<]*(<\/Top>)/, '$10in$2')
+        + (where === 'inside' ? box('FrameB', note, top, '0.2in') : ''), '0in', '0.2in'));
+      if (where === 'beside') piled = piled.replace(/(<Rectangle Name="FrameA">[\s\S]*?<\/Rectangle>)/, `$1${box('FrameB', note, top, '0.2in')}`);
+      const root = parseXml(applyConventions(piled, 'Orders', conventions).rdl);
+      const t = descendants(root).find((e) => e.name === 'Tablix')!;
+      const n = descendants(root).find((e) => e.name === 'Textbox' && valueIn(e) === 'Below the table')!;
+      const frameB = descendants(root).find((x) => x.name === 'Rectangle' && childElements(child(x, 'ReportItems') ?? el('x')).includes(n))!;
+      const sameHolder = descendants(root).find((x) => x.name === 'ReportItems' && x.children.includes(t) && x.children.includes(frameB));
+      const tableBottom = inch(t, 'Top') + inch(t, 'Height');
+      if (sameHolder) assert.ok(inch(frameB, 'Top') >= tableBottom - 0.001, `${where}: the frame lies under the table`);
+      else {
+        const frameA = descendants(root).find((x) => x.name === 'Rectangle' && childElements(child(x, 'ReportItems') ?? el('x')).includes(t))!;
+        assert.ok(inch(frameA, 'Height') >= tableBottom - 0.001, `${where}: the first frame holds its table`);
+        assert.ok(inch(frameB, 'Top') >= inch(frameA, 'Top') + inch(frameA, 'Height') - 0.001, `${where}: the second frame starts under the first`);
+      }
+    }
+  });
+
+  it('keeps a table grouped on a constant as tall as its rows once Crystal\'s blank band is replaced', () => {
+    // Crystal prints a table grouped on a constant even with no data, its detail band blank; that band's rows show
+    // only then and are not counted in the table's height. Replaced by the message row, the table stays as tall as
+    // its rows, and the frame under it starts below it.
+    const definition: ReportDefinition = {
+      ...emptyDefinition(),
+      formulas: [
+        { name: 'Group #1 Order', kind: 'internal', text: '', referencedFields: ['@One'] },
+        { name: 'One', index: 1, kind: 'formula', text: '1', referencedFields: [] },
+      ],
+      layout: [
+        { name: 'GroupHeaderArea1', sections: [{ name: 'GH', height: 240, objects: [text('CustomerHeading', 'Customer', 0), text('AmountHeading', 'Amount', 2880)] }] },
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 220, objects: [field('CustomerValue', 'Orders.Customer', 0), field('AmountValue', 'Orders.Amount', 2880)] }] },
+        { name: 'ReportFooterArea1', sections: [{ name: 'RF', height: 240, objects: [text('Note', 'Figures in dollars', 0)] }] },
+      ],
+    } as unknown as ReportDefinition;
+    const plain = convertToRdl(definition, source, { reportName: 'Orders' }).rdl;
+    const r = parseXml(applyConventions(plain, 'Orders', conventions).rdl);
+    const inch = (e: XmlElement, n: string) => parseFloat(textOf(child(e, n)));
+    for (const t of descendants(r).filter((e) => e.name === 'Tablix')) {
+      const rows = descendants(t).filter((e) => e.name === 'TablixRow').reduce((sum, row) => sum + inch(row, 'Height'), 0);
+      assert.ok(Math.abs(inch(t, 'Height') - rows) < 0.002, `${t.attributes.Name} is ${inch(t, 'Height')}in, its rows ${rows}in`);
+    }
+  });
+
+  it('ends a text box where a rule drawn a hair inside its foot starts', () => {
+    // An underline drawn just inside the foot of a figure (as a moving underline is drawn, in pieces): one under the
+    // other, not over each other (Preview would move the rule aside).
+    const tb = '<Textbox Name="Figure"><CanGrow>true</CanGrow><KeepTogether>true</KeepTogether><Paragraphs><Paragraph><TextRuns><TextRun><Value>Underlined figure</Value><Style /></TextRun></TextRuns><Style /></Paragraph></Paragraphs>'
+      + '<Top>0in</Top><Left>0in</Left><Height>0.20556in</Height><Width>3in</Width><Style /></Textbox>';
+    const line = (n: number, left: number) => `<Line Name="Rule${n}"><Top>0.19556in</Top><Left>${left}in</Left><Height>0in</Height><Width>1in</Width><Style><Border><Style>Solid</Style><Width>1pt</Width></Border></Style></Line>`;
+    const box = `<Rectangle Name="Under"><ReportItems>${tb}${line(1, 0)}${line(2, 1.05)}</ReportItems><KeepTogether>true</KeepTogether><Top>3in</Top><Left>0in</Left><Height>0.21in</Height><Width>3in</Width><Style><Border><Style>None</Style></Border></Style></Rectangle>`;
+    const plain = converted().replace(/(<Body>\s*<ReportItems>)/, `$1${box}`);
+    const r = parseXml(applyConventions(plain, 'Orders', conventions).rdl);
+    const inch = (e: XmlElement, n: string) => parseFloat(textOf(child(e, n)) || '0');
+    const figure = descendants(r).find((e) => e.name === 'Textbox' && valueIn(e) === 'Underlined figure')!;
+    const rules = descendants(r).filter((e) => e.name === 'Line' && descendants(r).some((h) => h.name === 'ReportItems' && h.children.includes(e) && h.children.includes(figure)));
+    assert.equal(rules.length, 2, 'the rules stay with the figure');
+    for (const rule of rules) assert.ok(inch(rule, 'Top') >= inch(figure, 'Top') + inch(figure, 'Height') - 0.001, `${rule.attributes.Name} lies under the figure`);
+  });
+
+  it('keeps what lies side by side across the page together in a band, and makes a frame round a title its border', () => {
+    // Crystal keeps a label beside a heading in one section; a frame round a centred title is the title's border.
+    const definition: ReportDefinition = {
+      ...emptyDefinition(),
+      formulas: [{ name: 'Group #1 Order', kind: 'internal', text: '', referencedFields: ['Orders.Region'] }],
+      layout: [
+        { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 1400, objects: [
+          { ...text('Left', 'Prepared for the board', 0), ...at(0, 2880, 600) },
+          { ...text('Right', 'Draft', 6000), ...at(6000, 1440, 240) },
+          { ...text('Title', 'Orders by Region', 1000, { align: 'center' }), position: { x: 1000, y: 800 }, size: { width: 6000, height: 300 } },
+          { kind: 'box', name: 'Frame', position: { x: 2500, y: 760 }, size: { width: 3000, height: 400 }, border: { sides: [1, 1, 1, 1], color: '#000080', width: 40 } },
+        ] }] },
+        { name: 'PageHeaderArea1', sections: [{ name: 'PH', height: 240, objects: [text('CustomerHeading', 'Customer', 0), text('AmountHeading', 'Amount', 2880)] }] },
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [field('CustomerValue', 'Orders.Customer', 0), field('AmountValue', 'Orders.Amount', 2880)] }] },
+      ],
+    } as unknown as ReportDefinition;
+    const out = applyConventions(convertToRdl(definition, source, { reportName: 'Orders' }).rdl, 'Orders', conventions);
+    const r = parseXml(out.rdl);
+    const holderOf = (e: XmlElement) => descendants(r).find((h) => h.name === 'ReportItems' && h.children.includes(e))!;
+    const left = descendants(r).find((e) => e.name === 'Textbox' && valueIn(e) === 'Prepared for the board')!;
+    const right = descendants(r).find((e) => e.name === 'Textbox' && valueIn(e) === 'Draft')!;
+    assert.equal(holderOf(left), holderOf(right), 'side by side: one band');
+    assert.ok(descendants(r).some((e) => e.name === 'Rectangle' && child(e, 'ReportItems') === holderOf(left) && !childElements(holderOf(left)).some((c) => c.name === 'Tablix')), 'the band is a box of its own');
+    // No frame left over the title: the title carries its border.
+    assert.ok(!descendants(r).some((e) => e.name === 'Rectangle' && !child(e, 'ReportItems') && /000080/i.test(JSON.stringify(e))), 'no empty frame');
+    // Nothing left over anything else, nothing past its box.
+    assert.ok(!out.review.some((n) => /drawn over each other|reaches past its box/.test(n.message)), JSON.stringify(out.review.filter((n) => /drawn over|reaches past/.test(n.message))));
   });
 
   it('draws rows tall enough for text at the designer\'s default size, a rule along the text moving with it', () => {

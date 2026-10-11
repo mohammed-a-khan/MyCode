@@ -508,6 +508,23 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       const top = len(nearest, 'Top');
       const height = tTop - top;
       titleText = fixedText(nearest);
+      // A frame drawn round the title (an empty box of the same middle over it): the title cell's border.
+      const nl = len(nearest, 'Left');
+      const nr = nl + len(nearest, 'Width');
+      const frame = siblings.find((e) => e.name === 'Rectangle' && !child(e, 'ReportItems') && drawnAs(e) && !child(e, 'Visibility')
+        && Math.abs(len(e, 'Left') + len(e, 'Width') / 2 - (nl + nr) / 2) < 0.1
+        && len(e, 'Top') < top + len(nearest, 'Height') && len(e, 'Top') + len(e, 'Height') > top);
+      if (frame) {
+        const own = ownStyle(nearest);
+        for (const side of ['Border', ...BORDER_SIDES]) {
+          const border = child(childElements(frame, 'Style')[0], side);
+          if (border) {
+            removeChildren(own, [side]);
+            own.children.unshift(border);
+          }
+        }
+        container!.children = container!.children.filter((c) => c !== frame);
+      }
       container!.children = container!.children.filter((c) => c !== nearest);
       pad(nearest, { left: Math.max(0, len(nearest, 'Left') - tLeft), right: Math.max(0, tLeft + tWidth - len(nearest, 'Left') - len(nearest, 'Width')) });
       unplace(nearest);
@@ -606,7 +623,8 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           dropped += len(all[l.i]!, 'Height');
           rowsEl.children = rowsEl.children.filter((c) => c !== all[l.i]);
         }
-        setChild(tablix, 'Height', inch(Math.max(0.01, len(tablix, 'Height') - dropped)));
+        // (Those rows were never counted in the table's height, which shows the table with data: it is its rows'.)
+        if (dropped) setChild(tablix, 'Height', inch(Math.max(0.01, rowsOf(tablix).reduce((sum, row) => sum + len(row, 'Height'), 0))));
       }
     }
 
@@ -884,7 +902,15 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     for (const holder of descendants(body).filter((e) => e.name === 'ReportItems')) separate(holder, review);
     // (Each subreport's frame stays: when the report runs, a frame growing with its table pushes the next frame down,
     // which items side by side in one box, touching, would not do.)
-    const bottom = fitItems(child(body, 'ReportItems'));
+    fitItems(child(body, 'ReportItems'));
+    // Crystal's sections keep apart what lies side by side across the page (a logo beside a title, a subreport beside
+    // a heading); laid out in one container, a part of them growing would push only what lies under it. Each strip
+    // of items is a band of its own, moving as one, as Crystal's section does.
+    widenCells(body);
+    const holders = descendants(body).filter((e) => e.name === 'ReportItems' && !descendants(body).some((t) => t.name === 'Tablix' && descendants(t).includes(e)));
+    for (const holder of holders.reverse()) band(holder);
+    // (Then nothing is left over anything else at its full size: what lies lower moves below.)
+    const bottom = unpile(child(body, 'ReportItems'));
     if (bottom > len(body, 'Height')) setChild(body, 'Height', inch(bottom));
   }
 
@@ -927,6 +953,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
         el('Style', el('Border', el('Style', 'None'))));
       items.children = [wrapper];
     }
+    checkLayout(report, body, review);
   }
   // Where reports are combined, hiding columns takes the last columns off every table in the box, not only the first
   // (whose columns are the ones chosen): each other table gets as many thin empty columns at its end as could be taken,
@@ -1267,6 +1294,28 @@ function separate(container: XmlElement, review: ReviewNote[]): void {
           break pairs;
         }
         const align = textAlignOf(a);
+        // An empty frame round a centred title (the same middle, the text starting within it): one bordered text box,
+        // the title in the frame's place and with its border.
+        if (align === 'Center' && o.name === 'Rectangle' && !child(o, 'ReportItems') && drawnAs(o) && !child(o, 'Visibility')
+          && Math.abs((A.l + A.r) / 2 - (O.l + O.r) / 2) < 0.1 && A.t >= O.t - 0.05 && A.t < O.b - 0.05) {
+          const frame = childElements(o, 'Style')[0];
+          const own = ownStyle(a);
+          for (const side of ['Border', ...BORDER_SIDES]) {
+            const border = child(frame, side);
+            if (border) {
+              removeChildren(own, [side]);
+              own.children.unshift(border);
+            }
+          }
+          if (child(frame, 'BackgroundColor') && !child(own, 'BackgroundColor')) own.children.push(child(frame, 'BackgroundColor')!);
+          setChild(a, 'Top', inch(O.t));
+          setChild(a, 'Left', inch(O.l));
+          setChild(a, 'Width', inch(O.r - O.l));
+          setChild(a, 'Height', inch(Math.max(O.b, A.b) - O.t));
+          container.children = container.children.filter((c) => c !== o);
+          changed = true;
+          break pairs;
+        }
         // Centred over a box of the same middle (a frame round a title): within the box, when it fits there.
         if (align === 'Center' && o.name === 'Rectangle' && Math.abs((A.l + A.r) / 2 - (O.l + O.r) / 2) < 0.05 && A.l < O.l && A.r > O.r
           && A.t >= O.t - 0.01 && A.b <= O.b + 0.01 && textWidth(a) <= O.r - O.l) {
@@ -1298,7 +1347,13 @@ function separate(container: XmlElement, review: ReviewNote[]): void {
           l = O.r;
           if (align === 'Center') r = Math.max(O.r, A.r - (O.r - A.l));
         } else continue;
-        if (r - l < (sliver ? 0.05 : Math.max(0.05, Math.min(A.r - A.l, textWidth(a))))) continue;
+        // (Centred text too narrow cut at both ends: cut on the neighbour's side only, where it then fits.)
+        const need = sliver ? 0.05 : Math.max(0.05, Math.min(A.r - A.l, textWidth(a)));
+        if (r - l < need && align === 'Center' && !sliver) {
+          if (l > A.l && A.r - l >= need) r = A.r;
+          else if (r < A.r && r - A.l >= need) l = A.l;
+        }
+        if (r - l < need) continue;
         setChild(a, 'Left', inch(l));
         setChild(a, 'Width', inch(r - l));
         changed = true;
@@ -1306,16 +1361,69 @@ function separate(container: XmlElement, review: ReviewNote[]): void {
       }
     }
   }
-  const list = items();
-  for (let i = 0; i < list.length; i++) {
-    for (let j = i + 1; j < list.length; j++) {
-      const a = list[i]!;
-      const o = list[j]!;
-      if (Math.min(len(a, 'Left') + len(a, 'Width'), len(o, 'Left') + len(o, 'Width')) - Math.max(len(a, 'Left'), len(o, 'Left')) > 0.001
-        && Math.min(len(a, 'Top') + len(a, 'Height'), len(o, 'Top') + len(o, 'Height')) - Math.max(len(a, 'Top'), len(o, 'Top')) > 0.001) {
-        review.push({ item: `${a.attributes.Name} / ${o.attributes.Name}`, message: 'drawn over each other, as in Crystal: a PDF or a print keeps them so, a preview, page, document or workbook moves one aside; place them apart' });
+  // A rule drawn along a text box's edge, a hair inside it (an underline at its foot): the text ends where the rule
+  // starts (or starts where it ends), so the two lie one under the other.
+  const rules = childElements(container).filter((e) => e.name === 'Line' && child(e, 'Top') && len(e, 'Height') === 0);
+  for (const tb of items().filter((e) => e.name === 'Textbox')) {
+    for (const rule of rules) {
+      const T = box(tb);
+      const y = len(rule, 'Top');
+      const across = Math.min(T.r, len(rule, 'Left') + len(rule, 'Width')) - Math.max(T.l, len(rule, 'Left')) > 0.001;
+      if (!across || y <= T.t + 0.001 || y >= T.b - 0.001) continue;
+      if (T.b - y < 0.05) setChild(tb, 'Height', inch(y - T.t));
+      else if (y - T.t < 0.05) {
+        setChild(tb, 'Top', inch(y));
+        setChild(tb, 'Height', inch(T.b - y));
       }
     }
+  }
+}
+
+/**
+ * The finished layout, as the designer draws it: items over each other (a preview, page, document or workbook moves
+ * one aside; only a PDF or a print keeps them so), an item reaching past its box, a body wider than the page leaves
+ * room for (SSRS would add a blank page after each page). Each is listed for review.
+ */
+function checkLayout(report: XmlElement, body: XmlElement, review: ReviewNote[]): void {
+  const extent = (e: XmlElement) => ({ l: len(e, 'Left'), t: len(e, 'Top'), r: len(e, 'Left') + len(e, 'Width'), b: reach(e) });
+  for (const holder of descendants(body).filter((e) => e.name === 'ReportItems')) {
+    const list = childElements(holder).filter((e) => ITEMS.has(e.name) && e.name !== 'Line' && child(e, 'Top'));
+    for (let i = 0; i < list.length; i++) {
+      for (let j = i + 1; j < list.length; j++) {
+        const a = extent(list[i]!);
+        const o = extent(list[j]!);
+        if (Math.min(a.r, o.r) - Math.max(a.l, o.l) > 0.001 && Math.min(a.b, o.b) - Math.max(a.t, o.t) > 0.001) {
+          review.push({ item: `${list[i]!.attributes.Name} / ${list[j]!.attributes.Name}`, message: 'drawn over each other, as in Crystal: a PDF or a print keeps them so, a preview, page, document or workbook moves one aside; place them apart' });
+        }
+      }
+    }
+    const box = descendants(body).find((e) => e.name === 'Rectangle' && child(e, 'ReportItems') === holder);
+    if (!box) continue;
+    // (A box in a table cell takes the cell's size: its columns' width, its row's height.)
+    let boxWidth = len(box, 'Width');
+    let boxHeight = Math.max(len(box, 'Height'), contentBottom(box));
+    if (!child(box, 'Width')) {
+      const row = descendants(body).find((e) => e.name === 'TablixRow' && descendants(e).includes(box));
+      const tablix = row && descendants(body).find((e) => e.name === 'Tablix' && rowsOf(e).includes(row));
+      const cells = row ? cellsOf(row) : [];
+      const at = cells.findIndex((c) => descendants(c).includes(box));
+      if (!tablix || at < 0) continue;
+      const span = Number(textOf(child(cells[at]!, 'CellContents/ColSpan')) || 1);
+      boxWidth = widthsOf(tablix).slice(at, at + span).reduce((a, b) => a + b, 0);
+      boxHeight = len(row!, 'Height');
+    }
+    for (const item of childElements(holder).filter((e) => ITEMS.has(e.name) && child(e, 'Top'))) {
+      const e = extent(item);
+      if (e.r > boxWidth + 0.01 || e.b > boxHeight + 0.01) {
+        review.push({ item: `${item.attributes.Name}`, message: `reaches past its box ${box.attributes.Name}; the designer draws it cut off there` });
+      }
+    }
+  }
+  const page = descendants(report).find((e) => e.name === 'Page');
+  const width = Math.max(...descendants(report).filter((e) => e.name === 'ReportSection').map((sec) => len(sec, 'Width')), 0);
+  const room = page ? len(page, 'PageWidth') - len(page, 'LeftMargin') - len(page, 'RightMargin') : 0;
+  if (page && width && len(page, 'PageWidth') && width > room + 0.01) {
+    review.push({ item: 'Page', message: `the body is ${width.toFixed(2)}in wide, the page leaves ${room.toFixed(2)}in between its margins: SSRS adds a blank page after each page; narrow the body or widen the page` });
   }
 }
 
@@ -1353,6 +1461,142 @@ function moveBelow(container: XmlElement, item: XmlElement, oldBottom: number, b
   for (const e of childElements(container).filter((x) => ITEMS.has(x.name) && x !== item)) {
     if (len(e, 'Top') >= oldBottom - 0.001 && len(e, 'Left') < right && len(e, 'Left') + len(e, 'Width') > left) setChild(e, 'Top', inchUp(len(e, 'Top') + by));
   }
+}
+
+/**
+ * Groups a container's items into bands: items whose extents (at their full size) run into each other down the page.
+ * A band of more than one item becomes a box of its own round them, as wide as they are, holding them in place.
+ */
+function band(holder: XmlElement): void {
+  const items = childElements(holder).filter((e) => ITEMS.has(e.name) && child(e, 'Top'))
+    .sort((a, b) => len(a, 'Top') - len(b, 'Top'));
+  const bands: XmlElement[][] = [];
+  let bottom = -Infinity;
+  for (const item of items) {
+    const top = len(item, 'Top');
+    if (bands.length && top < bottom - 0.001) bands[bands.length - 1]!.push(item);
+    else bands.push([item]);
+    bottom = Math.max(bands[bands.length - 1]!.length > 1 ? bottom : -Infinity, reach(item));
+  }
+  // (One band holding everything is the container itself.)
+  if (bands.length < 2) return;
+  for (const members of bands.filter((b) => b.length > 1)) {
+    const top = Math.min(...members.map((e) => len(e, 'Top')));
+    const left = Math.min(...members.map((e) => len(e, 'Left')));
+    const right = Math.max(...members.map((e) => len(e, 'Left') + len(e, 'Width')));
+    const foot = Math.max(...members.map(reach));
+    for (const e of members) {
+      setChild(e, 'Top', inch(len(e, 'Top') - top));
+      setChild(e, 'Left', inch(len(e, 'Left') - left));
+    }
+    const box = el('Rectangle', { Name: 'Band' }, el('ReportItems', ...members),
+      el('Top', inch(top)), el('Left', inch(left)), el('Height', inchUp(foot - top)), el('Width', inch(right - left)),
+      el('Style', el('Border', el('Style', 'None'))));
+    const at = holder.children.indexOf(members[0]!);
+    holder.children = holder.children.filter((c) => !members.includes(c as XmlElement));
+    holder.children.splice(Math.min(at, holder.children.length), 0, box);
+  }
+}
+
+/**
+ * A box in a table cell holding more than the cell's width (a cross-tab Crystal let run past the column it starts
+ * in): the cell's last column widens to hold it, as the designer would otherwise cut it off. Inner tables first.
+ */
+function widenCells(body: XmlElement): void {
+  for (const tablix of descendants(body).filter((e) => e.name === 'Tablix').reverse()) {
+    // (A table is drawn as tall as its rows and as wide as its columns, whatever its size says.)
+    const rowsHeight = rowsOf(tablix).reduce((sum, row) => sum + len(row, 'Height'), 0);
+    if (rowsHeight > 0 && Math.abs(rowsHeight - len(tablix, 'Height')) > 0.001) setChild(tablix, 'Height', inchUp(rowsHeight));
+    const columnsWidth = widthsOf(tablix).reduce((sum, w) => sum + w, 0);
+    if (columnsWidth > 0 && Math.abs(columnsWidth - len(tablix, 'Width')) > 0.001) setChild(tablix, 'Width', inchUp(columnsWidth));
+    const columns = childElements(child(tablix, 'TablixBody/TablixColumns') ?? el('x'), 'TablixColumn');
+    for (const row of rowsOf(tablix)) {
+      let at = 0;
+      for (const cell of cellsOf(row)) {
+        const span = Number(textOf(child(cell, 'CellContents/ColSpan')) || 1);
+        const box = cellItem(cell);
+        const holder = box?.name === 'Rectangle' ? child(box, 'ReportItems') : undefined;
+        if (holder) {
+          const width = (e: XmlElement) => (e.name === 'Tablix' ? widthsOf(e).reduce((a, b) => a + b, 0) : len(e, 'Width'));
+          const need = Math.max(0, ...childElements(holder).filter((e) => ITEMS.has(e.name) && child(e, 'Left')).map((e) => len(e, 'Left') + width(e)));
+          const have = columns.slice(at, at + span).reduce((a, c) => a + len(c, 'Width'), 0);
+          const last = columns[at + span - 1];
+          if (last && need > have + 0.01) {
+            setChild(last, 'Width', inchUp(len(last, 'Width') + need - have));
+            setChild(tablix, 'Width', inchUp(len(tablix, 'Width') + need - have));
+          }
+        }
+        at += span;
+      }
+    }
+  }
+}
+
+/** How far down an item reaches as drawn: a table as tall as its rows, a box as its content. */
+function reach(item: XmlElement): number {
+  const top = len(item, 'Top');
+  if (item.name === 'Tablix') return top + Math.max(len(item, 'Height'), rowsOf(item).reduce((sum, row) => sum + len(row, 'Height'), 0));
+  if (item.name === 'Rectangle') return top + Math.max(len(item, 'Height'), contentBottom(item));
+  return top + len(item, 'Height');
+}
+
+/** Where a box's content ends (inches from its top). */
+function contentBottom(box: XmlElement): number {
+  const holder = child(box, 'ReportItems');
+  return holder ? Math.max(0, ...childElements(holder).filter((e) => ITEMS.has(e.name)).map(reach)) : 0;
+}
+
+/**
+ * A box, table or chart reaching over what lies lower (a frame holding a table that grew, a box drawn half over a
+ * chart): the designer draws them piled up, and SSRS moves the lower one down anyway when the report is previewed or
+ * saved (only a PDF or a print would keep them piled). A box whose content ends above the lower item stops there;
+ * otherwise the lower item, and all below it, moves down below it. Inner boxes first; returns where the lowest ends.
+ */
+function unpile(container: XmlElement | undefined): number {
+  if (!container) return 0;
+  const items = () => childElements(container).filter((e) => ITEMS.has(e.name) && child(e, 'Top'));
+  for (const box of items().filter((e) => e.name === 'Rectangle')) {
+    const inner = unpile(child(box, 'ReportItems'));
+    if (inner > len(box, 'Height') + 0.001) setChild(box, 'Height', inchUp(inner));
+  }
+  // (A table is drawn as tall as its rows and as wide as its columns, whatever its size says.)
+  for (const t of items().filter((e) => e.name === 'Tablix')) {
+    const rows = rowsOf(t).reduce((sum, row) => sum + len(row, 'Height'), 0);
+    const columns = widthsOf(t).reduce((sum, w) => sum + w, 0);
+    if (rows > 0 && Math.abs(rows - len(t, 'Height')) > 0.001) setChild(t, 'Height', inchUp(rows));
+    if (columns > 0 && Math.abs(columns - len(t, 'Width')) > 0.001) setChild(t, 'Width', inchUp(columns));
+  }
+  const BLOCKS = new Set(['Rectangle', 'Tablix', 'Chart', 'Subreport', 'GaugePanel', 'Map', 'CustomReportItem']);
+  for (let guard = 0; guard < 1000; guard++) {
+    const list = items().sort((x, y) => len(x, 'Top') - len(y, 'Top'));
+    let fixed = false;
+    for (const a of list) {
+      if (!BLOCKS.has(a.name)) continue;
+      const aTop = len(a, 'Top');
+      const aBottom = reach(a);
+      const aLeft = len(a, 'Left');
+      const aRight = aLeft + len(a, 'Width');
+      // (A frame or band whose own content ends above a text drawn over it is how Crystal draws a label on a band:
+      // it stays. Its content, or a table or chart, reaching over what lies lower is not.)
+      const contentEnd = a.name === 'Rectangle' ? aTop + contentBottom(a) : aBottom;
+      const o = list.find((e) => e !== a && e.name !== 'Line' && len(e, 'Top') > aTop + 0.001 && len(e, 'Top') < aBottom - 0.001
+        && Math.min(aRight, len(e, 'Left') + len(e, 'Width')) - Math.max(aLeft, len(e, 'Left')) > 0.001
+        && (BLOCKS.has(e.name) || len(e, 'Top') < contentEnd - 0.001));
+      if (!o) continue;
+      const oTop = len(o, 'Top');
+      if (contentEnd <= oTop + 0.001) {
+        // (A frame whose content ends above a box, table or chart: the frame stops there.)
+        setChild(a, 'Height', inch(oTop - aTop));
+      } else {
+        const by = aBottom - oTop;
+        for (const e of list) if (e !== a && len(e, 'Top') >= oTop - 0.001) setChild(e, 'Top', inchUp(len(e, 'Top') + by));
+      }
+      fixed = true;
+      break;
+    }
+    if (!fixed) break;
+  }
+  return Math.max(0, ...items().map(reach));
 }
 
 /** The size (pt) and line spacing the designer draws text at where its size is worked out when the report runs. */

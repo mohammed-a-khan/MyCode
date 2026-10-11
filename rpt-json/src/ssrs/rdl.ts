@@ -95,6 +95,8 @@ interface InlineResult {
   shared: Map<string, string>;
   /** Translations of the formulas in it that read shared variables, for when no value is known. */
   sharedFallbacks: Map<string, string>;
+  /** T-SQL functions its query calls (formulas worked out in the query). */
+  sqlFunctions: Map<string, { name: string; text: string }>;
 }
 
 export interface ParameterEntry {
@@ -722,7 +724,16 @@ class RdlBuilder {
 
   /** Whether the report's query is built here from its tables (so formulas can be columns of it). */
   private get queryFromTables(): boolean {
-    return !!this.options.formulasInQuery && !this.options.inline && this.source.tables.length > 0 && this.source.tables.every((t) => t.kind === 'table');
+    return !!this.options.formulasInQuery && this.source.tables.length > 0 && (this.source.tables.every((t) => t.kind === 'table') || this.procedureRows !== undefined);
+  }
+
+  /**
+   * In a team template, the one stored procedure a report reads: its rows are taken into a table of the query
+   * (INSERT ... EXEC), so that formulas, the record selection and the like are worked out over them in SQL.
+   */
+  private get procedureRows(): TableInfo | undefined {
+    const tables = this.source.tables;
+    return this.options.formulasInQuery && tables.length === 1 && tables[0]!.kind === 'storedProcedure' && tables[0]!.fields.length > 0 ? tables[0] : undefined;
   }
 
   /** A formula as SQL over the report's tables, where it gives exactly the same per record (see formulaToSql). */
@@ -1573,6 +1584,7 @@ class RdlBuilder {
       images: info.images,
       parameterValues: this.options.parameterValues,
       chartAxisFormat: this.options.chartAxisFormat,
+      formulasInQuery: this.options.formulasInQuery,
       inline: { dataset, itemNames: this.itemNames, imageNames: this.imageNames, codeNames: this.codeNames },
     });
     const result = mode === 'page' ? child.buildInline() : child.buildEmbedded();
@@ -1608,6 +1620,8 @@ class RdlBuilder {
     if (info.links.length) this.note(item, 'is linked to the main report: its link parameters take the first row\'s values of the linked fields');
     if (obj.subreport?.onDemand && mode === 'body') this.note(item, 'was an on-demand subreport in Crystal; it is now always shown');
     for (const code of result.codeFunctions) if (!this.codeFunctions.includes(code)) this.codeFunctions.push(code);
+    // (The functions its query calls, kept apart from the main report's: each named after its own report.)
+    for (const [key, fn] of result.sqlFunctions) this.sqlFunctions.set(`${dataset}|${key}`, fn);
     // Crystal shared variables are shared with subreports: same-named class members are the same variable.
     Object.assign(this.codeMembers, result.codeMembers);
     this.embeddedImages.push(...result.embeddedImages);
@@ -3100,9 +3114,33 @@ class RdlBuilder {
       if (parameters.length === 0 && this.definition.parameters.length > 0) {
         this.note('Dataset', `calls stored procedure ${name} without parameters, while the report has parameters; check the procedure's signature`);
       }
+      const called = procedure.schema ? `${this.quote(procedure.schema)}.${this.quote(name)}` : this.quote(name);
+      // In a team template, with formulas (or the record selection) worked out in SQL: the procedure's rows taken
+      // into a table, and those worked out over them.
+      const where = this.procedureRows ? this.whereClause() : undefined;
+      if (this.procedureRows && (this.queryFormulas.size > 0 || where)) {
+        const rows = this.procedureRows;
+        const own = this.definition.parameters.filter((p) => p.name.startsWith('@')).map((p) => `${p.name} = ${p.name}`);
+        const select = [
+          `  ${this.quote(rows.alias)}.*`,
+          ...[...this.queryFormulas.values()].map((f) => `  -- ${f.comment ?? `{@${f.formula}}: ${f.text.replace(/\s+/g, ' ').trim().slice(0, 300)}`}\n  ${layOutSql(f.sql, '    ')} AS ${this.quote(f.name)}`),
+        ].join(',\n');
+        const text = [
+          `-- The rows of ${called}, as the Crystal report read them (its columns in its order: check them against it).`,
+          `CREATE TABLE #rows (\n${rows.fields.map((f) => `  ${this.quote(f.name)} ${sqlColumnType(f)}`).join(',\n')}\n);`,
+          `INSERT INTO #rows\nEXEC ${called}${own.length ? ` ${own.join(', ')}` : ''};`,
+          `SELECT\n${select}\nFROM #rows AS ${this.quote(rows.alias)}${where ? `\nWHERE ${where.sql}` : ''}`,
+        ].join('\n');
+        const known = new Set(parameters.map((q) => q.attributes.Name?.toLowerCase()));
+        return {
+          text,
+          parameters: [...parameters, ...(where?.parameters ?? []).filter((q) => !known.has(q.attributes.Name?.toLowerCase()))],
+          fieldsFromAll: true,
+        };
+      }
       return {
         commandType: 'StoredProcedure',
-        text: procedure.schema ? `${this.quote(procedure.schema)}.${this.quote(name)}` : this.quote(name),
+        text: called,
         parameters,
         fieldsFromAll: true,
       };
@@ -3199,7 +3237,7 @@ class RdlBuilder {
   /** The record selection formula as a SQL WHERE clause, when it translates exactly (direct table access only). */
   private whereClause(): { sql: string; parameters: XmlElement[] } | undefined {
     const { record } = this.definition.selectionFormulas;
-    if (!record || this.source.tables.some((t) => t.kind !== 'table')) return undefined;
+    if (!record || (this.source.tables.some((t) => t.kind !== 'table') && !this.procedureRows)) return undefined;
     const used = new Set<string>();
     const usedRanges = new Set<string>();
     const sql = translateToSql(record, {
@@ -3642,6 +3680,7 @@ class RdlBuilder {
       codeMembers: this.codeMembers,
       embeddedImages: this.embeddedImages,
       review: this.review,
+      sqlFunctions: this.sqlFunctions,
     };
   }
 
@@ -4034,6 +4073,7 @@ class RdlBuilder {
       codeMembers: this.codeMembers,
       embeddedImages: this.embeddedImages,
       review: this.review,
+      sqlFunctions: this.sqlFunctions,
     };
   }
 
@@ -5201,6 +5241,23 @@ const POINT_COLOR_CODE = [
   '  Return CStr(crPointColors(key))',
   'End Function',
 ].join('\r\n');
+
+/** A column of a table holding a stored procedure's rows: the SQL type of its Crystal field. */
+function sqlColumnType(field: { type: string; length?: number }): string {
+  switch (field.type) {
+    case 'integer': return 'int';
+    case 'number': return 'float';
+    case 'currency': return 'decimal(38, 10)';
+    case 'boolean': return 'bit';
+    case 'date': return 'date';
+    case 'dateTime': return 'datetime2';
+    case 'time': return 'time';
+    case 'blob': return 'varbinary(max)';
+    case 'memo': return 'nvarchar(max)';
+    // (Wide enough whatever the procedure's own width.)
+    default: return field.length && field.length > 4000 ? 'nvarchar(max)' : 'nvarchar(4000)';
+  }
+}
 
 export function chartStyle(family: number | undefined, graphType: number | undefined): ChartStyle {
   if (family === undefined) return { type: 'Column', note: 'the Crystal chart type was not found; converted to a column chart' };

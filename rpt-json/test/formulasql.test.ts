@@ -175,3 +175,34 @@ describe('a team template without custom code', () => {
     assert.match((await convert(definition, false)).rdl, /Code\.F_Shade\(RowNumber\(Nothing\)\)/);
   });
 });
+
+describe('a team template over a stored procedure', () => {
+  const A = 'Orders_get;1';
+  const source = { connections: [], links: [], tables: [{ alias: A, name: A, schema: 'dbo', kind: 'storedProcedure', fields: [
+    { name: 'Name', type: 'string', length: 50 }, { name: 'Amount', type: 'currency' }, { name: 'Shipped', type: 'dateTime' }] }] } as never;
+  const definition = (record?: string, formulas = true) => ({
+    saveInfo: {}, selectionFormulas: record ? { record } : {}, sqlExpressions: [], groups: [], sortFields: [], summarizedFields: [],
+    parameters: [{ name: '@region', valueType: 'string', prompt: 'Region' }],
+    formulas: formulas ? [{ name: 'Size', index: 1, kind: 'formula', text: `if {${A}.Amount} > 100 then "big" else "small"`, referencedFields: [] }] : [],
+    layout: [{ name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [
+      { kind: 'field', name: 'N', field: `${A}.Name`, position: { x: 0, y: 0 }, size: { width: 1440, height: 240 } },
+      ...(formulas ? [{ kind: 'field', name: 'S', field: '@Size', position: { x: 1440, y: 0 }, size: { width: 1440, height: 240 } }] : [])] }] }],
+  } as never);
+  const convert = async (d: never, formulasInQuery = true) => (await import('../src/ssrs/rdl.ts')).convertToRdl(d, source, { reportName: 'Sp', formulasInQuery });
+
+  it('takes the procedure\'s rows into a table and works its formulas and selection out over them', async () => {
+    const { rdl } = await convert(definition(`{${A}.Name} <> "Skip"`));
+    const text = rdl.match(/<CommandText>([\s\S]*?)<\/CommandText>/)![1]!;
+    assert.match(text, /CREATE TABLE #rows \(\s*\[Name\] nvarchar\(4000\),\s*\[Amount\] decimal\(38, 10\),\s*\[Shipped\] datetime2\s*\);/);
+    assert.match(text, /INSERT INTO #rows\s*EXEC \[dbo\]\.\[Orders_get\] @region = @region;/);
+    assert.match(text, /\[Orders_get;1\]\.\*,[\s\S]*N'big'[\s\S]*AS \[F_Size\]\s*FROM #rows AS \[Orders_get;1\]\s*WHERE \[Orders_get;1\]\.\[Name\] &lt;&gt; 'Skip'/);
+    assert.ok(!rdl.includes('<Filters>') && !rdl.includes('<Code>'), 'no dataset filter, no custom code');
+    assert.match(rdl, /<QueryParameter Name="@region">/);
+  });
+
+  it('calls the procedure itself where there is nothing to work out, and outside a template', async () => {
+    assert.match((await convert(definition(undefined, false))).rdl, /<CommandType>StoredProcedure<\/CommandType>\s*<CommandText>\[dbo\]\.\[Orders_get\]<\/CommandText>/);
+    assert.match((await convert(definition())).rdl, /#rows/);
+    assert.match((await convert(definition(), false)).rdl, /<CommandType>StoredProcedure<\/CommandType>\s*<CommandText>\[dbo\]\.\[Orders_get\]<\/CommandText>/);
+  });
+});
