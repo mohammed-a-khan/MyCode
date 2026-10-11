@@ -210,6 +210,14 @@ In name patterns `{S}` is the report's name, `{T}` its table's, `{col}` the colu
 unique by adding `_2`, `_3`, ... The review notes list what was left out (page header and footer) and each parameter
 mapped from Crystal's.
 
+A template's layout is drawn the way SSRS lays a report out, so the designer shows it as it prints: what Crystal
+places side by side across the page (a logo beside a title, a subreport beside a heading) is a band of its own, moving
+as one, as Crystal's section does; bands, tables and charts lie one under another, nothing over anything else (SSRS
+moves overlapping items aside in a preview, a document or a workbook); each table is as tall as its rows and as wide
+as its columns, and a column widens to hold what its cell holds; a frame round a title becomes the title's border; a
+rule drawn along a text lies under it. What is still drawn over something else, reaches past its box or makes the
+body wider than the page is listed in the review notes.
+
 Templates are made to be combined into one report, a box and its datasets at a time:
 
 - each column has one heading of its own (a heading Crystal set across columns stays over the first of them), and
@@ -218,6 +226,12 @@ Templates are made to be combined into one report, a box and its datasets at a t
   report using custom code gets it beside it (`.code.vb`), to be added once to the combined report's code;
 - a table after the first in a report gets as many thin empty columns at its end as the first has columns less one,
   so that columns taken off the end of every table when the first one's are hidden are those.
+
+Formulas are worked out in SQL whether the report reads tables or a stored procedure. Over a stored procedure, the
+query takes the procedure's rows into a table (`CREATE TABLE #rows (...)` with the columns Crystal knows, in its
+order, then `INSERT INTO #rows EXEC ...` with the report's own parameters) and selects them with the formulas and the
+record selection worked out over them; where there is nothing to work out, the template calls the procedure itself.
+Subreports placed in the report are worked out the same way, each in a procedure of its own.
 
 Formulas worked out per record become columns of the report's query, in T-SQL giving exactly the same (text compared
 with case as Crystal does, decimals in division, nothing where a field it reads is null, the empty value of an `if`
