@@ -457,7 +457,9 @@ class RdlBuilder {
   private readonly dataset: string;
   private readonly datasetNames = new NameSet();
   /** Datasets, data sources and parameters of subreports placed inline. */
-  private readonly extraDataSets: XmlElement[] = [];
+  private readonly extraDataSets: (XmlElement | (() => XmlElement))[] = [];
+  /** Subreports placed inline, by their dataset: for formulas of this report worked out in their queries. */
+  private readonly inlineChildren = new Map<string, RdlBuilder>();
   private readonly extraDataSources: { name: string; connectionString: string }[] = [];
   private readonly extraParameters: ParameterEntry[] = [];
   /** Subreports (by "Subdocument N" number) placed inline, and those kept as subreport items. */
@@ -683,6 +685,24 @@ class RdlBuilder {
       this.formulaResults.set(key, 'Nothing');
       return 'Nothing';
     }
+    // A formula setting a shared variable to a value (for a subreport, or for the main report to read): that value,
+    // a column of the query.
+    if (this.queryFromTables && sharedAssignment(formula.text)) {
+      const sql = this.formulaSql(formula.name);
+      if (sql) {
+        const fieldName = this.fieldNames.make(`F_${formula.name}`);
+        this.queryFormulas.set(key, { name: fieldName, sql: sql.sql, type: sql.type, text: formula.text, formula: formula.name });
+        this.formulaResults.set(key, `Fields!${fieldName}.Value`);
+        return `Fields!${fieldName}.Value`;
+      }
+    }
+    // Worked out from the values a subreport placed in the report shares (a footnote it reads): a column of that
+    // subreport's query, read from there.
+    const borrowed = this.options.formulasInQuery ? this.subreportColumn(formula) : undefined;
+    if (borrowed) {
+      this.formulaResults.set(key, borrowed);
+      return borrowed;
+    }
     // Worked out as the report prints (a running total or count kept in a variable): a column of the query, where
     // SQL gives the same over the report's groups.
     if (this.queryFromTables && printRole(formula.text)) {
@@ -751,8 +771,10 @@ class RdlBuilder {
     this.formulaSqlCache.set(key, null); // cycle guard
     const outer = this.sqlFormulaName;
     this.sqlFormulaName = formula.name;
-    const at = printRole(formula.text) ? this.placementOf(this.placements().formulas.get(key) ?? []) : undefined;
-    const out = this.sqlOf(formula.text, at);
+    // (A formula setting a shared variable to a value is that value.)
+    const assignment = sharedAssignment(formula.text);
+    const at = !assignment && printRole(formula.text) ? this.placementOf(this.placements().formulas.get(key) ?? []) : undefined;
+    const out = this.sqlOf(assignment ? assignment.value : formula.text, at);
     this.sqlFormulaName = outer;
     if ('reason' in out) {
       this.formulasNotInQuery.push({ formula: formula.name, reason: out.reason });
@@ -772,7 +794,7 @@ class RdlBuilder {
       columnType: (table, field) => this.findField(table, field)?.type,
       formula: (other) => this.formulaSql(other),
       customFunction: (fn) => this.definition.formulas.find((f) => f.name.toLowerCase() === fn.toLowerCase() && isCustomFunction(f.text))?.text,
-      addFunction: (fnKey, text) => this.addSqlFunction(fnKey, fnKey.startsWith('custom:') ? fnKey.slice(7) : this.sqlFormulaName, text),
+      addFunction: (fnKey, text) => this.addSqlFunction(fnKey, fnKey.startsWith('custom:') ? fnKey.slice(7) : fnKey === 'helper:splitpart' ? 'SplitPart' : this.sqlFormulaName, text),
       variable: at ? (name) => this.printValue(name.toLowerCase(), at) : undefined,
     });
   }
@@ -845,6 +867,89 @@ class RdlBuilder {
       name, sql: `DENSE_RANK() OVER (ORDER BY ${sql}${descending ? ' DESC' : ''})`, type: 'number', text: '', formula: chartName,
       comment: `chart ${chartName}: each bar's place in the chart's order (its colour the palette's colour there)`,
     });
+    return name;
+  }
+
+  /**
+   * A formula of this report reading only values a subreport placed in it shares (its shared variables, set from its
+   * own data): worked out in that subreport's query, as a column of it; the expression reading it there, or undefined.
+   */
+  private subreportColumn(formula: { name: string; text: string }): string | undefined {
+    if (!this.inlineChildren.size) return undefined;
+    // The shared variables it reads, itself or through the formulas it uses.
+    const variables = new Set<string>();
+    const seen = new Set<string>();
+    const visit = (text: string) => {
+      const read = sharedRead(text);
+      if (read) variables.add(read);
+      else for (const m of text.matchAll(/shared\s+\w+var\s+(\w+)/gi)) variables.add(m[1]!.toLowerCase());
+      for (const m of text.matchAll(/\{@([^}]+)\}/g)) {
+        const other = this.definition.formulas.find((f) => f.name.toLowerCase() === m[1]!.toLowerCase());
+        if (other && !seen.has(other.name.toLowerCase()) && !isCustomFunction(other.text)) {
+          seen.add(other.name.toLowerCase());
+          visit(other.text);
+        }
+      }
+    };
+    visit(formula.text);
+    if (!variables.size || sharedAssignment(formula.text)) return undefined;
+    // (Database fields of this report's own cannot be read there.)
+    if (/\{(?![@?#])[^}]+\.[^}]+\}/.test(formula.text)) return undefined;
+    for (const [dataset, child] of this.inlineChildren) {
+      const values = new Map<string, { sql: string; type: SqlType }>();
+      for (const variable of variables) {
+        const value = child.sharedSql(variable);
+        if (value) values.set(variable, value);
+      }
+      if (values.size !== variables.size) continue;
+      const own = new Map<string, { sql: string; type: SqlType } | undefined>();
+      const translate = (text: string): ReturnType<typeof formulaToSql> => {
+        const read = sharedRead(text);
+        if (read) return values.get(read) ?? { reason: 'it reads a value not shared here' };
+        return formulaToSql(text, {
+          column: () => undefined,
+          columnType: () => undefined,
+          formula: (name) => {
+            const k = name.toLowerCase();
+            if (!own.has(k)) {
+              own.set(k, undefined);
+              const other = this.definition.formulas.find((f) => f.name.toLowerCase() === k && !isCustomFunction(f.text));
+              const out = other ? translate(other.text) : undefined;
+              own.set(k, out && 'sql' in out ? out : undefined);
+            }
+            return own.get(k);
+          },
+          customFunction: (fn) => this.definition.formulas.find((f) => f.name.toLowerCase() === fn.toLowerCase() && isCustomFunction(f.text))?.text,
+          addFunction: (fnKey, text) => this.addSqlFunction(fnKey, fnKey.startsWith('custom:') ? fnKey.slice(7) : fnKey === 'helper:splitpart' ? 'SplitPart' : formula.name, text),
+        });
+      };
+      const out = translate(formula.text);
+      if (!('sql' in out)) continue;
+      const column = child.addColumn(`F_${formula.name}`, out.sql, out.type, `{@${formula.name}} of the report this subreport is placed in: ${formula.text.replace(/\s+/g, ' ').trim().slice(0, 200)}`);
+      if (!column) continue;
+      return `First(Fields!${column}.Value, ${vbString(dataset)})`;
+    }
+    return undefined;
+  }
+
+  /** A shared variable this report sets from its own data, as SQL over its query's rows (template only). */
+  sharedSql(variable: string): { sql: string; type: SqlType } | undefined {
+    if (!this.queryFromTables) return undefined;
+    for (const f of this.definition.formulas) {
+      const assignment = sharedAssignment(f.text);
+      if (assignment?.name !== variable.toLowerCase()) continue;
+      const out = this.sqlOf(assignment.value, undefined);
+      if ('sql' in out) return out;
+    }
+    return undefined;
+  }
+
+  /** A column added to this report's query (its dataset written again); its name, or undefined where it has none. */
+  addColumn(base: string, sql: string, type: SqlType, comment: string): string | undefined {
+    if (!this.queryFromTables) return undefined;
+    const name = this.fieldNames.make(base);
+    this.queryFormulas.set(`borrowed:${name}`, { name, sql, type, text: '', formula: base, comment });
+    this.datasetParts = undefined;
     return name;
   }
 
@@ -1603,7 +1708,9 @@ class RdlBuilder {
       dataSource = existing?.name ?? `DataSource${this.extraDataSources.length + 2}`;
       if (!existing) this.extraDataSources.push({ name: dataSource, connectionString: result.connectionString });
     }
-    this.extraDataSets.push(result.dataset(dataSource));
+    // (Its dataset written last: formulas of this report may yet be worked out in its query.)
+    this.extraDataSets.push(() => result.dataset(dataSource));
+    this.inlineChildren.set(dataset, child);
     for (const [variable, fallback] of result.sharedFallbacks) if (!this.sharedFallbacks.has(variable)) this.sharedFallbacks.set(variable, fallback);
     for (const [variable, value] of result.shared) {
       const known = this.sharedValues.get(variable) ?? [];
@@ -4344,7 +4451,7 @@ class RdlBuilder {
           el('rd:SecurityType', 'Integrated'),
           el('ConnectionProperties', el('DataProvider', 'SQL'), el('ConnectString', d.connectionString), el('IntegratedSecurity', 'true')),
           el('rd:DataSourceID', reportId(`${this.options.reportName}/${d.name}`))))),
-      el('DataSets', this.datasetElement(this.dataSourceName), ...this.extraDataSets),
+      el('DataSets', this.datasetElement(this.dataSourceName), ...this.extraDataSets.map((d) => (typeof d === 'function' ? d() : d))),
       el('ReportSections', el('ReportSection',
         el('Body', el('ReportItems', ...holdPlaces(clearRoundingOverlaps(fitInside(joinBoxes(clearLineOverlaps(bodyItems)))), this.itemNames, this.framed)), el('Height', inches(top > 0 ? top : DEFAULT_HEIGHT)), el('Style')),
         el('Width', inches(Math.max(width, 1))),

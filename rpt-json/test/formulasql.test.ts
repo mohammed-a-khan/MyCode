@@ -65,7 +65,7 @@ describe('formulas as SQL columns', () => {
     assert.equal(sql('CCur({T.Amount} / 3)').sql, 'CAST((CAST([T].[Amount] AS float) / 3) AS money)');
     assert.equal(sql('tag({T.Region}, {T.Name})').sql,
       "CASE WHEN [T].[Region] IS NULL OR [T].[Name] IS NULL THEN NULL ELSE CASE WHEN [T].[Region] COLLATE Latin1_General_CS_AS = N'DE' THEN ((N'[' + [T].[Name]) + N']') ELSE [T].[Name] END END");
-    assert.match(refused('count({T.Qty})'), /statements one after another/);
+    assert.match(refused('count({T.Qty})'), /summary/);
   });
 
   it('leaves in the report what SQL would not give exactly the same', () => {
@@ -204,5 +204,54 @@ describe('a team template over a stored procedure', () => {
     assert.match((await convert(definition(undefined, false))).rdl, /<CommandType>StoredProcedure<\/CommandType>\s*<CommandText>\[dbo\]\.\[Orders_get\]<\/CommandText>/);
     assert.match((await convert(definition())).rdl, /#rows/);
     assert.match((await convert(definition(), false)).rdl, /<CommandType>StoredProcedure<\/CommandType>\s*<CommandText>\[dbo\]\.\[Orders_get\]<\/CommandText>/);
+  });
+});
+
+describe('a team template whose values come from a subreport', () => {
+  const empty = { saveInfo: {}, selectionFormulas: {}, sqlExpressions: [], parameters: [], groups: [], sortFields: [], summarizedFields: [] };
+  const lines = 'Function (StringVar s)\nLocal NumberVar m := Count(Split(s, "<CR>"));\nLocal NumberVar i := 1;\nLocal StringVar j;\nLocal StringVar k;\n'
+    + 'While i <= m Do\n(\n  j := Split(s, "<CR>")[i];\n  i := i + 1;\n  k := k + j + chr(10)\n);\nk';
+  const header = { ...empty,
+    formulas: [{ name: 'NoteSet', index: 0, kind: 'formula', text: 'WhilePrintingRecords; shared StringVar note := {Head_get;1.Note};', referencedFields: [] }],
+    layout: [{ name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 300, objects: [
+      { kind: 'field', name: 'n1', field: '@NoteSet', position: { x: 0, y: 0 }, size: { width: 2000, height: 230 } }] }] },
+    { name: 'DetailArea1', sections: [{ name: 'D', height: 220, objects: [] }] }] };
+  const main = { ...empty,
+    formulas: [
+      { name: 'NoteRead', index: 2, kind: 'formula', text: 'WhilePrintingRecords; shared StringVar note; note', referencedFields: [] },
+      { name: 'Lines', index: 3, kind: 'formula', text: lines, referencedFields: [] },
+      { name: 'Footer', index: 4, kind: 'formula', text: 'if InStr({@NoteRead}, "<CR>") > 0 then Lines({@NoteRead}) else {@NoteRead}', referencedFields: [] }],
+    layout: [
+      { name: 'PageHeaderArea1', sections: [{ name: 'PH', height: 308, objects: [{ kind: 'subreport', name: 'Subreport1', subreport: { index: 1, onDemand: false }, position: { x: 0, y: 0 }, size: { width: 9000, height: 308 } }] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [{ kind: 'field', name: 'name1', field: 'T.Name', position: { x: 0, y: 0 }, size: { width: 3000, height: 240 } }] }] },
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF', height: 400, objects: [{ kind: 'field', name: 'foot', field: '@Footer', position: { x: 0, y: 0 }, size: { width: 9000, height: 300 } }] }] }] };
+  const source = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', schema: 'dbo', fields: [{ name: 'Name', type: 'string' }] }] };
+  const headSource = { connections: [], links: [], tables: [{ alias: 'Head_get;1', name: 'Head_get;1', kind: 'storedProcedure', schema: 'dbo', fields: [{ name: 'Note', type: 'string' }] }] };
+
+  it('works a shared value and the footnote made of it out in the subreport\'s query, without custom code', async () => {
+    const { convertToRdl } = await import('../src/ssrs/rdl.ts');
+    const r = convertToRdl(main as never, source as never, { reportName: 'Main', formulasInQuery: true, rulesAsText: true,
+      subreports: new Map([[1, { name: 'Sub1', links: [], definition: header, dataSource: headSource }]]) as never });
+    assert.ok(!r.rdl.includes('<Code>') && !/Code\.\w+/.test(r.rdl), 'no custom code');
+    const sub = [...r.rdl.matchAll(/<CommandText>([\s\S]*?)<\/CommandText>/g)].map((m) => m[1]!).find((t) => t.includes('#rows'))!;
+    assert.match(sub, /AS \[F_NoteSet\]/);
+    assert.match(sub, /CHARINDEX\(N'&lt;CR&gt;'[\s\S]*dbo\.\[Main_lines\][\s\S]*AS \[F_Footer\]/);
+    assert.match(r.rdl, /<Value>=First\(Fields!F_Footer\.Value, "DataSet_Sub1"\)<\/Value>/);
+    const fns = (r.sqlFunctions ?? []).join('\n');
+    assert.match(fns, /CREATE FUNCTION dbo\.\[Main_SplitPart\]\(@s nvarchar\(max\), @d nvarchar\(4000\), @n int\)/);
+    assert.match(fns, /NCHAR\(10\)/);
+  });
+
+  it('counts and takes the pieces of a split text in SQL', () => {
+    const fn = (name: string) => `dbo.[${name}]`;
+    const c = { ...ctx, addFunction: (key: string, body: (n: string) => string[]) => { body(fn(key)); return fn(key); } };
+    const count = formulaToSql('Count(Split({T.Name}, ","))', c as never);
+    assert.ok('sql' in count);
+    assert.match(count.sql, /^CASE WHEN \[T\]\.\[Name\] IS NULL THEN NULL ELSE .*REPLACE\(\[T\]\.\[Name\] COLLATE Latin1_General_CS_AS, N',', N''\).* \+ 1 END$/);
+    const part = formulaToSql('Split({T.Name}, ",")[2]', c as never);
+    assert.ok('sql' in part);
+    assert.match(part.sql, /\(\[T\]\.\[Name\], N',', 2\)/);
+    const ch = formulaToSql('{T.Name} + Chr(10)', c as never);
+    assert.ok('sql' in ch && ch.sql.includes('NCHAR(10)'));
   });
 });

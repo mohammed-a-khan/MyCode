@@ -630,6 +630,22 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       }
     }
 
+    // A sliver of a row with nothing in it (a section Crystal kept a few points high, empty): the designer can hardly
+    // find or select it, and it prints only that space, so it goes.
+    {
+      const all = rowsOf(tablix);
+      const rowsEl = child(tablix, 'TablixBody/TablixRows')!;
+      rowLeaves(tablix).forEach((l, i) => {
+        const row = all[i];
+        if (!row || len(row, 'Height') >= 0.1 || child(l.member, 'Group') || !emptyRow(row)) return;
+        const holder = descendants(child(tablix, 'TablixRowHierarchy')!).find((e) => e.name === 'TablixMembers' && e.children.includes(l.member));
+        if (!holder || childElements(holder, 'TablixMember').length < 2 || rowsOf(tablix).length < 2) return;
+        holder.children = holder.children.filter((c) => c !== l.member);
+        rowsEl.children = rowsEl.children.filter((c) => c !== row);
+        setChild(tablix, 'Height', inch(Math.max(0.01, rowsOf(tablix).reduce((sum, r) => sum + len(r, 'Height'), 0))));
+      });
+    }
+
     // A row shown only when there is no data, under the headings: where the table has headings of its own (a table
     // of lines with none, as a statement under another, prints nothing then, as in Crystal).
     const leaves = rowLeaves(tablix);
@@ -959,6 +975,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
         el('Style', el('Border', el('Style', 'None'))));
       items.children = [wrapper];
     }
+    plainLines(report);
     checkLayout(report, body, review);
   }
   // Where reports are combined, hiding columns takes the last columns off every table in the box, not only the first
@@ -1451,6 +1468,56 @@ function separate(container: XmlElement, review: ReviewNote[]): void {
  * one aside; only a PDF or a print keeps them so), an item reaching past its box, a body wider than the page leaves
  * room for (SSRS would add a blank page after each page). Each is listed for review.
  */
+/** A row whose cells show nothing: no text, picture, line or rule. */
+function emptyRow(row: XmlElement): boolean {
+  return cellsOf(row).every((cell) => descendants(cell).every((e) => {
+    if (e.name === 'Value') return !textOf(e).trim();
+    if (/^(Line|Image|Chart|Subreport|Tablix|Map|GaugePanel)$/.test(e.name)) return false;
+    if (/^(Top|Bottom|Left|Right)?Border$/.test(e.name)) return /^None$/i.test(textOf(child(e, 'Style')) || 'None');
+    if (e.name === 'BackgroundColor') return !textOf(e).trim() || /^(Transparent|No Color)$/i.test(textOf(e));
+    return true;
+  }));
+}
+
+/**
+ * Text of fixed lines ("Security" & vbCrLf & "Type") as one paragraph per line: the designer shows and edits it as
+ * text, where an expression shows as «Expr».
+ */
+function plainLines(report: XmlElement): void {
+  for (const paragraphs of descendants(report).filter((e) => e.name === 'Paragraphs')) {
+    const list = childElements(paragraphs, 'Paragraph');
+    if (list.length !== 1) continue;
+    const runs = childElements(child(list[0]!, 'TextRuns') ?? list[0]!, 'TextRun');
+    if (runs.length !== 1) continue;
+    const lines = literalLines(textOf(child(runs[0]!, 'Value')));
+    if (!lines || lines.some((l) => l.startsWith('='))) continue;
+    paragraphs.children = lines.map((line) => {
+      const p = structuredClone(list[0]!);
+      const value = child(child(p, 'TextRuns/TextRun')!, 'Value')!;
+      value.children = [line];
+      return p;
+    });
+  }
+}
+
+/** The lines of an expression made only of text and line breaks; undefined for any other. */
+function literalLines(value: string): string[] | undefined {
+  if (!value.startsWith('=')) return undefined;
+  const lines = [''];
+  let rest = value.slice(1).trim();
+  let expectPart = true;
+  while (rest) {
+    let m: RegExpExecArray | null;
+    if (expectPart && (m = /^"((?:[^"]|"")*)"\s*/.exec(rest))) lines[lines.length - 1] += m[1]!.replace(/""/g, '"');
+    else if (expectPart && (m = /^(?:vbCrLf|vbNewLine|vbLf|Environment\.NewLine|ChrW?\(10\))\s*/i.exec(rest))) lines.push('');
+    else if (!expectPart && (m = /^&\s*/.exec(rest))) { /* joined */ }
+    else return undefined;
+    expectPart = !expectPart;
+    rest = rest.slice(m[0].length);
+  }
+  return !expectPart && lines.length > 1 ? lines : undefined;
+}
+
 function checkLayout(report: XmlElement, body: XmlElement, review: ReviewNote[]): void {
   const extent = (e: XmlElement) => ({ l: len(e, 'Left'), t: len(e, 'Top'), r: len(e, 'Left') + len(e, 'Width'), b: reach(e) });
   for (const holder of descendants(body).filter((e) => e.name === 'ReportItems')) {
