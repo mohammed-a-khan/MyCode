@@ -413,6 +413,8 @@ export function spreadFormulaColumns(definition: ReportDefinition): { definition
 }
 
 export function convertToRdl(definition: ReportDefinition, dataSource: DataSourceInfo | undefined, options: RdlOptions): RdlResult {
+  designedWide.clear();
+  wideItems.clear();
   return new RdlBuilder(definition, dataSource ?? { connections: [], tables: [], links: [] }, options).build();
 }
 
@@ -2628,6 +2630,7 @@ class RdlBuilder {
         for (const p of inCell) {
           const box = this.boxOf(p.obj, 0);
           box.left = Math.min(Math.max(0, twipsToInches(p.x - left)), width);
+          const designed = box.width;
           box.width = Math.min(box.width, Math.max(width - box.left, 0.01));
           // Left-aligned text may run on to the next object beside it or the cell's end (SSRS fonts are a little
           // wider than Crystal's, and would wrap it sooner).
@@ -2651,8 +2654,13 @@ class RdlBuilder {
               .filter((q) => q !== p && q.x > p.x && (q.obj.position?.y ?? 0) < bottom && (q.obj.position?.y ?? 0) + (q.obj.size?.height ?? 0) > y)
               .reduce((min, q) => Math.min(min, twipsToInches(q.x - left)), width);
             if (leftAligned && next - box.left > box.width) box.width = next - box.left;
+            if (this.options.rulesAsText && o.kind === 'field' && !leftAligned && p.first === p.last && designed > box.width) {
+              box.width = designed;
+              designedWide.add(o);
+            }
           }
           const item = this.reportItem(p.obj, 'row', area, box);
+          if (item && designedWide.has(p.obj)) wideItems.add(item.attributes.Name ?? '');
           if (item) items.push(item);
         }
         // Lines down the table inside a cell that spans columns.
@@ -5284,8 +5292,12 @@ function fitCells(tablix: XmlElement): XmlElement {
     : c)) };
 }
 
+const designedWide = new Set<ReportObject>();
+const wideItems = new Set<string>();
+
 function fitWidth(items: XmlElement[], limit: number): XmlElement[] {
   return items.map((item) => {
+    if (item.name === 'Textbox' && wideItems.has(item.attributes.Name ?? '')) return item;
     const left = itemNumber(item, 'Left');
     const width = itemRight(item) - left;
     const over = left + width - limit;
