@@ -336,7 +336,7 @@ describe('conventions', () => {
     assert.ok(!out.review.some((n) => /drawn over each other|reaches past its box/.test(n.message)), JSON.stringify(out.review.filter((n) => /drawn over|reaches past/.test(n.message))));
   });
 
-  it('draws a rule moved with its figure as the figure\'s own underline, as a team\'s templates do', () => {
+  it('draws a rule moved with its figure in whole steps as a text box at each place, its rule as wide and thick as Crystal\'s', () => {
     // A statement's figure indented by its level, underlined where a flag says: in pieces of line across the cell
     // otherwise (a line's place cannot be an expression); in a template, the text's underline on the same condition.
     const statement = { connections: [], links: [], tables: [{ alias: 'S', name: 'S', kind: 'table', fields: [{ name: 'Label', type: 'string' }, { name: 'Amount', type: 'currency' }, { name: 'Level', type: 'number' }, { name: 'Under', type: 'string' }] }] } as DataSourceInfo;
@@ -357,12 +357,20 @@ describe('conventions', () => {
     } as unknown as ReportDefinition;
     const plain = convertToRdl(definition, statement, { reportName: 'O' }).rdl;
     assert.ok((plain.match(/<Line /g) ?? []).length > 1, 'drawn in pieces otherwise');
+    // Moved by whole steps (1.15in a level): a text box at each place the figure can stand, side by side, each showing
+    // it and drawing its rule (as wide and thick as Crystal's) where the record's level puts it.
     const rdl = convertToRdl(definition, statement, { reportName: 'O', rulesAsText: true }).rdl;
-    assert.ok(!/<Line |<Rectangle Name="A_Area"/.test(rdl), 'no pieces, no box: the cell holds the figure alone');
-    assert.match(rdl, /<TextDecoration>=IIf\(\(RTrim\(Fields!Under\.Value\) = "Y"\), "Underline", "None"\)<\/TextDecoration>/);
+    assert.ok(!/<Line /.test(rdl), 'no pieces of line');
+    const boxes = parseXml(rdl);
+    const places = descendants(boxes).filter((e) => e.name === 'Textbox' && /^A_At\d$/.test(e.attributes.Name ?? ''));
+    assert.deepEqual(places.map((e) => textOf(child(e, 'Left'))), ['0in', '1.15in', '2.3in']);
+    const level = 'IIf(IsNothing(Fields!Level.Value) OrElse Fields!Level.Value <= 0, 0, IIf(Fields!Level.Value >= 2, 2, Round(Fields!Level.Value)))';
+    assert.equal(valueIn(places[1]), `=IIf(${level} = 1, Fields!Amount.Value, Nothing)`);
+    assert.equal(textOf(child(places[1]!, 'Style/BottomBorder/Style')), `=IIf(${level} = 1, IIf((RTrim(Fields!Under.Value) = "Y"), "Solid", "None"), "None")`);
+    assert.equal(textOf(child(places[1]!, 'Style/BottomBorder/Width')), '1.00pt');
   });
 
-  it('draws rows tall enough for text at the designer\'s default size, a rule along the text moving with it', () => {
+  it('gives the rows printed for each record one line of the designer\'s size and no more, a rule along the text moving with it', () => {
     const definition: ReportDefinition = {
       ...emptyDefinition(),
       formulas: [
@@ -380,12 +388,15 @@ describe('conventions', () => {
     const r = parseXml(out.rdl);
     const inch = (e: XmlElement, n: string) => parseFloat(textOf(child(e, n)));
     const tablix = descendants(r).find((e) => e.name === 'Tablix')!;
-    // (10pt drawn by the designer where the size comes from the style dataset: about 0.19in a line.)
+    // A row printed for each record holds a line of the designer's 10pt (0.16in, its text all seen) and no more, so
+    // that a page holds about as many as Crystal's 0.153in rows do (with room round it, 0.19in, a statement would run
+    // on to another page).
     for (const row of childElements(child(tablix, 'TablixBody/TablixRows')!, 'TablixRow')) {
-      if (descendants(row).some((e) => e.name === 'Textbox' && valueIn(e).startsWith('=Fields!'))) assert.ok(inch(row, 'Height') >= 0.19, 'a row of text fits a line of it');
+      if (descendants(row).some((e) => e.name === 'Textbox' && valueIn(e).startsWith('=Fields!'))) {
+        assert.ok(inch(row, 'Height') >= 0.159 && inch(row, 'Height') <= 0.161, `a record's row holds one line: ${inch(row, 'Height')}`);
+      }
     }
     const amount = descendants(r).find((e) => e.name === 'Textbox' && valueIn(e) === '=Fields!Amount.Value')!;
-    assert.ok(inch(amount, 'Height') >= 0.19, 'the text in its cell\'s box fits too');
     const lines = descendants(r).filter((e) => e.name === 'Line');
     assert.ok(lines.length > 1);
     for (const line of lines) assert.ok(inch(line, 'Top') >= inch(amount, 'Height') - 0.02, 'its rule stays along the bottom of the text');
