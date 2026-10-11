@@ -113,6 +113,8 @@ export interface ParameterEntry {
   /** Default value from the first row of a dataset field; with hidden, the parameter is not prompted. */
   defaultFrom?: { dataset: string; field: string };
   hidden?: boolean;
+  /** An empty text is a value (as a field's may be). */
+  allowBlank?: boolean;
 }
 
 export interface SubreportInfo {
@@ -189,6 +191,7 @@ export function parameterElement(p: ParameterEntry): XmlElement {
   return el('ReportParameter', { Name: p.name },
     el('DataType', p.type),
     p.nullable ? el('Nullable', 'true') : null,
+    p.allowBlank ? el('AllowBlank', 'true') : null,
     p.defaultFrom ? el('DefaultValue', el('DataSetReference', el('DataSetName', p.defaultFrom.dataset), el('ValueField', p.defaultFrom.field))) : null,
     el('Prompt', p.prompt),
     p.hidden ? el('Hidden', 'true') : null,
@@ -460,6 +463,8 @@ class RdlBuilder {
   private readonly extraDataSets: (XmlElement | (() => XmlElement))[] = [];
   /** Subreports placed inline, by their dataset: for formulas of this report worked out in their queries. */
   private readonly inlineChildren = new Map<string, RdlBuilder>();
+  /** The data source of each inline subreport's dataset. */
+  private readonly inlineSources = new Map<string, string>();
   private readonly extraDataSources: { name: string; connectionString: string }[] = [];
   private readonly extraParameters: ParameterEntry[] = [];
   /** Subreports (by "Subdocument N" number) placed inline, and those kept as subreport items. */
@@ -687,6 +692,13 @@ class RdlBuilder {
     }
     // A formula setting a shared variable to a value (for a subreport, or for the main report to read): that value,
     // a column of the query.
+    // (Over a stored procedure's rows, a value set from one of its fields is that field: the procedure is called as it
+    // is, its rows not taken into a table, whose columns would have to match its own.)
+    const own = this.procedureRows ? this.sharedField(formula.text) : undefined;
+    if (own) {
+      this.formulaResults.set(key, `Fields!${own.name}.Value`);
+      return `Fields!${own.name}.Value`;
+    }
     if (this.queryFromTables && sharedAssignment(formula.text)) {
       const sql = this.formulaSql(formula.name);
       if (sql) {
@@ -756,7 +768,7 @@ class RdlBuilder {
    * In a team template, the one stored procedure a report reads: its rows are taken into a table of the query
    * (INSERT ... EXEC), so that formulas, the record selection and the like are worked out over them in SQL.
    */
-  private get procedureRows(): TableInfo | undefined {
+  get procedureRows(): TableInfo | undefined {
     const tables = this.source.tables;
     return this.options.formulasInQuery && tables.length === 1 && tables[0]!.kind === 'storedProcedure' && tables[0]!.fields.length > 0 ? tables[0] : undefined;
   }
@@ -897,9 +909,20 @@ class RdlBuilder {
     if (/\{(?![@?#])[^}]+\.[^}]+\}/.test(formula.text)) return undefined;
     for (const [dataset, child] of this.inlineChildren) {
       const values = new Map<string, { sql: string; type: SqlType }>();
-      for (const variable of variables) {
-        const value = child.sharedSql(variable);
-        if (value) values.set(variable, value);
+      // A subreport over a stored procedure: its values are its fields. A formula only reading one reads the field;
+      // one working them out does so in a query of its own, given them by hidden parameters taking them from the
+      // subreport's dataset (its first row, as Crystal shares the value it set).
+      const fields = child.procedureRows ? new Map([...variables].map((v) => [v, child.sharedVariableField(v)] as const)) : undefined;
+      if (fields) {
+        if ([...fields.values()].some((f) => !f)) continue;
+        const read = sharedRead(formula.text);
+        if (read) return `First(Fields!${fields.get(read)!.name}.Value, ${vbString(dataset)})`;
+        for (const [variable, field] of fields) values.set(variable, { sql: `@${this.sharedParameter(dataset, field!)}`, type: field!.sqlType });
+      } else {
+        for (const variable of variables) {
+          const value = child.sharedSql(variable);
+          if (value) values.set(variable, value);
+        }
       }
       if (values.size !== variables.size) continue;
       const own = new Map<string, { sql: string; type: SqlType } | undefined>();
@@ -925,6 +948,7 @@ class RdlBuilder {
       };
       const out = translate(formula.text);
       if (!('sql' in out)) continue;
+      if (fields) return this.companionColumn(dataset, `F_${formula.name}`, out.sql, out.type, formula.text);
       const column = child.addColumn(`F_${formula.name}`, out.sql, out.type, `{@${formula.name}} of the report this subreport is placed in: ${formula.text.replace(/\s+/g, ' ').trim().slice(0, 200)}`);
       if (!column) continue;
       return `First(Fields!${column}.Value, ${vbString(dataset)})`;
@@ -942,6 +966,76 @@ class RdlBuilder {
       if ('sql' in out) return out;
     }
     return undefined;
+  }
+
+  /** A formula setting a shared variable to one of the report's fields: that field. */
+  private sharedField(text: string): DatasetField | undefined {
+    const assignment = sharedAssignment(text);
+    const m = assignment && /^\{([^{}@?#]+)\.([^{}.]+)\}\s*;?$/.exec(assignment.value);
+    return m ? this.lookupField(m[1]!, m[2]!) : undefined;
+  }
+
+  /** The field a shared variable is set to in this report (over a stored procedure), with its SQL type. */
+  sharedVariableField(variable: string): (DatasetField & { sqlType: SqlType }) | undefined {
+    for (const f of this.definition.formulas) {
+      if (sharedAssignment(f.text)?.name !== variable.toLowerCase()) continue;
+      const field = this.sharedField(f.text);
+      if (!field) continue;
+      field.used = true;
+      const t = field.type.toLowerCase();
+      const sqlType: SqlType = /bool/.test(t) ? 'boolean' : /date|time/.test(t) ? 'dateTime' : /int|number|currency|decimal|double|float/.test(t) ? 'number' : 'string';
+      return { ...field, sqlType };
+    }
+    return undefined;
+  }
+
+  /** Queries of their own working out values a subreport (over a stored procedure) shares, by its dataset. */
+  private readonly companions = new Map<string, { name: string; columns: { name: string; sql: string; type: SqlType; text: string }[]; parameters: Map<string, string> }>();
+
+  /** The hidden parameter giving a subreport's field (its first row) to the query working out its values; its name. */
+  private sharedParameter(dataset: string, field: DatasetField & { sqlType: SqlType }): string {
+    const companion = this.companionOf(dataset);
+    const known = companion.parameters.get(field.name);
+    if (known) return known;
+    const taken = new Set([...this.parameterEntries(), ...this.extraParameters].map((p) => p.name.toLowerCase()));
+    let name = sanitizeName(`${field.name}_shared`);
+    for (let n = 2; taken.has(name.toLowerCase()); n++) name = sanitizeName(`${field.name}_shared_${n}`);
+    const type = { boolean: 'Boolean', dateTime: 'DateTime', date: 'DateTime', number: 'Float', string: 'String' }[field.sqlType];
+    this.extraParameters.push({ name, type, prompt: name, multiple: false, nullable: true, allowBlank: type === 'String', hidden: true, defaultFrom: { dataset, field: field.name } });
+    companion.parameters.set(field.name, name);
+    return name;
+  }
+
+  private companionOf(dataset: string) {
+    let companion = this.companions.get(dataset);
+    if (!companion) {
+      companion = { name: `${dataset}_Values`, columns: [], parameters: new Map() };
+      this.companions.set(dataset, companion);
+      const source = this.inlineSources.get(dataset) ?? this.dataSourceName;
+      const c = companion;
+      this.extraDataSets.push(() => el('DataSet', { Name: c.name },
+        el('Query',
+          el('DataSourceName', source),
+          c.parameters.size ? el('QueryParameters', ...[...c.parameters.values()].map((p) => el('QueryParameter', { Name: `@${p}` }, el('Value', `=Parameters!${p}.Value`)))) : null,
+          el('CommandText', [
+            `-- Values the subreport's dataset ${dataset} gives this report (its first row, by the hidden parameters), worked out.`,
+            `SELECT\n${c.columns.map((col) => `  -- {@${col.name.replace(/^F_/, '')}}: ${col.text.replace(/\s+/g, ' ').trim().slice(0, 200)}\n  ${layOutSql(col.sql, '    ')} AS ${this.quote(col.name)}`).join(',\n')}`,
+          ].join('\n'))),
+        el('Fields', ...c.columns.map((col) => el('Field', { Name: col.name },
+          el('DataField', col.name),
+          el('rd:TypeName', { boolean: 'System.Boolean', dateTime: 'System.DateTime', date: 'System.DateTime', number: 'System.Double', string: 'System.String' }[col.type]))))));
+    }
+    return companion;
+  }
+
+  /** A value worked out in the query of a subreport's values; the expression reading it. */
+  private companionColumn(dataset: string, base: string, sql: string, type: SqlType, text: string): string {
+    const companion = this.companionOf(dataset);
+    const taken = new Set(companion.columns.map((c) => c.name.toLowerCase()));
+    let name = sanitizeName(base);
+    for (let n = 2; taken.has(name.toLowerCase()); n++) name = sanitizeName(`${base}_${n}`);
+    companion.columns.push({ name, sql, type, text });
+    return `First(Fields!${name}.Value, ${vbString(companion.name)})`;
   }
 
   /** A column added to this report's query (its dataset written again); its name, or undefined where it has none. */
@@ -1711,6 +1805,7 @@ class RdlBuilder {
     // (Its dataset written last: formulas of this report may yet be worked out in its query.)
     this.extraDataSets.push(() => result.dataset(dataSource));
     this.inlineChildren.set(dataset, child);
+    this.inlineSources.set(dataset, dataSource);
     for (const [variable, fallback] of result.sharedFallbacks) if (!this.sharedFallbacks.has(variable)) this.sharedFallbacks.set(variable, fallback);
     for (const [variable, value] of result.shared) {
       const known = this.sharedValues.get(variable) ?? [];
@@ -3325,9 +3420,13 @@ class RdlBuilder {
           `-- procedure using temporary tables) as the Crystal report read it, its columns in its order.`,
           'CREATE TABLE #rows ([shape_key] bit);',
           'DECLARE @shape TABLE (n int PRIMARY KEY, col nvarchar(max));',
-          "INSERT INTO @shape SELECT d.column_ordinal, QUOTENAME(d.name) + N' ' + d.system_type_name + N' NULL'",
-          `FROM sys.dm_exec_describe_first_result_set_for_object(OBJECT_ID(N'${called.replace(/'/g, "''")}'), 0) AS d`,
-          'WHERE d.is_hidden = 0 AND d.name IS NOT NULL AND d.error_number IS NULL;',
+          `DECLARE @why nvarchar(4000) = (SELECT TOP 1 d.error_message FROM sys.dm_exec_describe_first_result_set_for_object(OBJECT_ID(N'${called.replace(/'/g, "''")}'), 0) AS d WHERE d.error_number IS NOT NULL);`,
+          '-- (A column without a name, or with the name of one before it, is named after its place.)',
+          'IF @why IS NULL',
+          '  INSERT INTO @shape SELECT d.column_ordinal, QUOTENAME(CASE WHEN COALESCE(d.name, N\'\') = N\'\' OR ROW_NUMBER() OVER (PARTITION BY d.name ORDER BY d.column_ordinal) > 1',
+          "    THEN COALESCE(NULLIF(d.name, N''), N'column') + N'_' + CAST(d.column_ordinal AS nvarchar(10)) ELSE d.name END) + N' ' + d.system_type_name + N' NULL'",
+          `  FROM sys.dm_exec_describe_first_result_set_for_object(OBJECT_ID(N'${called.replace(/'/g, "''")}'), 0) AS d`,
+          '  WHERE d.is_hidden = 0;',
           'DECLARE @columns nvarchar(max), @n int = (SELECT MIN(n) FROM @shape);',
           'WHILE @n IS NOT NULL',
           'BEGIN',
@@ -3337,7 +3436,13 @@ class RdlBuilder {
           `IF @columns IS NULL SET @columns = N'${rows.fields.map((f) => `${this.quote(f.name)} ${sqlColumnType(f)} NULL`).join(', ').replace(/'/g, "''")}';`,
           "EXEC (N'ALTER TABLE #rows ADD ' + @columns);",
           'ALTER TABLE #rows DROP COLUMN [shape_key];',
-          `INSERT INTO #rows\nEXEC ${called}${own.length ? ` ${own.join(', ')}` : ''};`,
+          'BEGIN TRY',
+          `  INSERT INTO #rows\n  EXEC ${called}${own.length ? ` ${own.join(', ')}` : ''};`,
+          'END TRY',
+          'BEGIN CATCH',
+          `  DECLARE @message nvarchar(4000) = N'The rows of ${called.replace(/'/g, "''")} do not fit ' + CASE WHEN @why IS NULL THEN N'the columns SQL Server describes' ELSE N'the columns the Crystal report read (SQL Server cannot describe the procedure''s: ' + @why + N')' END + N': ' + ERROR_MESSAGE();`,
+          '  THROW 50000, @message, 1;',
+          'END CATCH;',
           `SELECT\n${select}\nFROM #rows AS ${this.quote(rows.alias)}${where ? `\nWHERE ${where.sql}` : ''}`,
         ].join('\n');
         const known = new Set(parameters.map((q) => q.attributes.Name?.toLowerCase()));
