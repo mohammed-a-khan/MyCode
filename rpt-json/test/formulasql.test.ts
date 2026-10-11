@@ -193,7 +193,11 @@ describe('a team template over a stored procedure', () => {
   it('takes the procedure\'s rows into a table and works its formulas and selection out over them', async () => {
     const { rdl } = await convert(definition(`{${A}.Name} <> "Skip"`));
     const text = rdl.match(/<CommandText>([\s\S]*?)<\/CommandText>/)![1]!;
-    assert.match(text, /CREATE TABLE #rows \(\s*\[Name\] nvarchar\(4000\),\s*\[Amount\] decimal\(38, 10\),\s*\[Shipped\] datetime2\s*\);/);
+    // (Shaped as the procedure's result, as SQL Server describes it; else as the Crystal report read it.)
+    assert.match(text, /CREATE TABLE #rows \(\[shape_key\] bit\);/);
+    assert.match(text, /sys\.dm_exec_describe_first_result_set_for_object\(OBJECT_ID\(N'\[dbo\]\.\[Orders_get\]'\), 0\)/);
+    assert.match(text, /IF @columns IS NULL SET @columns = N'\[Name\] nvarchar\(4000\) NULL, \[Amount\] decimal\(38, 10\) NULL, \[Shipped\] datetime2 NULL';/);
+    assert.match(text, /EXEC \(N'ALTER TABLE #rows ADD ' \+ @columns\);\s*ALTER TABLE #rows DROP COLUMN \[shape_key\];/);
     assert.match(text, /INSERT INTO #rows\s*EXEC \[dbo\]\.\[Orders_get\] @region = @region;/);
     assert.match(text, /\[Orders_get;1\]\.\*,[\s\S]*N'big'[\s\S]*AS \[F_Size\]\s*FROM #rows AS \[Orders_get;1\]\s*WHERE \[Orders_get;1\]\.\[Name\] &lt;&gt; 'Skip'/);
     assert.ok(!rdl.includes('<Filters>') && !rdl.includes('<Code>'), 'no dataset filter, no custom code');
@@ -251,6 +255,13 @@ describe('a team template whose values come from a subreport', () => {
     const part = formulaToSql('Split({T.Name}, ",")[2]', c as never);
     assert.ok('sql' in part);
     assert.match(part.sql, /\(\[T\]\.\[Name\], N',', 2\)/);
+    const nocase = formulaToSql('Count(Split({T.Name}, "<CR>", -1, 1))', c as never);
+    assert.ok('sql' in nocase && nocase.sql.includes('COLLATE Latin1_General_CI_AS'));
+    const piece = formulaToSql('Split({T.Name}, "<CR>", -1, 1)[1]', c as never);
+    assert.ok('sql' in piece && piece.sql.includes('helper:splitpartnocase'));
+    const at = formulaToSql('InStr({T.Name}, "<CR>", 1)', c as never);
+    assert.ok('sql' in at);
+    assert.equal(at.sql, "CHARINDEX(N'<CR>' COLLATE Latin1_General_CI_AS, [T].[Name])");
     const ch = formulaToSql('{T.Name} + Chr(10)', c as never);
     assert.ok('sql' in ch && ch.sql.includes('NCHAR(10)'));
   });

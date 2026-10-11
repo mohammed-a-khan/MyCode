@@ -2315,6 +2315,7 @@ export function printRole(source: string): PrintRole | undefined {
 
 /** Text compared as Crystal compares it: with case. */
 const CASED = 'COLLATE Latin1_General_CS_AS';
+const UNCASED = 'COLLATE Latin1_General_CI_AS';
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const DATE_PARTS: Record<string, string> = { yyyy: 'year', q: 'quarter', m: 'month', y: 'dayofyear', d: 'day', ww: 'week', h: 'hour', n: 'minute', s: 'second' };
@@ -2580,7 +2581,7 @@ export function formulaToSql(source: string, ctx: FormulaSqlContext): { sql: str
         if (arr && !n.to) return { sql: `(SELECT v FROM ${arr.sql} WHERE i = ${whole(value(n.from))})`, type: arr.type };
         // A piece of a text split at a delimiter: Split(s, d)[i].
         const pieces = splitOf(n.base);
-        if (pieces && !n.to) return { sql: `${splitPart()}(${pieces.s}, ${pieces.d}, ${whole(value(n.from))})`, type: 'string' };
+        if (pieces && !n.to) return { sql: `${splitPart(pieces.collation)}(${pieces.s}, ${pieces.d}, ${whole(value(n.from))})`, type: 'string' };
         // Part of a text: {s}[i] one character, {s}[i to j] from i to j.
         const base = value(n.base);
         if (base.type !== 'string') return refuse('it uses a list or a part of one');
@@ -2593,15 +2594,31 @@ export function formulaToSql(source: string, ctx: FormulaSqlContext): { sql: str
     }
   };
   /** A text split at a delimiter (Split(s, d), compared with case): its text and its delimiter, as SQL. */
-  const splitOf = (n: Node): { s: string; d: string } | undefined => {
-    if (n.t !== 'call' || n.name.toLowerCase() !== 'split' || n.args.length !== 2) return undefined;
-    return { s: text(value(n.args[0]!)), d: text(value(n.args[1]!)) };
+  /** A whole number written in the formula (-1 included). */
+  const numberWritten = (n: Node | undefined): number | undefined => {
+    if (n?.t === 'unary' && n.op === '-') { const v = numberWritten(n.arg); return v === undefined ? undefined : -v; }
+    return n?.t === 'literal' && /^\d+$/.test(n.vb) ? Number(n.vb) : undefined;
+  };
+  /** Crystal's compare option as a collation: 0 (or none) with case, 1 without; undefined for one worked out. */
+  const compareOf = (n: Node | undefined): string | undefined => {
+    if (!n) return CASED;
+    const v = numberWritten(n);
+    return v === 0 ? CASED : v === 1 ? UNCASED : undefined;
+  };
+  /** Split(text, delimiter[, -1 [, compare]]): every piece, with case or without. */
+  const splitOf = (n: Node): { s: string; d: string; collation: string } | undefined => {
+    if (n.t !== 'call' || n.name.toLowerCase() !== 'split' || n.args.length < 2 || n.args.length > 4) return undefined;
+    if (n.args.length > 2 && numberWritten(n.args[2]) !== -1) return undefined;
+    const collation = compareOf(n.args[3]);
+    if (!collation) return undefined;
+    return { s: text(value(n.args[0]!)), d: text(value(n.args[1]!)), collation };
   };
   /** The function giving the n-th piece of a text split at a delimiter (none past the last), as Crystal's Split. */
-  const splitPart = () => {
+  const splitPart = (collation: string) => {
     if (!ctx.addFunction) return refuse('it takes a piece of a split text');
-    return ctx.addFunction('helper:splitpart', (name) => [
-      `-- The n-th piece of a text split at a delimiter (found with case, as Crystal's Split), or nothing past the last.`,
+    const cased = collation === CASED;
+    return ctx.addFunction(cased ? 'helper:splitpart' : 'helper:splitpartnocase', (name) => [
+      `-- The n-th piece of a text split at a delimiter (found ${cased ? 'with' : 'without'} case, as Crystal's Split), or nothing past the last.`,
       `CREATE FUNCTION ${name}(@s nvarchar(max), @d nvarchar(4000), @n int)`,
       'RETURNS nvarchar(max)',
       'AS',
@@ -2610,12 +2627,12 @@ export function formulaToSql(source: string, ctx: FormulaSqlContext): { sql: str
       '  IF @s IS NULL OR @d IS NULL OR @n < 1 OR @dl = 0 RETURN NULL;',
       '  WHILE @k < @n',
       '  BEGIN',
-      '    SET @next = CHARINDEX(@d, @s COLLATE Latin1_General_CS_AS, @at);',
+      `    SET @next = CHARINDEX(@d, @s ${collation}, @at);`,
       '    IF @next = 0 RETURN NULL;',
       '    SET @at = @next + @dl;',
       '    SET @k = @k + 1;',
       '  END;',
-      '  SET @next = CHARINDEX(@d, @s COLLATE Latin1_General_CS_AS, @at);',
+      `  SET @next = CHARINDEX(@d, @s ${collation}, @at);`,
       '  RETURN SUBSTRING(@s, @at, CASE WHEN @next = 0 THEN LEN(@s + N\'x\') - @at ELSE @next - @at END);',
       'END',
     ].join('\n'));
@@ -2649,7 +2666,11 @@ export function formulaToSql(source: string, ctx: FormulaSqlContext): { sql: str
         const v = a();
         if (v.length === 2) return { sql: `CHARINDEX(${text(v[1]!)} ${CASED}, ${text(v[0]!)})`, type: 'number' };
         if (v.length === 3 && v[0]!.type === 'number') return { sql: `CHARINDEX(${text(v[2]!)} ${CASED}, ${text(v[1]!)}, ${whole(v[0]!)})`, type: 'number' };
-        return refuse('it calls InStr with a compare option');
+        // (A compare option last: 0 with case, 1 without.)
+        const collation = compareOf(args[args.length - 1]);
+        if (v.length === 3 && collation) return { sql: `CHARINDEX(${text(v[1]!)} ${collation}, ${text(v[0]!)})`, type: 'number' };
+        if (v.length === 4 && v[0]!.type === 'number' && collation) return { sql: `CHARINDEX(${text(v[2]!)} ${collation}, ${text(v[1]!)}, ${whole(v[0]!)})`, type: 'number' };
+        return refuse('it calls InStr with a compare option worked out');
       }
       case 'replace': {
         const v = a();
@@ -2690,7 +2711,7 @@ export function formulaToSql(source: string, ctx: FormulaSqlContext): { sql: str
         const pieces = args.length === 1 ? splitOf(args[0]!) : undefined;
         if (pieces) {
           const len = (x: string) => `(LEN(${x} + N'x') - 1)`;
-          return { sql: `CASE WHEN ${pieces.s} IS NULL THEN NULL ELSE (${len(pieces.s)} - ${len(`REPLACE(${pieces.s} COLLATE Latin1_General_CS_AS, ${pieces.d}, N'')`)}) / ${len(pieces.d)} + 1 END`, type: 'number' };
+          return { sql: `CASE WHEN ${pieces.s} IS NULL THEN NULL ELSE (${len(pieces.s)} - ${len(`REPLACE(${pieces.s} ${pieces.collation}, ${pieces.d}, N'')`)}) / ${len(pieces.d)} + 1 END`, type: 'number' };
         }
         const arr = args.length === 1 ? arrayVar(args[0]!) : undefined;
         if (!arr) return refuse(key === 'count' ? 'it counts records, a summary the report works out' : 'it counts a list it does not hold');
