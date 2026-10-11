@@ -215,7 +215,8 @@ places side by side across the page (a logo beside a title, a subreport beside a
 as one, as Crystal's section does; bands, tables and charts lie one under another, nothing over anything else (SSRS
 moves overlapping items aside in a preview, a document or a workbook); each table is as tall as its rows and as wide
 as its columns, and a column widens to hold what its cell holds; a frame round a title becomes the title's border; a
-rule drawn along a text lies under it. What is still drawn over something else, reaches past its box or makes the
+rule drawn along a text lies under it, and a rule a formula moves with its figure (an underline indented with it) is
+the figure's own underline or overline, on the same condition, as a team's templates draw it. What is still drawn over something else, reaches past its box or makes the
 body wider than the page is listed in the review notes.
 
 Templates are made to be combined into one report, a box and its datasets at a time:
@@ -224,8 +225,9 @@ Templates are made to be combined into one report, a box and its datasets at a t
   the review notes list each table's columns by number, for choosing and ordering columns;
 - every dataset is named after the report, and so are the custom code's functions and the values it keeps: a
   report using custom code gets it beside it (`.code.vb`), to be added once to the combined report's code;
-- a table after the first in a report gets as many thin empty columns at its end as the first has columns less one,
-  so that columns taken off the end of every table when the first one's are hidden are those.
+- a table after the first in a report gets as many empty columns at its end as the first has columns less one, so
+  that columns taken off the end of every table when the first one's are hidden are those (sharing out the table's
+  empty last column, where it has one, so each can be seen and picked in the designer).
 
 Formulas are worked out in SQL whether the report reads tables or a stored procedure. Over a stored procedure, the
 query takes the procedure's rows into a table (`CREATE TABLE #rows (...)` with the columns Crystal knows, in its

@@ -967,10 +967,19 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     const last = columns[columns.length - 1];
     // (Columns in groups of their own: the number taken cannot be known.)
     if (!last || !members || descendants(members).some((e) => e.name === 'Group') || len(last, 'Width') <= spare * SPARE_WIDTH + 0.05) continue;
-    setChild(last, 'Width', inch(len(last, 'Width') - spare * SPARE_WIDTH));
+    // A last column left empty in every row (Crystal's space at the table's right) is shared out with the spare
+    // columns, so that each is wide enough to be seen and picked in the designer; otherwise they are thin slivers.
+    const at = columns.length - 1;
+    const emptyLast = rowsOf(t).every((row) => {
+      const cells = cellsOf(row);
+      const item = cells[at] ? cellItem(cells[at]!) : undefined;
+      return !cells[at] || !item || (item.name === 'Textbox' && isBlank(item) && !drawnAs(item));
+    }) && rowsOf(t).every((row) => cellsOf(row).length === columns.length);
+    const each = emptyLast && len(last, 'Width') / (spare + 1) >= 0.05 ? Math.floor(len(last, 'Width') / (spare + 1) * 1000) / 1000 : SPARE_WIDTH;
+    setChild(last, 'Width', inch(len(last, 'Width') - spare * each));
     const T = t.attributes.Name ?? '';
     for (let k = 0; k < spare; k++) {
-      child(t, 'TablixBody/TablixColumns')!.children.push(el('TablixColumn', el('Width', inch(SPARE_WIDTH))));
+      child(t, 'TablixBody/TablixColumns')!.children.push(el('TablixColumn', el('Width', inch(each))));
       members.children.push(el('TablixMember'));
       for (const row of rowsOf(t)) {
         const tb = newTextbox('__spare', '', '0pt');

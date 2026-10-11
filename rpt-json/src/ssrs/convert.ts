@@ -31,6 +31,8 @@ export interface SsrsOptions {
   chartAxisFormat?: string;
   /** Formulas worked out per record become columns of the query where SQL gives exactly the same. */
   formulasInQuery?: boolean;
+  /** Rules moved by formulas with a field are drawn as the text's underline or overline. */
+  rulesAsText?: boolean;
   /** A last step over each report's RDL (a house style laid over the Crystal layout, ...). */
   restyle?: (rdl: string) => string;
   /** The very last step: the report reshaped as a team's template (names, structure, looks), with notes. */
@@ -82,6 +84,7 @@ export function convertDocumentToSsrs(doc: CfbDocument, baseName: string, option
       parameterValues: options.parameterValues,
       chartAxisFormat: options.chartAxisFormat,
       formulasInQuery: options.formulasInQuery,
+      rulesAsText: options.rulesAsText,
       subreports: model.storage ? new Map() : subreports,
       subreport: Boolean(model.storage),
       images: embeddedImages(storageAt(doc.root, model.storage)),
