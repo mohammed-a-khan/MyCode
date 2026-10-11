@@ -889,10 +889,14 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           const rs = ownStyle(item);
           const plain = !/^(solid|dashed|dotted|double)/i.test(textOf(child(rs, 'Border/Style'))) && !BORDER_SIDES.some((s) => /^(solid|dashed|dotted|double)/i.test(textOf(child(rs, `${s}/Style`))))
             && (!textOf(child(rs, 'BackgroundColor')) || /^(transparent|#00ffffff)$/i.test(textOf(child(rs, 'BackgroundColor'))));
-          if (inner.length === 1 && inner[0]!.name === 'Textbox' && plain && !child(item, 'Visibility')) {
-            const tb = inner[0]!;
-            const span = Number(textOf(child(child(cell, 'CellContents'), 'ColSpan')) || 1);
-            const cellWidth = widths.slice(c, c + span).reduce((a, b) => a + b, 0);
+          const only = inner.length === 1 && inner[0]!.name === 'Textbox' ? inner[0]! : undefined;
+          const across = Number(textOf(child(child(cell, 'CellContents'), 'ColSpan')) || 1);
+          const room = widths.slice(c, c + across).reduce((a, b) => a + b, 0);
+          const shortRule = !!only && ruledAbove(only) && (len(only, 'Left') > 0.02 || room - len(only, 'Left') - len(only, 'Width') > 0.02);
+          if (only && plain && !shortRule && !child(item, 'Visibility')) {
+            const tb = only;
+            const span = across;
+            const cellWidth = room;
             pad(tb, { left: len(tb, 'Left'), top: ruledAbove(tb) ? 0 : len(tb, 'Top'), right: Math.max(0, cellWidth - len(tb, 'Left') - len(tb, 'Width')) });
             unplace(tb);
             const contents = child(cell, 'CellContents')!;
@@ -2216,8 +2220,8 @@ function applyStyleRoles(report: XmlElement, style: NonNullable<Conventions['sty
   }
   // Blank cells of painted rows take the row's fill, so the band runs across.
   for (const row of banded) {
-    const cells = cellsOf(row).map(cellItem).filter((x): x is XmlElement => !!x && x.name === 'Textbox');
-    const painted = cells.map((c) => textOf(child(ownStyle(c), 'BackgroundColor'))).find((v) => v.startsWith('=First(') || v.startsWith('=IIF(RowNumber'));
+    const cells = cellsOf(row).map(cellItem).filter((x): x is XmlElement => !!x && (x.name === 'Textbox' || x.name === 'Rectangle'));
+    const painted = descendants(row).filter((e) => e.name === 'Textbox').map((c) => textOf(child(ownStyle(c), 'BackgroundColor'))).find((v) => v.startsWith('=First(') || v.startsWith('=IIF(RowNumber'));
     if (!painted) continue;
     for (const c of cells) {
       const s = ownStyle(c);
