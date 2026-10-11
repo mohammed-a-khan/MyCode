@@ -2578,6 +2578,9 @@ export function formulaToSql(source: string, ctx: FormulaSqlContext): { sql: str
       case 'index': {
         const arr = arrayVar(n.base);
         if (arr && !n.to) return { sql: `(SELECT v FROM ${arr.sql} WHERE i = ${whole(value(n.from))})`, type: arr.type };
+        // A piece of a text split at a delimiter: Split(s, d)[i].
+        const pieces = splitOf(n.base);
+        if (pieces && !n.to) return { sql: `${splitPart()}(${pieces.s}, ${pieces.d}, ${whole(value(n.from))})`, type: 'string' };
         // Part of a text: {s}[i] one character, {s}[i to j] from i to j.
         const base = value(n.base);
         if (base.type !== 'string') return refuse('it uses a list or a part of one');
@@ -2589,6 +2592,34 @@ export function formulaToSql(source: string, ctx: FormulaSqlContext): { sql: str
         return refuse('it uses a list or a part of one');
     }
   };
+  /** A text split at a delimiter (Split(s, d), compared with case): its text and its delimiter, as SQL. */
+  const splitOf = (n: Node): { s: string; d: string } | undefined => {
+    if (n.t !== 'call' || n.name.toLowerCase() !== 'split' || n.args.length !== 2) return undefined;
+    return { s: text(value(n.args[0]!)), d: text(value(n.args[1]!)) };
+  };
+  /** The function giving the n-th piece of a text split at a delimiter (none past the last), as Crystal's Split. */
+  const splitPart = () => {
+    if (!ctx.addFunction) return refuse('it takes a piece of a split text');
+    return ctx.addFunction('helper:splitpart', (name) => [
+      `-- The n-th piece of a text split at a delimiter (found with case, as Crystal's Split), or nothing past the last.`,
+      `CREATE FUNCTION ${name}(@s nvarchar(max), @d nvarchar(4000), @n int)`,
+      'RETURNS nvarchar(max)',
+      'AS',
+      'BEGIN',
+      '  DECLARE @k int = 1, @at int = 1, @next int, @dl int = LEN(@d + N\'x\') - 1;',
+      '  IF @s IS NULL OR @d IS NULL OR @n < 1 OR @dl = 0 RETURN NULL;',
+      '  WHILE @k < @n',
+      '  BEGIN',
+      '    SET @next = CHARINDEX(@d, @s COLLATE Latin1_General_CS_AS, @at);',
+      '    IF @next = 0 RETURN NULL;',
+      '    SET @at = @next + @dl;',
+      '    SET @k = @k + 1;',
+      '  END;',
+      '  SET @next = CHARINDEX(@d, @s COLLATE Latin1_General_CS_AS, @at);',
+      '  RETURN SUBSTRING(@s, @at, CASE WHEN @next = 0 THEN LEN(@s + N\'x\') - @at ELSE @next - @at END);',
+      'END',
+    ].join('\n'));
+  };
   const call = (key: string, args: Node[]): V => {
     const a = () => args.map(value);
     const one = () => (args.length === 1 ? value(args[0]!) : refuse(`it calls ${key} with ${args.length} values`));
@@ -2597,6 +2628,7 @@ export function formulaToSql(source: string, ctx: FormulaSqlContext): { sql: str
         return asBool(cond({ t: 'call', name: 'IsNull', args }), '');
       case 'not':
         return asBool(`NOT (${cond(args[0]!)})`, nullWhen(args));
+      case 'chr': case 'chrw': return { sql: `NCHAR(${whole(one())})`, type: 'string' };
       case 'uppercase': case 'ucase': return { sql: `UPPER(${text(one())})`, type: 'string' };
       case 'lowercase': case 'lcase': return { sql: `LOWER(${text(one())})`, type: 'string' };
       case 'trim': return { sql: `LTRIM(RTRIM(${text(one())}))`, type: 'string' };
@@ -2652,9 +2684,16 @@ export function formulaToSql(source: string, ctx: FormulaSqlContext): { sql: str
         if (args.length === 1) return { sql: dow, type: 'number' };
         return { sql: `((${dow} - ${whole(value(args[1]!))} + 7) % 7 + 1)`, type: 'number' };
       }
+      case 'count':
       case 'ubound': {
+        // The pieces of a text split at a delimiter: one more than the delimiters in it (found with case).
+        const pieces = args.length === 1 ? splitOf(args[0]!) : undefined;
+        if (pieces) {
+          const len = (x: string) => `(LEN(${x} + N'x') - 1)`;
+          return { sql: `CASE WHEN ${pieces.s} IS NULL THEN NULL ELSE (${len(pieces.s)} - ${len(`REPLACE(${pieces.s} COLLATE Latin1_General_CS_AS, ${pieces.d}, N'')`)}) / ${len(pieces.d)} + 1 END`, type: 'number' };
+        }
         const arr = args.length === 1 ? arrayVar(args[0]!) : undefined;
-        if (!arr) return refuse('it counts a list it does not hold');
+        if (!arr) return refuse(key === 'count' ? 'it counts records, a summary the report works out' : 'it counts a list it does not hold');
         return { sql: `(SELECT COUNT(*) FROM ${arr.sql})`, type: 'number' };
       }
       case 'monthname': {

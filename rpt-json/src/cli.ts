@@ -10,6 +10,7 @@ import { readHouseTemplate, type HouseTemplate } from './ssrs/house.ts';
 import { chartStructure } from './crystal/chartinfo.ts';
 import { layoutSummary } from './crystal/layoutinfo.ts';
 import { checkRdlWidths } from './ssrs/widthcheck.ts';
+import { diagnoseRdl, diagnosisLine, diagnosisText, type Finding } from './ssrs/diagnose.ts';
 import { extractHeaders, formatHeadersCsv, formatHeadersText, type HeaderText } from './crystal/headers.ts';
 import { lstat, mkdir, readdir, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
@@ -68,6 +69,11 @@ Usage:
                                             Subdocument N) and of main-report sections showing them, one line per
                                             section and object, with all other names and text hidden
                                             (safe to share when a chart does not convert)
+  rpt-json check <input.rdl|folder> [output.txt] [--conventions]
+                                            Check finished .rdl files: custom code left, items over each other or
+                                            cut off, the body wider than the page; with --conventions also headings
+                                            shown as «Expr», default names, empty rows and the merge's headings.
+                                            to-rdl writes the same check of every report to check.txt.
   rpt-json check-width <input.rdl>          List what in a converted .rdl reaches past the printable page or past
                                             what holds it (the cause of blank pages after every page)
   rpt-json verify  <input.rpt>              Round-trip rpt -> json -> rpt and compare every stream,
@@ -125,6 +131,31 @@ function streamDigests(json: RptJson): Map<string, string> {
   };
   walk(json.root, '');
   return out;
+}
+
+/** The check of a finished report, with the custom code written beside it. */
+function checkConverted(rdl: string, files: Record<string, string> | undefined, template: boolean): Finding[] {
+  const findings = diagnoseRdl(rdl, template);
+  const code = files?.['.code.vb'];
+  if (code?.trim()) findings.unshift({ kind: 'code', item: 'Report', message: `custom code left in the .code.vb file: ${(code.match(/^\s*(?:Public\s+|Private\s+)?(?:Shared\s+)?(?:Function|Sub)\s+\w+/gim) ?? []).length} function(s)` });
+  return findings;
+}
+
+/** All the checks, those with something to see first, under a count. */
+function checkSummary(checks: string[]): string {
+  const open = checks.filter((c) => !/: clean$/.test(c.split('\n')[0]!));
+  return [`${checks.length} report(s) checked, ${open.length} with something to see`, '', ...open, ...(checks.length > open.length ? ['', `clean: ${checks.length - open.length}`] : [])].join('\n');
+}
+
+/** The files under a folder whose names match, subfolders included. */
+async function findFiles(top: string, pattern: RegExp): Promise<string[]> {
+  const out: string[] = [];
+  for (const name of await readdir(top)) {
+    const path = join(top, name);
+    if ((await stat(path)).isDirectory()) out.push(...await findFiles(path, pattern));
+    else if (pattern.test(name)) out.push(path);
+  }
+  return out.sort();
 }
 
 async function main(argv: string[]): Promise<number> {
@@ -278,6 +309,8 @@ async function main(argv: string[]): Promise<number> {
     if (inputs.length === 0) throw new Error(`no .rpt files in ${input} or its subfolders`);
     await mkdir(outputDir, { recursive: true });
     let failures = 0;
+    // The check of every finished file, written together so a folder is judged from one short text.
+    const checks: string[] = [];
     // Output names already written in this run, per output folder (Windows file names ignore case).
     const writtenIn = new Map<string, Set<string>>();
     for (const { file, folder } of inputs) {
@@ -310,12 +343,22 @@ async function main(argv: string[]): Promise<number> {
         await writeFile(reviewPath, reviewMarkdown(basename(file), reports));
         const items = reports.reduce((n, r) => n + r.review.length, 0);
         console.error(`OK   ${file}: ${reports.filter((r) => r.rdl).length} report(s), ${items} review item(s)`);
+        for (const report of reports.filter((r) => r.rdl)) {
+          const findings = checkConverted(report.rdl, report.files, !!conventionsPath);
+          const shown = join(folder, report.fileName);
+          checks.push(diagnosisText(shown, findings));
+          console.error(`CHECK ${shown}: ${diagnosisLine(findings)}`);
+        }
       } catch (err) {
         failures++;
         console.error(`FAIL ${file}: ${(err as Error).message}`);
       }
     }
     if (inputs.length > 1) console.error(`${inputs.length - failures} of ${inputs.length} report(s) converted${failures ? `, ${failures} failed` : ''}`);
+    if (checks.length) {
+      await writeFile(join(outputDir, 'check.txt'), `${checkSummary(checks)}\n`);
+      console.error(`checks of every report: ${join(outputDir, 'check.txt')}`);
+    }
     return failures > 0 ? 1 : 0;
   }
 
@@ -326,6 +369,23 @@ async function main(argv: string[]): Promise<number> {
     const doc = input.toLowerCase().endsWith('.json') ? jsonToDocument(JSON.parse(raw.toString('utf8'))) : readCfb(raw);
     process.stdout.write(chartStructure(doc));
     return 0;
+  }
+
+  if (command === 'check') {
+    const template = takeFlag(args, '--conventions');
+    const [input, output] = positionals(args, 'check', 2);
+    if (!input) throw new Error('check needs an .rdl file or a folder of them');
+    const files = (await stat(input)).isDirectory() ? await findFiles(input, /(?<!\.preview)\.rdl$/i) : [input];
+    const checks: string[] = [];
+    for (const file of files) {
+      const code = file.replace(/\.rdl$/i, '.code.vb');
+      const extra = await readFile(code).then((t) => ({ '.code.vb': t.toString('utf8') }), () => undefined);
+      checks.push(diagnosisText(file, checkConverted((await readFile(file)).toString('utf8'), extra, template)));
+    }
+    const text = `${checkSummary(checks)}\n`;
+    if (output) await writeFile(output, text);
+    else process.stdout.write(text);
+    return checks.some((c) => !/: clean$/.test(c.split('\n')[0]!)) ? 1 : 0;
   }
 
   if (command === 'check-width') {
