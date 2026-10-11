@@ -127,6 +127,10 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     assert.ok(parseFloat(textOf(childElements(gap, 'Height')[0])) < 0.1 && names(gap).every((n) => /blnk/.test(n ?? '')), 'the space under the rule stays');
     const total = descendants(root).find((e) => e.attributes.Name === 'Holdings_Tab_1_Amount_TotVal')!;
     assert.equal(textOf(child(childElements(total, 'Style')[0]!, 'PaddingTop')), '2pt');
+    assert.equal(textOf(child(childElements(total, 'Style')[0]!, 'VerticalAlign')), 'Top');
+    const label = descendants(root).find((e) => e.attributes.Name === 'Holdings_Tab_1_TotTxt')!;
+    const labelCell = descendants(root).find((e) => e.name === 'TablixCell' && descendants(e).includes(label))!;
+    assert.ok(!descendants(labelCell).some((e) => e.name === 'ColSpan'), 'the label in its own column, as the merge reads a totals row');
     assert.ok(descendants(root).some((e) => e.attributes.Name === 'Holdings_Footer_Txt'), names(rows[rows.length - 1]!).join(' '));
     assert.ok(!descendants(root).some((e) => /in_Detail/i.test(e.attributes.Name ?? '')));
   });

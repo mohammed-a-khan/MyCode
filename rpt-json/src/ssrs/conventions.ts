@@ -772,6 +772,37 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
         }
       }
     });
+    rows.forEach((row, i) => {
+      if (kinds[i] !== 'total' && kinds[i] !== 'subtotal') return;
+      const cells = cellsOf(row);
+      for (let c = 0; c < cells.length; c++) {
+        const contents = child(cells[c]!, 'CellContents');
+        const span = Number(textOf(child(contents ?? el('x'), 'ColSpan')) || 1);
+        const item = cellItem(cells[c]!);
+        const inner = item?.name === 'Rectangle' ? childElements(child(item, 'ReportItems') ?? el('x')).filter((e) => ITEMS.has(e.name)) : item ? [item] : [];
+        const label = inner.length === 1 && inner[0]!.name === 'Textbox' ? inner[0]! : undefined;
+        if (span < 2 || span >= columns - 1 || !item || !label || fixedText(label) === undefined) continue;
+        const offset = item === label ? 0 : len(label, 'Left');
+        if (offset + textWidth(label, true) > widths[c]! - 0.02) continue;
+        if (item !== label && offset + len(label, 'Width') > widths[c]!) setChild(label, 'Width', inch(widths[c]! - offset));
+        const tb = item;
+        removeChildren(contents!, ['ColSpan']);
+        const st = childElements(tb, 'Style')[0];
+        const right = st ? childElements(st, 'RightBorder')[0] : undefined;
+        if (st) removeChildren(st, ['RightBorder']);
+        for (let k = 1; k < span; k++) {
+          const blank = newTextbox(`__total_${c + k}`, '', '0pt');
+          if (st) {
+            const copy = structuredClone(st);
+            removeChildren(copy, ['LeftBorder', 'RightBorder']);
+            if (k === span - 1 && right) copy.children.push(structuredClone(right));
+            blank.children = blank.children.filter((x) => typeof x !== 'object' || (x as XmlElement).name !== 'Style');
+            blank.children.push(copy);
+          }
+          cells[c + k]!.children = [el('CellContents', blank)];
+        }
+      }
+    });
     // A table without column headings, or placing its lines by formula (a statement's indented labels), is lines of
     // text, not rows of data: its rows are not banded.
     const statement = !rows.some((row, i) => kinds[i] === 'heading' && !descendants(row).some((e) => roles.get(e) === 'title')) || rows.some((row, i) => kinds[i] === 'detail'
@@ -1137,6 +1168,14 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
 
   // ----- Looks from the style dataset.
   if (conv.style) applyStyleRoles(report, conv.style, roles, tableCells, unbanded, bandRows, review, dataSources[0]?.attributes.Name ?? conv.dataSource?.name ?? '');
+  for (const row of descendants(report).filter((e) => e.name === 'TablixRow')) {
+    const texts = descendants(row).filter((e) => e.name === 'Textbox');
+    if (!texts.some((t) => ruledAbove(t) && !isBlank(t))) continue;
+    for (const t of texts.filter((x) => !isBlank(x))) {
+      const st = childElements(t, 'Style')[0];
+      if (st) setChild(st, 'VerticalAlign', 'Top');
+    }
+  }
 
 
   // ----- References to renamed items, groups, datasets and parameters.
