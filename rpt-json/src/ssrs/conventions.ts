@@ -226,7 +226,9 @@ const snake = (text: string) => text.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+
  */
 function fieldOf(textbox: XmlElement): string | undefined {
   const v = valueOf(textbox).trim();
-  const m = /^=\s*(?:\w+\(\s*)?Fields!(\w+)\.Value(?:\s*(?:,\s*"[^"]*"\s*)?\))?\s*$/i.exec(v);
+  const m = /^=\s*(?:\w+\(\s*)?Fields!(\w+)\.Value(?:\s*(?:,\s*"[^"]*"\s*)?\))?\s*$/i.exec(v)
+    // (A field shown in one of the places it can stand: "IIf(<its place> = k, Fields!X.Value, Nothing)".)
+    ?? /^=\s*IIf\([\s\S]*,\s*Fields!(\w+)\.Value\s*,\s*Nothing\s*\)\s*$/i.exec(v);
   return m?.[1]?.replace(/^F_(?=\w)/, '');
 }
 /** A name worked from an item's Crystal name (its number dropped). */
@@ -999,6 +1001,24 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
         const tb = newTextbox('__spare', '', '0pt');
         tb.attributes.Name = names.make(fill('blank', { T }));
         named.add(tb);
+        // (A rule or band drawn along the row, a border or fill of its last cell, runs on through the spare cells to the
+        // table's edge, as it did across the space they are taken from.)
+        const lastItem = cellsOf(row)[at] ? cellItem(cellsOf(row)[at]!) : undefined;
+        if (lastItem) {
+          const from = ownStyle(lastItem);
+          const to = ownStyle(tb);
+          for (const side of ['TopBorder', 'BottomBorder', 'BackgroundColor']) {
+            const value = child(from, side);
+            if (value) {
+              removeChildren(to, [side]);
+              to.children.push(structuredClone(value));
+            }
+          }
+          const all = child(from, 'Border');
+          if (all && !/^none$/i.test(textOf(child(all, 'Style')))) {
+            for (const side of ['TopBorder', 'BottomBorder']) if (!child(to, side)) to.children.push(el(side, ...structuredClone(all.children)));
+          }
+        }
         child(row, 'TablixCells')!.children.push(el('TablixCell', el('CellContents', tb)));
       }
     }
