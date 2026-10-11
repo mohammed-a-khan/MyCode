@@ -484,9 +484,12 @@ describe('conventions', () => {
     // Empty cells numbered in reading order, row by row, left to right.
     const blankNumbers = descendants(tables[1]!).filter((e) => e.name === 'Textbox' && /_empty\d+$/.test(e.attributes.Name ?? '')).map((e) => Number(/(\d+)$/.exec(e.attributes.Name!)![1]));
     assert.deepEqual(blankNumbers, blankNumbers.map((_, i) => i + 1), `empty cells in reading order: ${blankNumbers}`);
-    // Each spare column wide enough to be seen and picked in the designer.
     const widths = childElements(child(tables[1]!, 'TablixBody/TablixColumns')!, 'TablixColumn').map((c) => parseFloat(textOf(child(c, 'Width'))));
-    assert.ok(widths.slice(-(cols(tables[0]!) - 1)).every((w) => w >= 0.149), `spare columns seen: ${widths}`);
+    const spareWidths = widths.slice(-(cols(tables[0]!) - 1));
+    assert.ok(spareWidths.every((w) => w <= 0.011), `spare columns thin: ${widths}`);
+    const own = childElements(child(original[1]!, 'TablixBody/TablixColumns')!, 'TablixColumn').map((c) => parseFloat(textOf(child(c, 'Width'))));
+    const kept = widths.slice(0, own.length);
+    assert.equal(kept.filter((w, i) => Math.abs(w - own[i]!) > 0.001).length, 1, `only the widest column gives up their width: ${own} -> ${kept}`);
 
     // A rule along a row (the last cell's border) runs on through the spare cells to the table's edge.
     const withRule = parseXml(plain);

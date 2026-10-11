@@ -708,7 +708,8 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     while (at < top.length && leaves[at]?.member === top[at] && leaves[at]!.kind === 'heading') at++;
     const headed = rowsOf(tablix).slice(0, at).some((row) => descendants(row).some((e) => e.name === 'Textbox' && !isBlank(e)));
     if (textOf(child(tablix, 'DataSetName')) && headed && !leaves.some((l) => l.kind === 'noData')) {
-      const what = (titleText ?? reportName.replace(/_/g, ' ')).trim();
+      const ownTitle = descendants(tablix).find((e) => e.name === 'Textbox' && roles.get(e) === 'title');
+      const what = ((ownTitle && fixedText(ownTitle)) ?? titleText ?? reportName.replace(/_/g, ' ')).trim();
       const message = conv.noData.replace(/\{TITLE\}/g, what.toUpperCase()).replace(/\{title\}/g, what);
       const row = spanningRow(0.2, newTextbox('__nodata', message), columns);
       child(tablix, 'TablixBody/TablixRows')!.children.splice(at, 0, row);
@@ -1175,23 +1176,10 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     // A last column left empty in every row (Crystal's space at the table's right) is shared out with the spare
     // columns, so that each is wide enough to be seen and picked in the designer; otherwise they are thin slivers.
     const at = columns.length - 1;
-    const emptyLast = rowsOf(t).every((row) => {
-      const cells = cellsOf(row);
-      const item = cells[at] ? cellItem(cells[at]!) : undefined;
-      return !cells[at] || !item || (item.name === 'Textbox' && isBlank(item) && !drawnAs(item));
-    }) && rowsOf(t).every((row) => cellsOf(row).length === columns.length);
-    // Each wide enough to be seen and picked (0.15in): taken from the empty last column first, then from the widest
-    // column where it keeps an inch; the table keeps its width.
-    let each = emptyLast ? Math.max(SPARE_SEEN, Math.floor(len(last, 'Width') / (spare + 1) * 1000) / 1000) : SPARE_SEEN;
-    const fromLast = emptyLast ? Math.max(0, len(last, 'Width') - each) : 0;
-    const widest = (emptyLast ? columns.slice(0, -1) : columns).reduce<XmlElement | undefined>((w, c) => (!w || len(c, 'Width') > len(w, 'Width') ? c : w), undefined);
-    const rest = spare * each - Math.min(fromLast, spare * each);
-    if (rest > 0.001 && (!widest || len(widest, 'Width') - rest < 1)) each = SPARE_WIDTH;
-    if (each === SPARE_WIDTH) setChild(last, 'Width', inch(len(last, 'Width') - spare * each));
-    else {
-      if (fromLast) setChild(last, 'Width', inch(len(last, 'Width') - Math.min(fromLast, spare * each)));
-      if (rest > 0.001) setChild(widest!, 'Width', inch(len(widest!, 'Width') - rest));
-    }
+    const each = SPARE_WIDTH;
+    const widest = columns.reduce<XmlElement | undefined>((w, c) => (!w || len(c, 'Width') > len(w, 'Width') ? c : w), undefined)!;
+    const from = len(widest, 'Width') - spare * each >= 1 ? widest : last;
+    setChild(from, 'Width', inch(len(from, 'Width') - spare * each));
     const T = t.attributes.Name ?? '';
     for (let k = 0; k < spare; k++) {
       child(t, 'TablixBody/TablixColumns')!.children.push(el('TablixColumn', el('Width', inch(each))));
@@ -2143,8 +2131,6 @@ let designLeading = DESIGN_LEADING;
 let designText = false;
 /** The width of a thin empty column (inches). */
 const SPARE_WIDTH = 0.01;
-/** The width a spare column is given where the table has room for it (inches): seen and picked in the designer. */
-const SPARE_SEEN = 0.15;
 
 /** Fits the items in a container (see above); returns where the lowest ends. */
 function fitItems(container: XmlElement | undefined): number {
