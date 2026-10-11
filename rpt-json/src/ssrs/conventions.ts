@@ -646,6 +646,48 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       });
     }
 
+    // A title Crystal printed in the table's own header (as in a group over the whole report): the first row, one
+    // fixed text across the table, over its headings. It is the table's title, with the rule of the box round it.
+    if (!titleText && tablix === tablixes[0]) {
+      const first = rowsOf(tablix)[0];
+      const kind = rowLeaves(tablix)[0]?.kind;
+      const shown = (e: XmlElement) => [e, ...descendants(e)].some((x) => x.name === 'Textbox' && !isBlank(x));
+      const filled = first && (kind === 'heading' || kind === 'groupHeading') && rowsOf(tablix).length > 1
+        ? cellsOf(first).map((cell, c) => ({ cell, c, item: cellItem(cell) })).filter((x) => x.item && shown(x.item)) : [];
+      const only = filled.length === 1 ? filled[0]! : undefined;
+      const item = only?.item;
+      const inner = item?.name === 'Rectangle' ? childElements(child(item, 'ReportItems') ?? el('x')).filter((e) => ITEMS.has(e.name)) : item ? [item] : [];
+      const tb = inner.length === 1 && inner[0]!.name === 'Textbox' ? inner[0]! : undefined;
+      const span = only ? Number(textOf(child(child(only.cell, 'CellContents') ?? el('x'), 'ColSpan')) || 1) : 0;
+      const spanWidth = only ? widths.slice(only.c, only.c + span).reduce((a, b) => a + b, 0) : 0;
+      const words = tb ? fixedText(tb) : undefined;
+      // (Over headings of its own: the next row is two or more fixed texts.)
+      const next = rowsOf(tablix)[1];
+      const headingsUnder = !!next && descendants(next).filter((e) => e.name === 'Textbox' && !isBlank(e) && fixedText(e) !== undefined).length >= 2;
+      if (only && item && tb && words && words.trim().length > 3 && !/:\s*$/.test(words) && span >= 2 && headingsUnder
+        && spanWidth >= 0.8 * tWidth && !child(item, 'Visibility')) {
+        if (item !== tb) {
+          const own = ownStyle(tb);
+          const from = childElements(item, 'Style')[0];
+          for (const side of [...BORDER_SIDES].reverse()) {
+            const border = child(from, side);
+            if (border && !/^none$/i.test(textOf(child(border, 'Style')))) {
+              removeChildren(own, [side]);
+              own.children.unshift(structuredClone(border));
+            }
+          }
+          pad(tb, { left: len(tb, 'Left'), top: len(tb, 'Top'), right: Math.max(0, spanWidth - len(tb, 'Left') - len(tb, 'Width')) });
+          unplace(tb);
+          const contents = child(only.cell, 'CellContents')!;
+          contents.children = contents.children.map((x) => (x === item ? tb : x));
+        }
+        titleText = words.trim();
+        rename(tb, 'title');
+        roles.set(tb, 'title');
+        tableCells.add(tb);
+      }
+    }
+
     // A row shown only when there is no data, under the headings: where the table has headings of its own (a table
     // of lines with none, as a statement under another, prints nothing then, as in Crystal).
     const leaves = rowLeaves(tablix);
@@ -1277,14 +1319,16 @@ function inTable(item: XmlElement, container: XmlElement): boolean {
  * runs (as all text is where the style dataset styles it), the designer draws it at its default size (10pt), so
  * that is what it needs; undefined there unless asked.
  */
-function textHeight(textbox: XmlElement, design = false): number | undefined {
+function textHeight(textbox: XmlElement, design = false, width?: number): number | undefined {
   const sizes = descendants(textbox).filter((e) => e.name === 'FontSize').map((e) => textOf(e));
   // (Text the style dataset styles takes its size from there: drawn at the default size, or its own if larger.)
   const worked = design || sizes.some((v) => v.startsWith('='));
   if (worked && !design) return undefined;
   const points = sizes.filter((v) => !v.startsWith('=')).map((v) => (inches(v) ?? 0) * 72).filter((v) => v > 0);
   const size = Math.max(worked || !points.length ? DESIGN_FONT : 0, ...points);
-  const lines = Math.max(1, descendants(textbox).filter((e) => e.name === 'Paragraph').length);
+  // (Fixed text in a cell of known width: the lines it wraps to there.)
+  const wrapped = width !== undefined ? wrapLines(textbox, width, size) : undefined;
+  const lines = wrapped ?? Math.max(1, descendants(textbox).filter((e) => e.name === 'Paragraph').length);
   const style = childElements(textbox, 'Style')[0];
   const padding = ['PaddingTop', 'PaddingBottom'].reduce((a, k) => a + (inches(textOf(child(style, k))) ?? 0), 0);
   return (lines * size * (worked ? designLeading : 1.2)) / 72 + padding;
@@ -1303,17 +1347,23 @@ function fitTablix(tablix: XmlElement): number {
     // Rows printed once (titles, headings, totals) are drawn with room round the designer's default size; rows printed
     // for each record or group just hold a line of it, so that a page holds about as many as Crystal's does.
     designLeading = ['detail', 'groupHeading', 'subtotal'].includes(kinds[r] ?? 'detail') ? DESIGN_TIGHT : DESIGN_LEADING;
-    for (const cell of cellsOf(row)) {
+    const widths = widthsOf(tablix);
+    for (const [c, cell] of cellsOf(row).entries()) {
       const item = cellItem(cell);
       if (!item) continue;
+      const span = Number(textOf(child(child(cell, 'CellContents') ?? el('x'), 'ColSpan')) || 1);
+      const cellWidth = widths.slice(c, c + span).reduce((a, b) => a + b, 0) || undefined;
+      // (Fixed text whose longest word is wider than its cell less Crystal's placing: placed closer to the edges, so
+      // the word is not broken.)
+      if (item.name === 'Textbox' && cellWidth && fixedText(item)) roomForWords(item, cellWidth, designText);
       if (item.name === 'Rectangle') need = Math.max(need, fitItems(child(item, 'ReportItems')));
       else if (item.name === 'Tablix') need = Math.max(need, len(item, 'Height') + fitTablix(item));
       else if (item.name === 'Textbox' && !child(item, 'Visibility') && textOf(child(item, 'CanShrink')) !== 'true') {
-        if (fixedText(item)) need = Math.max(need, textHeight(item) ?? 0);
+        if (fixedText(item)) need = Math.max(need, textHeight(item, false, cellWidth) ?? 0);
       }
       // (Text in the house's fonts, worked out when the report runs: the designer draws it at its default size, and
       // a row shorter than that cuts it off there.)
-      if (item.name === 'Textbox' && designText && !isBlank(item)) need = Math.max(need, textHeight(item, true)!);
+      if (item.name === 'Textbox' && designText && !isBlank(item)) need = Math.max(need, textHeight(item, true, fixedText(item) ? cellWidth : undefined)!);
     }
     if (need > height + 0.001) {
       setChild(row, 'Height', inch(need));
@@ -1480,7 +1530,7 @@ function emptyRow(row: XmlElement): boolean {
 }
 
 /**
- * Text of fixed lines ("Security" & vbCrLf & "Type") as one paragraph per line: the designer shows and edits it as
+ * Text of fixed lines ("Order" & vbCrLf & "Date") as one paragraph per line: the designer shows and edits it as
  * text, where an expression shows as «Expr».
  */
 function plainLines(report: XmlElement): void {
@@ -1574,6 +1624,79 @@ function textAlignOf(textbox: XmlElement): string {
   if (set && set !== 'General') return set;
   const format = descendants(textbox).find((e) => e.name === 'Format');
   return (format && /[#0]|^[NCP]\d*$/i.test(textOf(format))) || /^=\s*(Sum|Count|Avg)\(/i.test(valueOf(textbox)) ? 'Right' : 'Left';
+}
+
+/** Widths of Arial's letters, in thousandths of the size (others as a digit). */
+const ARIAL: Record<string, number> = Object.fromEntries([
+  ...[...' !,./:;I[\\]ijlft'].map((ch) => [ch, ch === 'f' || ch === 't' ? 278 : 'ijl'.includes(ch) ? 222 : 278]),
+  ...[...'"'].map((ch) => [ch, 355]), ["'", 191], ['(', 333], [')', 333], ['-', 333], ['r', 333], ['*', 389], ['^', 469],
+  ...[...'ckvxyzsJ'].map((ch) => [ch, 500]), ...[...'+<=>'].map((ch) => [ch, 584]), ['F', 611], ['T', 611], ['Z', 611],
+  ...[...'ABEKPSVXY&'].map((ch) => [ch, 667]), ...[...'CDHNRUw'].map((ch) => [ch, 722]), ...[...'GOQ'].map((ch) => [ch, 778]),
+  ['M', 833], ['m', 833], ['%', 889], ['W', 944], ['@', 1015],
+]);
+
+/** How wide a run of text is drawn in Arial at a size (inches); bold a little wider. */
+function arialWidth(text: string, size: number, bold: boolean): number {
+  let units = 0;
+  for (const ch of text) units += ARIAL[ch] ?? 556;
+  return (units / 1000) * size * (bold ? 1.1 : 1) / 72;
+}
+
+/** The size (pt) and weight fixed text is drawn at in the designer. */
+function drawnFont(textbox: XmlElement, design: boolean): { size: number; bold: boolean } {
+  const sizes = descendants(textbox).filter((e) => e.name === 'FontSize').map((e) => textOf(e));
+  const worked = design || sizes.some((v) => v.startsWith('='));
+  const points = sizes.filter((v) => !v.startsWith('=')).map((v) => (inches(v) ?? 0) * 72).filter((v) => v > 0);
+  const weights = descendants(textbox).filter((e) => e.name === 'FontWeight').map((e) => textOf(e));
+  // (Where the house's styles give the weight, it is not known yet: taken as bold, so there is room either way.)
+  return { size: Math.max(worked || !points.length ? DESIGN_FONT : 0, ...points), bold: (design && designText) || weights.some((w) => w.startsWith('=') || /bold|heavy|black/i.test(w)) };
+}
+
+/** The padding (inches) of a text box's sides. */
+function paddingOf(textbox: XmlElement, sides: string[]): number {
+  const style = childElements(textbox, 'Style')[0];
+  return sides.reduce((a, k) => a + (inches(textOf(child(style, k))) ?? 0), 0);
+}
+
+/** The lines a text box's fixed text wraps to in a cell of a width (its paragraphs, each wrapped at its words). */
+function wrapLines(textbox: XmlElement, width: number, size: number): number | undefined {
+  const text = fixedText(textbox);
+  if (text === undefined) return undefined;
+  const { bold } = drawnFont(textbox, true);
+  const room = Math.max(0.01, width - paddingOf(textbox, ['PaddingLeft', 'PaddingRight']));
+  let lines = 0;
+  for (const paragraph of text.split(/\r?\n/)) {
+    let line = 0;
+    lines++;
+    for (const word of paragraph.split(/ +/)) {
+      const w = arialWidth(word, size, bold);
+      const gap = line ? arialWidth(' ', size, bold) : 0;
+      if (line && line + gap + w > room) {
+        lines++;
+        line = w;
+      } else line += gap + w;
+      // (A word wider than the room is broken over lines.)
+      if (w > room) lines += Math.ceil(w / room) - 1;
+    }
+  }
+  return Math.max(1, lines);
+}
+
+/** Fixed text whose longest word is wider than its cell less its padding: the padding at its sides cut back to fit it. */
+function roomForWords(textbox: XmlElement, width: number, design: boolean): void {
+  const text = fixedText(textbox);
+  if (!text) return;
+  const { size, bold } = drawnFont(textbox, design);
+  const longest = Math.max(...text.split(/\s+/).map((w) => arialWidth(w, size, bold)));
+  const style = childElements(textbox, 'Style')[0];
+  if (!style) return;
+  const left = paddingOf(textbox, ['PaddingLeft']);
+  const right = paddingOf(textbox, ['PaddingRight']);
+  const spare = width - longest - 0.02;
+  if (left + right <= 0 || width - left - right >= longest + 0.02) return;
+  const keep = Math.max(0, Math.min(1, spare / (left + right)));
+  setChild(style, 'PaddingLeft', `${((left * keep) * 72).toFixed(1)}pt`);
+  setChild(style, 'PaddingRight', `${((right * keep) * 72).toFixed(1)}pt`);
 }
 
 /**

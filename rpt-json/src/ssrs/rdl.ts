@@ -794,7 +794,7 @@ class RdlBuilder {
       columnType: (table, field) => this.findField(table, field)?.type,
       formula: (other) => this.formulaSql(other),
       customFunction: (fn) => this.definition.formulas.find((f) => f.name.toLowerCase() === fn.toLowerCase() && isCustomFunction(f.text))?.text,
-      addFunction: (fnKey, text) => this.addSqlFunction(fnKey, fnKey.startsWith('custom:') ? fnKey.slice(7) : fnKey === 'helper:splitpart' ? 'SplitPart' : this.sqlFormulaName, text),
+      addFunction: (fnKey, text) => this.addSqlFunction(fnKey, fnKey.startsWith('custom:') ? fnKey.slice(7) : fnKey === 'helper:splitpart' ? 'SplitPart' : fnKey === 'helper:splitpartnocase' ? 'SplitPartNoCase' : this.sqlFormulaName, text),
       variable: at ? (name) => this.printValue(name.toLowerCase(), at) : undefined,
     });
   }
@@ -920,7 +920,7 @@ class RdlBuilder {
             return own.get(k);
           },
           customFunction: (fn) => this.definition.formulas.find((f) => f.name.toLowerCase() === fn.toLowerCase() && isCustomFunction(f.text))?.text,
-          addFunction: (fnKey, text) => this.addSqlFunction(fnKey, fnKey.startsWith('custom:') ? fnKey.slice(7) : fnKey === 'helper:splitpart' ? 'SplitPart' : formula.name, text),
+          addFunction: (fnKey, text) => this.addSqlFunction(fnKey, fnKey.startsWith('custom:') ? fnKey.slice(7) : fnKey === 'helper:splitpart' ? 'SplitPart' : fnKey === 'helper:splitpartnocase' ? 'SplitPartNoCase' : formula.name, text),
         });
       };
       const out = translate(formula.text);
@@ -3321,8 +3321,22 @@ class RdlBuilder {
           ...[...this.queryFormulas.values()].map((f) => `  -- ${f.comment ?? `{@${f.formula}}: ${f.text.replace(/\s+/g, ' ').trim().slice(0, 300)}`}\n  ${layOutSql(f.sql, '    ')} AS ${this.quote(f.name)}`),
         ].join(',\n');
         const text = [
-          `-- The rows of ${called}, as the Crystal report read them (its columns in its order: check them against it).`,
-          `CREATE TABLE #rows (\n${rows.fields.map((f) => `  ${this.quote(f.name)} ${sqlColumnType(f)}`).join(',\n')}\n);`,
+          `-- The rows of ${called}, in a table shaped as its result: as SQL Server describes it, else (as for a`,
+          `-- procedure using temporary tables) as the Crystal report read it, its columns in its order.`,
+          'CREATE TABLE #rows ([shape_key] bit);',
+          'DECLARE @shape TABLE (n int PRIMARY KEY, col nvarchar(max));',
+          "INSERT INTO @shape SELECT d.column_ordinal, QUOTENAME(d.name) + N' ' + d.system_type_name + N' NULL'",
+          `FROM sys.dm_exec_describe_first_result_set_for_object(OBJECT_ID(N'${called.replace(/'/g, "''")}'), 0) AS d`,
+          'WHERE d.is_hidden = 0 AND d.name IS NOT NULL AND d.error_number IS NULL;',
+          'DECLARE @columns nvarchar(max), @n int = (SELECT MIN(n) FROM @shape);',
+          'WHILE @n IS NOT NULL',
+          'BEGIN',
+          "  SET @columns = COALESCE(@columns + N', ', N'') + (SELECT col FROM @shape WHERE n = @n);",
+          '  SET @n = (SELECT MIN(n) FROM @shape WHERE n > @n);',
+          'END;',
+          `IF @columns IS NULL SET @columns = N'${rows.fields.map((f) => `${this.quote(f.name)} ${sqlColumnType(f)} NULL`).join(', ').replace(/'/g, "''")}';`,
+          "EXEC (N'ALTER TABLE #rows ADD ' + @columns);",
+          'ALTER TABLE #rows DROP COLUMN [shape_key];',
           `INSERT INTO #rows\nEXEC ${called}${own.length ? ` ${own.join(', ')}` : ''};`,
           `SELECT\n${select}\nFROM #rows AS ${this.quote(rows.alias)}${where ? `\nWHERE ${where.sql}` : ''}`,
         ].join('\n');
