@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 import type { DataSourceInfo, ReportDefinition, ReportObject } from '../src/crystal/model.ts';
 import { applyConventions, readConventions } from '../src/ssrs/conventions.ts';
 import { convertToRdl } from '../src/ssrs/rdl.ts';
-import { child, childElements, descendants, el, parseXml, textOf, type XmlElement } from '../src/ssrs/xml.ts';
+import { child, childElements, descendants, el, parseXml, textOf, toXml, type XmlElement } from '../src/ssrs/xml.ts';
 
 const source: DataSourceInfo = {
   connections: [],
@@ -368,6 +368,11 @@ describe('conventions', () => {
     assert.equal(valueIn(places[1]), `=IIf(${level} = 1, Fields!Amount.Value, Nothing)`);
     assert.equal(textOf(child(places[1]!, 'Style/BottomBorder/Style')), `=IIf(${level} = 1, IIf((RTrim(Fields!Under.Value) = "Y"), "Solid", "None"), "None")`);
     assert.equal(textOf(child(places[1]!, 'Style/BottomBorder/Width')), '1.00pt');
+    // Named as the column they show (its box, its values, its heading), as the merge finds them.
+    const names = [...applyConventions(rdl, 'O', conventions).rdl.matchAll(/<(?:Textbox|Rectangle) Name="([^"]*)"/g)].map((m) => m[1]);
+    for (const name of ['O_Grid_1_Amount_Box', 'O_Grid_1_Amount_Val', 'O_Grid_1_Amount_Val_2', 'O_Grid_1_Amount_Val_3', 'O_Grid_1_Amount_Head']) {
+      assert.ok(names.includes(name), `${name} in ${names.join(', ')}`);
+    }
   });
 
   it('gives the rows printed for each record one line of the designer\'s size and no more, a rule along the text moving with it', () => {
@@ -476,6 +481,22 @@ describe('conventions', () => {
       assert.ok(spans <= cols(tables[1]!));
     }
     assert.equal(childElements(child(tables[1]!, 'TablixColumnHierarchy/TablixMembers')!, 'TablixMember').length, cols(tables[1]!));
+    // Each spare column wide enough to be seen and picked in the designer.
+    const widths = childElements(child(tables[1]!, 'TablixBody/TablixColumns')!, 'TablixColumn').map((c) => parseFloat(textOf(child(c, 'Width'))));
+    assert.ok(widths.slice(-(cols(tables[0]!) - 1)).every((w) => w >= 0.149), `spare columns seen: ${widths}`);
+
+    // A rule along a row (the last cell's border) runs on through the spare cells to the table's edge.
+    const withRule = parseXml(plain);
+    const secondTable = descendants(withRule).find((e) => e.name === 'Tablix' && e.attributes.Name === 'Second')!;
+    const detail = childElements(child(secondTable, 'TablixBody/TablixRows')!, 'TablixRow').find((row) => descendants(row).some((e) => e.name === 'Textbox' && valueIn(e).startsWith('=Fields!')))!;
+    const lastBox = descendants(childElements(child(detail, 'TablixCells')!, 'TablixCell').at(-1)!).find((e) => e.name === 'Textbox')!;
+    childElements(lastBox, 'Style')[0]!.children.push(el('BottomBorder', el('Color', 'Black'), el('Style', 'Solid'), el('Width', '2pt')));
+    const ruled = toXml(withRule);
+    const rr = parseXml(applyConventions(ruled, 'Orders', conventions).rdl);
+    const ruledRow = childElements(child(descendants(rr).filter((e) => e.name === 'Tablix')[1]!, 'TablixBody/TablixRows')!, 'TablixRow')
+      .find((row) => descendants(row).some((e) => e.name === 'Textbox' && valueIn(e).startsWith('=Fields!')))!;
+    const spareCells = childElements(child(ruledRow, 'TablixCells')!, 'TablixCell').slice(-(cols(tables[0]!) - 1));
+    for (const cell of spareCells) assert.equal(textOf(child(descendants(cell).find((e) => e.name === 'Textbox')!, 'Style/BottomBorder/Width')), '2pt', 'the rule runs on through the spare cell');
   });
 
   it('gives each column a heading of its own and lists the columns by number, for reports combined', () => {
