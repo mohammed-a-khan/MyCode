@@ -241,6 +241,7 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     const totals = descendants(root).filter((e) => e.name === 'Textbox' && /_S\d_SubtotalLabel$/.test(e.attributes.Name ?? ''));
     assert.equal(totals.length, 3, out.match(/Name="[^"]*S\d[^"]*"/g)?.join(" "));
     assert.ok(totals.every((t) => !!child(t, 'Width')), 'each total in a box of its own, the last too');
+    assert.ok(totals.every((t) => parseFloat(textOf(child(t, 'Top'))) >= 0.02), 'each total\'s rule drawn inside its cell, not on its edge');
     const later = parseXml(applyConventions(out.replace(/(<Tablix Name=")([^"]+)(">[\s\S]*?<\/Tablix>)/, (m) => m + m.replace(/Name="([^"]+)"/g, 'Name="$1_b"').replace(/(<\/TablixRowHierarchy>[\s\S]*?<Top>)[^<]*(<\/Top>)/, '$15in$2')), 'Holdings', styled).rdl);
     const [first, second] = descendants(later).filter((e) => e.name === 'Tablix');
     const firstCount = childElements(child(first!, 'TablixBody/TablixColumns')!, 'TablixColumn').length;
@@ -294,5 +295,10 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     const at = cells.findIndex((c) => descendants(c).includes(total));
     assert.ok(widths[at]! >= 1253 / 1440 - 0.005, `the total's column as wide as Crystal drew the total: ${widths[at]}`);
     assert.deepEqual(diagnoseRdl(out, true).filter((x) => x.kind === 'overlap' || x.kind === 'cut off' || x.kind === 'empty row'), []);
+  });
+
+  it('lists a box holding more than one column heading', () => {
+    const rdl = `<Report><ReportSections><ReportSection><Body><ReportItems><Rectangle Name="A_x_Rect"><ReportItems><Textbox Name="A_x_ColTxt"><Paragraphs/></Textbox><Textbox Name="A_x_2_ColTxt"><Paragraphs/></Textbox></ReportItems></Rectangle></ReportItems></Body></ReportSection></ReportSections></Report>`;
+    assert.ok(diagnoseRdl(rdl, true).some((f) => f.kind === 'merge' && f.item === 'A_x_Rect'));
   });
 });

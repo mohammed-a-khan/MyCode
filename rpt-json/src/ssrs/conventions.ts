@@ -261,9 +261,10 @@ function restack(tablix: XmlElement): void {
     const cells = cellsOf(row);
     const texts = cells.flatMap((cell) => { const item = cellItem(cell); return item?.name === 'Rectangle' ? inner(item) : item ? [item] : []; })
       .filter((e) => e.name === 'Textbox' && !isBlank(e));
-    if (texts.length < 2 || !texts.every((e) => fixedText(e) !== undefined)) continue;
+    if (texts.filter((e) => fixedText(e) !== undefined).length < 2 || texts.some((e) => /Fields!|\b(Sum|Count|Avg)\(/i.test(valueOf(e)))) continue;
     const mids = texts.map((e) => len(e, 'Top') + len(e, 'Height') / 2);
-    if (texts.every((e) => child(e, 'Top')) && Math.max(...mids) - Math.min(...mids) < 0.2) {
+    const alone = cells.every((cell) => inner(cellItem(cell)).filter((e) => e.name === 'Textbox' && !isBlank(e)).length <= 1);
+    if (alone && texts.every((e) => child(e, 'Top')) && Math.max(...mids) - Math.min(...mids) < 0.25) {
       for (const e of texts) {
         setChild(e, 'Top', '0in');
         setChild(ownStyle(e), 'VerticalAlign', 'Middle');
@@ -294,6 +295,18 @@ function restack(tablix: XmlElement): void {
           removeChildren(target, ['CellContents']);
           target.children.push(el('CellContents', content));
         }
+      }
+      c += span;
+    }
+    for (let i = 0, c = 0, now = cellsOf(row); i < now.length; i++) {
+      if (!child(now[i]!, 'CellContents')) continue;
+      const span = spanOf(now[i]!);
+      const room = widths.slice(c, c + span).reduce((a, b) => a + b, 0);
+      const parts = inner(cellItem(now[i]!));
+      const only = parts.length === 1 && parts[0]!.name === 'Textbox' ? parts[0]! : undefined;
+      if (only && fixedText(only) !== undefined && descendants(only).some((e) => e.name === 'TextAlign' && /^center$/i.test(textOf(e)))) {
+        setChild(only, 'Left', '0in');
+        setChild(only, 'Width', inch(room));
       }
       c += span;
     }
@@ -359,7 +372,7 @@ function restack(tablix: XmlElement): void {
     const cells = cellsOf(row);
     const placedIn = cells.map((cell) => { const item = cellItem(cell); return item?.name === 'Rectangle' ? inner(item) : []; });
     const ruled = placedIn.flat().filter((e) => e.name === 'Textbox' && ruledAbove(e));
-    const skip = ruled.length ? Math.min(...ruled.map((e) => len(e, 'Top'))) : 0;
+    const skip = ruled.length ? Math.max(0, Math.min(...ruled.map((e) => len(e, 'Top'))) - 0.028) : 0;
     if (skip > 0.01) for (const e of placedIn.flat()) if (child(e, 'Top')) setChild(e, 'Top', inch(Math.max(0, len(e, 'Top') - skip)));
     const leaf = members[r]?.member;
     if (!leaf || child(leaf, 'Group') || members[r]!.kind === 'detail' || members[r]!.kind === 'noData') continue;
@@ -395,7 +408,7 @@ function restack(tablix: XmlElement): void {
       }
     });
     setChild(row, 'Height', inch(cut));
-    const lower = el('TablixRow', el('Height', inch(Math.max(height - cut, lowerBottom - cut + 0.08))), el('TablixCells', ...lowerCells));
+    const lower = el('TablixRow', el('Height', inch(Math.max(height - cut, lowerBottom - cut + 0.2))), el('TablixCells', ...lowerCells));
     stackedRows.add(lower);
     const rowsEl = child(tablix, 'TablixBody/TablixRows')!;
     rowsEl.children.splice(rowsEl.children.indexOf(row) + 1, 0, lower);
