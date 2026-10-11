@@ -122,7 +122,9 @@ export function diagnoseRdl(xml: string, template = false, standardParameters: s
           && !descendants(c).some((e) => /^(Top|Bottom)Border$/.test(e.name) && !/^None$/i.test(textOf(child(e, 'Style')) || 'None'));
       });
       // (An empty row of a line or more is the space Crystal left there; a sliver is left over from a section.)
-      if (cells.length && blank && len(row, 'Height') < 0.1) out.push({ kind: 'empty row', item: `${t.attributes.Name} row ${r + 1}`, message: `a sliver ${len(row, 'Height').toFixed(3)}in high with nothing in it, hard to find in the designer` });
+      const ruled = (other: XmlElement | undefined, side: string) => !!other && descendants(other).some((e) => (e.name === `${side}Border` || e.name === 'Border') && /solid|dashed|dotted|double/i.test(textOf(child(e, 'Style'))));
+      const spacing = ruled(rowsOf(t)[r - 1], 'Bottom') || ruled(rowsOf(t)[r + 1], 'Top');
+      if (cells.length && blank && !spacing && len(row, 'Height') < 0.1) out.push({ kind: 'empty row', item: `${t.attributes.Name} row ${r + 1}`, message: `a sliver ${len(row, 'Height').toFixed(3)}in high with nothing in it, hard to find in the designer` });
     }
   }
   // The merge hides and moves the columns of the first table by its headings: headings only in a later table are not

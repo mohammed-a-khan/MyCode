@@ -4,13 +4,13 @@ import type { ReportDefinition, ReportObject } from '../src/crystal/model.ts';
 import { applyConventions, readConventions } from '../src/ssrs/conventions.ts';
 import { diagnoseRdl, diagnosisLine } from '../src/ssrs/diagnose.ts';
 import { convertToRdl } from '../src/ssrs/rdl.ts';
-import { child, childElements, descendants, parseXml, textOf } from '../src/ssrs/xml.ts';
+import { child, childElements, descendants, parseXml, textOf, type XmlElement } from '../src/ssrs/xml.ts';
 
 const source = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Kind', type: 'string' }, { name: 'Amount', type: 'currency' }] }] } as never;
 const at = (x: number, width = 2880, height = 240) => ({ position: { x, y: 0 }, size: { width, height } });
 const text = (name: string, value: string, x: number, height = 240): ReportObject => ({ kind: 'text', name, text: value, style: { size: 8 }, ...at(x, 2880, height) });
 const field = (name: string, f: string, x: number): ReportObject => ({ kind: 'field', name, field: f, style: { size: 8 }, ...at(x) });
-const conventions = readConventions(JSON.stringify({ names: { table: '{S}_Tab_{n}', title: '{S}_SchTitle_Txt', heading: '{T}_{col}_ColTxt', value: '{T}_{col}_ColVal', blank: '{T}_blnk{n}' } }));
+const conventions = readConventions(JSON.stringify({ names: { table: '{S}_Tab_{n}', title: '{S}_SchTitle_Txt', heading: '{T}_{col}_ColTxt', value: '{T}_{col}_ColVal', blank: '{T}_blnk{n}', totalText: '{T}_TotTxt', total: '{T}_{col}_TotVal', footer: '{S}_Footer_Txt' } }));
 
 /** A grouped report with a heading of two lines and an empty group header a few points high. */
 function template(): string {
@@ -94,5 +94,40 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     const merge = diagnoseRdl(rdl, true, ['one']).filter((f) => f.kind === 'merge').map((f) => `${f.item}: ${/will not publish/.test(f.message) ? 'blocks' : 'dropped'}`);
     assert.deepEqual(merge.sort(), ['Parameter extra: blocks', 'Parameter unread: dropped']);
     assert.equal(diagnoseRdl(rdl, true).filter((f) => f.kind === 'merge').length, 0);
+  });
+
+  it('starts the table at its first column, keeps the space under a rule, puts totals under their rule and names a footnote as the footer', () => {
+    const line = (name: string, y: number) => ({ kind: 'line', name, ...at(45, 8900, 0), position: { x: 45, y }, border: { sides: [0, 0, 1, 0], color: '#000000', width: 60 } });
+    const ruled = { border: { sides: [0, 0, 1, 0], color: '#000000', width: 20 } };
+    const definition = {
+      saveInfo: {}, selectionFormulas: {}, sqlExpressions: [], parameters: [], groups: [], sortFields: [], summarizedFields: [],
+      formulas: [{ name: 'all', index: 1, kind: 'formula', text: 'WhileReadingRecords; "All"', referencedFields: [] },
+        { name: 'Group #1 Order', index: 2, kind: 'internal', text: '', referencedFields: ['@all'] },
+        { name: 'note', index: 3, kind: 'formula', text: '"Figures as reported"', referencedFields: [] }],
+      layout: [
+        ...['PageHeaderArea1', 'PageFooterArea1', 'ReportHeaderArea1'].map((name) => ({ name, sections: [{ name, height: 0, objects: [] }] })),
+        { name: 'ReportFooterArea1', sections: [{ name: 'RF', height: 240, objects: [{ ...field('Note', '@note', 300), size: { width: 8600, height: 240 } }] }] },
+        { name: 'GroupHeaderArea1', sections: [{ name: 'GH', height: 700, objects: [
+          { ...text('Title', 'Holdings in Detail', 0, 300), ...at(0, 8900, 300) }, line('Rule1', 320),
+          { ...text('KindHeading', 'Kind', 300, 240), position: { x: 300, y: 400 } },
+          { ...text('AmountHeading', 'Amount', 4320, 240), position: { x: 4320, y: 400 } }, line('Rule2', 640)] }] },
+        { name: 'GroupFooterArea1', sections: [{ name: 'GF', height: 300, objects: [{ ...text('TotalLabel', 'Total:', 300, 200), position: { x: 300, y: 60 } },
+          { ...field('Sum', 'Sum of T.Amount', 4320), position: { x: 4320, y: 60 }, size: { width: 2880, height: 200 }, ...ruled }] }] },
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [field('K', 'T.Kind', 300), field('A', 'T.Amount', 4320)] }] },
+      ],
+    } as unknown as ReportDefinition;
+    const rdl = applyConventions(convertToRdl(definition, source, { reportName: 'Holdings' }).rdl, 'Holdings', conventions).rdl;
+    const root = parseXml(rdl);
+    const table = descendants(root).find((e) => e.name === 'Tablix')!;
+    const rows = descendants(table).filter((e) => e.name === 'TablixRow');
+    const names = (row: XmlElement) => descendants(row).filter((e) => e.name === 'Textbox').map((e) => e.attributes.Name);
+    const headingRow = rows.findIndex((r) => names(r).includes('Holdings_Tab_1_Kind_ColTxt'));
+    assert.equal(names(rows[headingRow]!)[0], 'Holdings_Tab_1_Kind_ColTxt', 'the first column is the first heading');
+    const gap = rows[headingRow + 1]!;
+    assert.ok(parseFloat(textOf(childElements(gap, 'Height')[0])) < 0.1 && names(gap).every((n) => /blnk/.test(n ?? '')), 'the space under the rule stays');
+    const total = descendants(root).find((e) => e.attributes.Name === 'Holdings_Tab_1_Amount_TotVal')!;
+    assert.equal(textOf(child(childElements(total, 'Style')[0]!, 'PaddingTop')), '2pt');
+    assert.ok(descendants(root).some((e) => e.attributes.Name === 'Holdings_Footer_Txt'), names(rows[rows.length - 1]!).join(' '));
+    assert.ok(!descendants(root).some((e) => /in_Detail/i.test(e.attributes.Name ?? '')));
   });
 });
