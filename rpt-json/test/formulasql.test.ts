@@ -232,15 +232,20 @@ describe('a team template whose values come from a subreport', () => {
   const source = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', schema: 'dbo', fields: [{ name: 'Name', type: 'string' }] }] };
   const headSource = { connections: [], links: [], tables: [{ alias: 'Head_get;1', name: 'Head_get;1', kind: 'storedProcedure', schema: 'dbo', fields: [{ name: 'Note', type: 'string' }] }] };
 
-  it('works a shared value and the footnote made of it out in the subreport\'s query, without custom code', async () => {
+  it('reads a shared value from the subreport\'s procedure and works the footnote made of it out in SQL, without custom code', async () => {
     const { convertToRdl } = await import('../src/ssrs/rdl.ts');
     const r = convertToRdl(main as never, source as never, { reportName: 'Main', formulasInQuery: true, rulesAsText: true,
       subreports: new Map([[1, { name: 'Sub1', links: [], definition: header, dataSource: headSource }]]) as never });
     assert.ok(!r.rdl.includes('<Code>') && !/Code\.\w+/.test(r.rdl), 'no custom code');
-    const sub = [...r.rdl.matchAll(/<CommandText>([\s\S]*?)<\/CommandText>/g)].map((m) => m[1]!).find((t) => t.includes('#rows'))!;
-    assert.match(sub, /AS \[F_NoteSet\]/);
-    assert.match(sub, /CHARINDEX\(N'&lt;CR&gt;'[\s\S]*dbo\.\[Main_lines\][\s\S]*AS \[F_Footer\]/);
-    assert.match(r.rdl, /<Value>=First\(Fields!F_Footer\.Value, "DataSet_Sub1"\)<\/Value>/);
+    // (The procedure is called as it is: its columns need not match any list.)
+    assert.match(r.rdl, /<CommandType>StoredProcedure<\/CommandType>\s*<CommandText>\[dbo\]\.\[Head_get\]<\/CommandText>/);
+    assert.ok(!r.rdl.includes('#rows'));
+    // (The footnote, worked out in a query of its own from the procedure's first row, given by a hidden parameter.)
+    assert.match(r.rdl, /<ReportParameter Name="Note_shared">\s*<DataType>String<\/DataType>\s*<Nullable>true<\/Nullable>\s*<AllowBlank>true<\/AllowBlank>\s*<DefaultValue>\s*<DataSetReference>\s*<DataSetName>DataSet_Sub1<\/DataSetName>\s*<ValueField>Note<\/ValueField>[\s\S]*?<Hidden>true<\/Hidden>/);
+    const values = r.rdl.match(/<DataSet Name="DataSet_Sub1_Values">[\s\S]*?<\/DataSet>/)![0];
+    assert.match(values, /<QueryParameter Name="@Note_shared">\s*<Value>=Parameters!Note_shared\.Value<\/Value>/);
+    assert.match(values, /CHARINDEX\(N'&lt;CR&gt;'[\s\S]*dbo\.\[Main_lines\]\(@Note_shared\)[\s\S]*AS \[F_Footer\]/);
+    assert.match(r.rdl, /<Value>=First\(Fields!F_Footer\.Value, "DataSet_Sub1_Values"\)<\/Value>/);
     const fns = (r.sqlFunctions ?? []).join('\n');
     assert.match(fns, /CREATE FUNCTION dbo\.\[Main_SplitPart\]\(@s nvarchar\(max\), @d nvarchar\(4000\), @n int\)/);
     assert.match(fns, /NCHAR\(10\)/);
