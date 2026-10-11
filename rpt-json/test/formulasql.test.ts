@@ -118,6 +118,10 @@ describe('formulas in the query of a team template', () => {
     assert.match(preview, /<CommandText>SELECT[\s\S]*AS \[F_Label\]/);
     assert.ok(!preview.includes('<CommandType>StoredProcedure</CommandType>\n          <CommandText>dbo.'));
     assert.equal(out.files?.['.preview.rdl'], undefined, 'only when asked');
+    const fn = 'CREATE FUNCTION dbo.[Q_label](@s nvarchar(max))\nRETURNS nvarchar(max)\nAS\nBEGIN\n  RETURN @s\nEND';
+    const called = rdl.replace(/AS \[F_Label\]/, 'AS [F_Label], dbo.[Q_label](N\'x\') AS [F_Other]');
+    const own = applyConventions(called, 'Q', conv, undefined, { preview: true, sqlFunctions: [fn] }).files?.['.preview.rdl'] ?? '';
+    assert.match(own, /<CommandText>IF OBJECT_ID\(N'dbo\.\[Q_label\]'\) IS NULL BEGIN TRY EXEC \(N'CREATE FUNCTION dbo\.\[Q_label\][\s\S]*?END TRY BEGIN CATCH END CATCH;\s*EXEC \(N'ALTER FUNCTION dbo\.\[Q_label\][\s\S]*?'\);\s*SELECT/);
     assert.match(out.rdl, /<QueryParameter Name="@as_of">\s*<Value>=Parameters!as_of.Value<\/Value>\s*<\/QueryParameter>\s*<\/QueryParameters>\s*<CommandType>StoredProcedure<\/CommandType>\s*<CommandText>dbo\.\w+<\/CommandText>/);
   });
 });
@@ -190,24 +194,13 @@ describe('a team template over a stored procedure', () => {
   } as never);
   const convert = async (d: never, formulasInQuery = true) => (await import('../src/ssrs/rdl.ts')).convertToRdl(d, source, { reportName: 'Sp', formulasInQuery });
 
-  it('takes the procedure\'s rows into a table and works its formulas and selection out over them', async () => {
+  it('calls the procedure as it is, its formulas calculated fields and its selection a filter, without custom code', async () => {
     const { rdl } = await convert(definition(`{${A}.Name} <> "Skip"`));
-    const text = rdl.match(/<CommandText>([\s\S]*?)<\/CommandText>/)![1]!;
-    // (Shaped as the procedure's result, as SQL Server describes it; else as the Crystal report read it.)
-    assert.match(text, /CREATE TABLE #rows \(\[shape_key\] bit\);/);
-    assert.match(text, /sys\.dm_exec_describe_first_result_set_for_object\(OBJECT_ID\(N'\[dbo\]\.\[Orders_get\]'\), 0\)/);
-    assert.match(text, /IF @columns IS NULL SET @columns = N'\[Name\] nvarchar\(4000\) NULL, \[Amount\] decimal\(38, 10\) NULL, \[Shipped\] datetime2 NULL';/);
-    assert.match(text, /EXEC \(N'ALTER TABLE #rows ADD ' \+ @columns\);\s*ALTER TABLE #rows DROP COLUMN \[shape_key\];/);
-    assert.match(text, /INSERT INTO #rows\s*EXEC \[dbo\]\.\[Orders_get\] @region = @region;/);
-    assert.match(text, /\[Orders_get;1\]\.\*,[\s\S]*N'big'[\s\S]*AS \[F_Size\]\s*FROM #rows AS \[Orders_get;1\]\s*WHERE \[Orders_get;1\]\.\[Name\] &lt;&gt; 'Skip'/);
-    assert.ok(!rdl.includes('<Filters>') && !rdl.includes('<Code>'), 'no dataset filter, no custom code');
+    assert.match(rdl, /<CommandType>StoredProcedure<\/CommandType>\s*<CommandText>\[dbo\]\.\[Orders_get\]<\/CommandText>/);
     assert.match(rdl, /<QueryParameter Name="@region">/);
-  });
-
-  it('calls the procedure itself where there is nothing to work out, and outside a template', async () => {
-    assert.match((await convert(definition(undefined, false))).rdl, /<CommandType>StoredProcedure<\/CommandType>\s*<CommandText>\[dbo\]\.\[Orders_get\]<\/CommandText>/);
-    assert.match((await convert(definition())).rdl, /#rows/);
-    assert.match((await convert(definition(), false)).rdl, /<CommandType>StoredProcedure<\/CommandType>\s*<CommandText>\[dbo\]\.\[Orders_get\]<\/CommandText>/);
+    assert.match(rdl, /<Field Name="F_Size">\s*<Value>=IIf\(\(Fields!Amount\.Value &gt; 100\), "big", "small"\)<\/Value>/);
+    assert.match(rdl, /<FilterExpression>=\(RTrim\(Fields!Name\.Value\) &lt;&gt; "Skip"\)<\/FilterExpression>/);
+    assert.ok(!rdl.includes('#rows') && !rdl.includes('<Code>'));
   });
 });
 
@@ -232,23 +225,15 @@ describe('a team template whose values come from a subreport', () => {
   const source = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', schema: 'dbo', fields: [{ name: 'Name', type: 'string' }] }] };
   const headSource = { connections: [], links: [], tables: [{ alias: 'Head_get;1', name: 'Head_get;1', kind: 'storedProcedure', schema: 'dbo', fields: [{ name: 'Note', type: 'string' }] }] };
 
-  it('reads a shared value from the subreport\'s procedure and works the footnote made of it out in SQL, without custom code', async () => {
+  it('reads a shared value from the procedure as it is and joins the footnote\'s lines in an expression, without custom code', async () => {
     const { convertToRdl } = await import('../src/ssrs/rdl.ts');
     const r = convertToRdl(main as never, source as never, { reportName: 'Main', formulasInQuery: true, rulesAsText: true,
       subreports: new Map([[1, { name: 'Sub1', links: [], definition: header, dataSource: headSource }]]) as never });
     assert.ok(!r.rdl.includes('<Code>') && !/Code\.\w+/.test(r.rdl), 'no custom code');
-    // (The procedure is called as it is: its columns need not match any list.)
     assert.match(r.rdl, /<CommandType>StoredProcedure<\/CommandType>\s*<CommandText>\[dbo\]\.\[Head_get\]<\/CommandText>/);
-    assert.ok(!r.rdl.includes('#rows'));
-    // (The footnote, worked out in a query of its own from the procedure's first row, given by a hidden parameter.)
-    assert.match(r.rdl, /<ReportParameter Name="Note_shared">\s*<DataType>String<\/DataType>\s*<Nullable>true<\/Nullable>\s*<AllowBlank>true<\/AllowBlank>\s*<DefaultValue>\s*<DataSetReference>\s*<DataSetName>DataSet_Sub1<\/DataSetName>\s*<ValueField>Note<\/ValueField>[\s\S]*?<Hidden>true<\/Hidden>/);
-    const values = r.rdl.match(/<DataSet Name="DataSet_Sub1_Values">[\s\S]*?<\/DataSet>/)![0];
-    assert.match(values, /<QueryParameter Name="@Note_shared">\s*<Value>=Parameters!Note_shared\.Value<\/Value>/);
-    assert.match(values, /CHARINDEX\(N'&lt;CR&gt;'[\s\S]*dbo\.\[Main_lines\]\(@Note_shared\)[\s\S]*AS \[F_Footer\]/);
-    assert.match(r.rdl, /<Value>=First\(Fields!F_Footer\.Value, "DataSet_Sub1_Values"\)<\/Value>/);
-    const fns = (r.sqlFunctions ?? []).join('\n');
-    assert.match(fns, /CREATE FUNCTION dbo\.\[Main_SplitPart\]\(@s nvarchar\(max\), @d nvarchar\(4000\), @n int\)/);
-    assert.match(fns, /NCHAR\(10\)/);
+    assert.ok(!r.rdl.includes('#rows') && !r.rdl.includes('<ReportParameter '), 'no table of its rows, no hidden parameter');
+    const note = 'First(Fields!Note.Value, "DataSet_Sub1")';
+    assert.ok(r.rdl.includes(`Join(Split(CStr(((${note}))), CStr("&lt;CR&gt;"), -1, CompareMethod.Binary), CStr(Chr(10))) &amp; CStr(Chr(10))`), r.rdl.match(/<Value>=\(IIf[^<]*/)?.[0]);
   });
 
   it('counts and takes the pieces of a split text in SQL', () => {

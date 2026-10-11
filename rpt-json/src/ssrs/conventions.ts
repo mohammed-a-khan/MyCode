@@ -1201,7 +1201,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     files['.sql'] = procedures.text;
     // A copy to preview before the procedures exist: its datasets still run their queries themselves (the functions
     // they call, at the top of .sql, are needed all the same).
-    if (extra.preview) files['.preview.rdl'] = toXml(root);
+    if (extra.preview) files['.preview.rdl'] = toXml(withFunctions(root, extra.sqlFunctions ?? []));
     for (const procedure of procedures.list) {
       const query = child(procedure.dataSet, 'Query')!;
       const params = childElements(child(query, 'QueryParameters') ?? el('x'), 'QueryParameter');
@@ -1518,6 +1518,35 @@ function separate(container: XmlElement, review: ReviewNote[]): void {
  * one aside; only a PDF or a print keeps them so), an item reaching past its box, a body wider than the page leaves
  * room for (SSRS would add a blank page after each page). Each is listed for review.
  */
+function withFunctions(root: XmlElement, functions: string[]): XmlElement {
+  const named = functions.map((text) => ({ text, name: /CREATE\s+FUNCTION\s+(\S+?)\s*\(/i.exec(text)?.[1] ?? '' })).filter((f) => f.name);
+  if (!named.length) return root;
+  const copy = structuredClone(root);
+  const quoted = (text: string) => `N'${text.replace(/'/g, "''")}'`;
+  for (const query of descendants(copy).filter((e) => e.name === 'Query')) {
+    if (/^StoredProcedure$/i.test(textOf(child(query, 'CommandType')))) continue;
+    const command = child(query, 'CommandText');
+    const text = textOf(command);
+    const needed: typeof named = [];
+    const need = (body: string) => {
+      for (const f of named) {
+        if (needed.includes(f) || !body.includes(f.name)) continue;
+        needed.push(f);
+        need(f.text.replace(f.name, ''));
+        needed.push(needed.splice(needed.indexOf(f), 1)[0]!);
+      }
+    };
+    need(text);
+    if (!needed.length || !command) continue;
+    const setup = needed.flatMap((f) => [
+      `IF OBJECT_ID(${quoted(f.name)}) IS NULL BEGIN TRY EXEC (${quoted(f.text)}); END TRY BEGIN CATCH END CATCH;`,
+      `EXEC (${quoted(f.text.replace(/CREATE\s+FUNCTION/i, 'ALTER FUNCTION'))});`,
+    ]);
+    command.children = [[...setup, text].join('\n')];
+  }
+  return copy;
+}
+
 /** A row whose cells show nothing: no text, picture, line or rule. */
 function emptyRow(row: XmlElement): boolean {
   return cellsOf(row).every((cell) => descendants(cell).every((e) => {
