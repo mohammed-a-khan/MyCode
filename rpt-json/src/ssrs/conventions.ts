@@ -1190,7 +1190,14 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
         named.add(tb);
         // (A rule or band drawn along the row, a border or fill of its last cell, runs on through the spare cells to the
         // table's edge, as it did across the space they are taken from.)
-        const lastItem = cellsOf(row)[at] ? cellItem(cellsOf(row)[at]!) : undefined;
+        const rowCells = cellsOf(row).slice(0, at + 1);
+        let cover: XmlElement | undefined;
+        for (let c = 0, i = 0; i < rowCells.length; i++) {
+          const span = Number(textOf(child(child(rowCells[i]!, 'CellContents') ?? el('x'), 'ColSpan')) || 1);
+          if (child(rowCells[i]!, 'CellContents') && c <= at && at < c + span) cover = rowCells[i];
+          if (child(rowCells[i]!, 'CellContents')) c += span;
+        }
+        const lastItem = cover ? cellItem(cover) : undefined;
         if (lastItem) {
           const from = ownStyle(lastItem);
           const to = ownStyle(tb);
@@ -2251,6 +2258,24 @@ function applyStyleRoles(report: XmlElement, style: NonNullable<Conventions['sty
   };
   const expr = (name: string) => `First(Fields!${name}.Value, "${style.dataset}")`;
   const banded = new Set(bandRows);
+  const hiddenBy = new Map<XmlElement, string>();
+  for (const t of descendants(report).filter((e) => e.name === 'Tablix')) {
+    const rows = rowsOf(t);
+    let r = 0;
+    const walk = (members: XmlElement | undefined, conds: string[]) => {
+      for (const m of childElements(members ?? el('TablixMembers'), 'TablixMember')) {
+        const hidden = textOf(child(m, 'Visibility/Hidden')).trim();
+        const own = hidden.startsWith('=') && !/CountRows\(\)/.test(hidden) ? [...conds, `(${hidden.slice(1)})`] : conds;
+        const nested = child(m, 'TablixMembers');
+        if (nested) walk(nested, own);
+        else {
+          const row = rows[r++];
+          if (row && own.length) for (const tb of descendants(row).filter((e) => e.name === 'Textbox')) hiddenBy.set(tb, own.join(' OrElse '));
+        }
+      }
+    };
+    walk(child(t, 'TablixRowHierarchy/TablixMembers'), []);
+  }
   const isRed = (v: string) => /^(red|#ff0000|#ff0000ff)$/i.test(v.trim());
   for (const [tb, roleKey] of roles) {
     const role = style.roles[roleKey];
@@ -2287,14 +2312,17 @@ function applyStyleRoles(report: XmlElement, style: NonNullable<Conventions['sty
     const plain = !current || /^(transparent|white|#ffffff|#00ffffff)$/i.test(current);
     if (fillWord && tableCells.has(tb) && plain) {
       if (roleKey === 'body' || roleKey === 'bodyFirst' || roleKey === 'number') {
-        if (style.rowBands && !unbanded.has(tb)) setChild(own, 'BackgroundColor', `=IIF(RowNumber(Nothing) Mod 2, ${expr(field(style.rowBands.odd, fillWord))}, ${expr(field(style.rowBands.even, fillWord))})`);
+        if (style.rowBands && !unbanded.has(tb)) {
+          const counted = hiddenBy.has(tb) ? `RunningValue(IIf(${hiddenBy.get(tb)}, 0, 1), Sum, Nothing)` : 'RowNumber(Nothing)';
+          setChild(own, 'BackgroundColor', `=IIF(${counted} Mod 2, ${expr(field(style.rowBands.odd, fillWord))}, ${expr(field(style.rowBands.even, fillWord))})`);
+        }
       } else setChild(own, 'BackgroundColor', `=${expr(field(role, fillWord))}`);
     }
   }
   // Blank cells of painted rows take the row's fill, so the band runs across.
   for (const row of banded) {
     const cells = cellsOf(row).map(cellItem).filter((x): x is XmlElement => !!x && (x.name === 'Textbox' || x.name === 'Rectangle'));
-    const painted = descendants(row).filter((e) => e.name === 'Textbox').map((c) => textOf(child(ownStyle(c), 'BackgroundColor'))).find((v) => v.startsWith('=First(') || v.startsWith('=IIF(RowNumber'));
+    const painted = descendants(row).filter((e) => e.name === 'Textbox').map((c) => textOf(child(ownStyle(c), 'BackgroundColor'))).find((v) => v.startsWith('=First(') || v.startsWith('=IIF(RowNumber') || v.startsWith('=IIF(RunningValue'));
     if (!painted) continue;
     for (const c of cells) {
       const s = ownStyle(c);
