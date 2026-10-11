@@ -237,8 +237,10 @@ const ownWord = (item: XmlElement) => snake((item.attributes.Name ?? '').replace
 class Names {
   private readonly used = new Set<string>();
   make(base: string): string {
-    let name = base.replace(/[^A-Za-z0-9_]/g, '_').replace(/^([^A-Za-z])/, 'R$1');
-    for (let k = 2; this.used.has(name.toLowerCase()); k++) name = `${base}_${k}`;
+    const clean = base.replace(/[^A-Za-z0-9_]/g, '_').replace(/^([^A-Za-z])/, 'R$1');
+    const typed = /^(.*)(_(?:SubTotVal|TotVal|SubTotTxt|TotTxt|ColTxt|ColVal|HdrTxt|HdrVal))$/i.exec(clean);
+    let name = clean;
+    for (let k = 2; this.used.has(name.toLowerCase()); k++) name = typed ? `${typed[1]}_${k}${typed[2]}` : `${clean}_${k}`;
     this.used.add(name.toLowerCase());
     return name;
   }
@@ -650,7 +652,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
 
     // A title Crystal printed in the table's own header (as in a group over the whole report): the first row, one
     // fixed text across the table, over its headings. It is the table's title, with the rule of the box round it.
-    if (!titleText && tablix === tablixes[0]) {
+    if (tablix === tablixes[0] ? !titleText : !!rowLeaves(tablix)[0]) {
       const first = rowsOf(tablix)[0];
       const kind = rowLeaves(tablix)[0]?.kind;
       const shown = (e: XmlElement) => [e, ...descendants(e)].some((x) => x.name === 'Textbox' && !isBlank(x));
@@ -664,8 +666,10 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       const spanWidth = only ? widths.slice(only.c, only.c + span).reduce((a, b) => a + b, 0) : 0;
       const words = tb ? fixedText(tb) : undefined;
       // (Over headings of its own: the next row is two or more fixed texts.)
-      const next = rowsOf(tablix)[1];
-      const headingsUnder = !!next && descendants(next).filter((e) => e.name === 'Textbox' && !isBlank(e) && fixedText(e) !== undefined).length >= 2;
+      const next = rowsOf(tablix).slice(1).find((r) => !emptyRow(r));
+      const under = next ? descendants(next).filter((e) => e.name === 'Textbox' && !isBlank(e)) : [];
+      const headingsUnder = under.filter((e) => fixedText(e) !== undefined).length >= 2
+        || (under.length >= 3 && under.some((e) => fixedText(e) !== undefined) && under.every((e) => !/\b(Sum|Count|Avg|RunningValue)\s*\(/i.test(valueOf(e))));
       if (only && item && tb && words && words.trim().length > 3 && !/:\s*$/.test(words) && span >= 2 && headingsUnder
         && spanWidth >= 0.8 * tWidth && !child(item, 'Visibility')) {
         if (item !== tb) {
@@ -683,8 +687,12 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           const contents = child(only.cell, 'CellContents')!;
           contents.children = contents.children.map((x) => (x === item ? tb : x));
         }
-        titleText = words.trim();
-        rename(tb, 'title');
+        if (tablix === tablixes[0]) {
+          titleText = words.trim();
+          rename(tb, 'title');
+        } else {
+          rename(tb, 'text', { T });
+        }
         roles.set(tb, 'title');
         tableCells.add(tb);
       }
@@ -854,6 +862,15 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
         const tb = textboxIn(cell);
         if (headingsRow && tb && !isBlank(tb) && colNames[c]) headingCols.add(colNames[c]!);
       }
+      const shortInRow = cellsOf(row).some((cell, c) => {
+        const box = cellItem(cell);
+        if (box?.name !== 'Rectangle') return false;
+        const inside = childElements(child(box, 'ReportItems') ?? el('x')).filter((e) => ITEMS.has(e.name));
+        const t = inside.length === 1 && inside[0]!.name === 'Textbox' ? inside[0]! : undefined;
+        if (!t || !ruledAbove(t)) return false;
+        const room = widths.slice(c, c + Number(textOf(child(child(cell, 'CellContents'), 'ColSpan')) || 1)).reduce((x, y) => x + y, 0);
+        return len(t, 'Left') > 0.02 || room - len(t, 'Left') - len(t, 'Width') > 0.02;
+      });
       cellsOf(row).forEach((cell, c) => {
         let item = cellItem(cell);
         if (!item) return;
@@ -942,7 +959,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           const only = inner.length === 1 && inner[0]!.name === 'Textbox' ? inner[0]! : undefined;
           const across = Number(textOf(child(child(cell, 'CellContents'), 'ColSpan')) || 1);
           const room = widths.slice(c, c + across).reduce((a, b) => a + b, 0);
-          const shortRule = !!only && ruledAbove(only) && (len(only, 'Left') > 0.02 || room - len(only, 'Left') - len(only, 'Width') > 0.02);
+          const shortRule = !!only && ruledAbove(only) && (shortInRow || len(only, 'Left') > 0.02 || room - len(only, 'Left') - len(only, 'Width') > 0.02);
           const drawn = (st: XmlElement | undefined, side: string) => /solid|dashed|dotted|double/i.test(textOf(child(st, `${side}/Style`)));
           const filled = (st: XmlElement | undefined) => { const v = textOf(child(st, 'BackgroundColor')); return !!v && !/^(transparent|#00ffffff)$/i.test(v); };
           const ts = only ? ownStyle(only) : undefined;

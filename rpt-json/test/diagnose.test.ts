@@ -178,4 +178,60 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     const cell = descendants(root).find((e) => e.name === 'TablixCell' && descendants(e).includes(value))!;
     assert.equal(descendants(cell).filter((e) => e.name === 'Textbox').length, 1);
   });
+
+  it('numbers a second total of a column before its type, as the merge reads what follows the type as a column', () => {
+    const rdl = `<Report><ReportSections><ReportSection><Body><ReportItems><Textbox Name="A_amount_SubTotVal_2"><Paragraphs/></Textbox></ReportItems></Body></ReportSection></ReportSections></Report>`;
+    assert.ok(diagnoseRdl(rdl, true).some((f) => f.kind === 'merge' && f.item === 'A_amount_SubTotVal_2'));
+    const definition = {
+      saveInfo: {}, selectionFormulas: {}, sqlExpressions: [], parameters: [], groups: [], sortFields: [], summarizedFields: [],
+      formulas: [{ name: 'Group #1 Order', index: 1, kind: 'internal', text: '', referencedFields: ['T.Kind'] }],
+      layout: [
+        ...['PageHeaderArea1', 'PageFooterArea1', 'ReportHeaderArea1'].map((name) => ({ name, sections: [{ name, height: 0, objects: [] }] })),
+        { name: 'ReportFooterArea1', sections: [{ name: 'RF', height: 0, objects: [] }] },
+        { name: 'GroupHeaderArea1', sections: [{ name: 'GH', height: 240, objects: [text('H1', 'Kind', 0), text('H2', 'Amount', 2880)] }] },
+        { name: 'GroupFooterArea1', sections: [
+          { name: 'GFa', height: 240, objects: [field('S1', 'Sum of T.Amount', 2880)] },
+          { name: 'GFb', height: 240, objects: [field('S2', 'Sum of T.Amount', 2880)] }] },
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [field('K', 'T.Kind', 0), field('A', 'T.Amount', 2880)] }] },
+      ],
+    } as unknown as ReportDefinition;
+    const named = { ...conventions, names: { ...conventions.names, subtotal: '{T}_{col}_SubTotVal' } } as never;
+    const out = applyConventions(convertToRdl(definition, source, { reportName: 'Holdings' }).rdl, 'Holdings', named).rdl;
+    assert.ok(!/_SubTotVal_\d/.test(out), out.match(/Name="[^"]*SubTotVal[^"]*"/g)?.join(' '));
+  });
+
+  it('moves columns placed by formulas into a table titled over them, with no column for a hidden field and every total ruled alike', () => {
+    const fields = [{ name: 'Name', type: 'string' }, { name: 'G', type: 'string' }, { name: 'Max', type: 'number' }, ...[1, 2, 3].flatMap((i) => [{ name: `H${i}`, type: 'string' }, { name: `P${i}`, type: 'number' }, { name: `B${i}`, type: 'number' }, { name: `S${i}`, type: 'number' }])];
+    const src = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields }] } as never;
+    const formulas: { name: string; index: number; kind: string; text: string; referencedFields: string[] }[] = [];
+    const moved = (i: number) => {
+      formulas.push({ name: 'DeltaX_Value_Formula', index: formulas.length + 1, kind: 'conditionalFormat', text: `{T.P${i}} * 1440`, referencedFields: [] });
+      return { deltaX: { name: 'DeltaX_Value_Formula', index: formulas.length } };
+    };
+    const at2 = (x: number, y: number, width: number, height: number) => ({ position: { x, y }, size: { width, height } });
+    const f = (name: string, ref: string, x: number, y: number, width: number, height: number, extra = {}) => ({ kind: 'field', name, field: ref, style: { size: 8 }, ...at2(x, y, width, height), ...extra });
+    const definition = {
+      saveInfo: {}, selectionFormulas: {}, sqlExpressions: [], parameters: [], groups: ['T.G'], sortFields: [], summarizedFields: [], formulas,
+      layout: [
+        { name: 'GroupHeaderArea1', sections: [{ name: 'GH', height: 1200, objects: [
+          { kind: 'text', name: 'Title', text: 'Balances by Kind', style: { size: 10 }, ...at2(0, 0, 10080, 288) },
+          { kind: 'line', name: 'Rule', ...at2(30, 290, 10050, 0), border: { sides: [0, 0, 1, 0], width: 60 } },
+          { kind: 'text', name: 'NameHead', text: 'Name', style: { size: 8 }, ...at2(50, 400, 3000, 200) },
+          f('MaxHead', 'T.Max', 9300, 400, 700, 200, { suppressed: true }),
+          ...[1, 2, 3].map((i) => f(`Head${i}`, `T.H${i}`, 30, 400, 1155, 600, { conditions: moved(i) })),
+          { kind: 'line', name: 'Rule2', ...at2(30, 1100, 10050, 0), border: { sides: [0, 0, 1, 0], width: 60 } }] }] },
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 220, objects: [f('Name', 'T.Name', 50, 0, 3000, 210), f('MaxVal', 'T.Max', 9300, 0, 700, 210, { suppressed: true }),
+          ...[1, 2, 3].map((i) => f(`Bal${i}`, `T.B${i}`, 30, 0, 1155, 210, { conditions: moved(i) }))] }] },
+        { name: 'GroupFooterArea1', sections: [{ name: 'GF', height: 260, objects: [{ kind: 'text', name: 'Totals', text: 'Totals:', style: { size: 8 }, ...at2(100, 0, 1000, 240) },
+          ...[1, 2, 3].map((i) => f(`Sum${i}`, `T.S${i}`, 0, 40, 1185, 166, { conditions: moved(i), border: { sides: [0, 0, 1, 0], width: 20 } }))] }] },
+      ],
+    } as unknown as ReportDefinition;
+    const out = applyConventions(convertToRdl(definition, src, { reportName: 'Holdings', formulasInQuery: true, rulesAsText: true }).rdl, 'Holdings', conventions).rdl;
+    const root = parseXml(out);
+    assert.ok(descendants(root).some((e) => e.attributes.Name === 'Holdings_SchTitle_Txt'), out.match(/Name="[^"]*"/g)!.join(' '));
+    assert.ok(!/Name="[^"]*Max[^"]*"/.test(out), 'no column for the hidden field');
+    const totals = descendants(root).filter((e) => e.name === 'Textbox' && /_S\d_SubtotalLabel$/.test(e.attributes.Name ?? ''));
+    assert.equal(totals.length, 3, out.match(/Name="[^"]*S\d[^"]*"/g)?.join(" "));
+    assert.ok(totals.every((t) => !!child(t, 'Width')), 'each total in a box of its own, the last too');
+  });
 });
