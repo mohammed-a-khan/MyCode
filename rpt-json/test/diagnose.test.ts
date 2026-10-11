@@ -137,4 +137,45 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     assert.ok(descendants(root).some((e) => e.attributes.Name === 'Holdings_Footer_Txt'), names(rows[rows.length - 1]!).join(' '));
     assert.ok(!descendants(root).some((e) => /in_Detail/i.test(e.attributes.Name ?? '')));
   });
+
+  it('draws a frame Crystal put round a heading as the heading\'s own border, the heading in its cell', () => {
+    const box = { kind: 'box', name: 'Frame', position: { x: 60, y: 60 }, size: { width: 2900, height: 320 }, border: { sides: [1, 1, 1, 1], color: '#000000', width: 20 } };
+    const definition = {
+      saveInfo: {}, selectionFormulas: {}, sqlExpressions: [], parameters: [], groups: [], sortFields: [], summarizedFields: [],
+      formulas: [{ name: 'all', index: 1, kind: 'formula', text: 'WhileReadingRecords; "All"', referencedFields: [] },
+        { name: 'Group #1 Order', index: 2, kind: 'internal', text: '', referencedFields: ['@all'] }],
+      layout: [
+        ...['PageHeaderArea1', 'PageFooterArea1', 'ReportHeaderArea1', 'ReportFooterArea1'].map((name) => ({ name, sections: [{ name, height: 0, objects: [] }] })),
+        { name: 'GroupHeaderArea1', sections: [{ name: 'GH', height: 600, objects: [{ ...text('H1', 'Holding Name', 120, 240), position: { x: 120, y: 100 }, size: { width: 2800, height: 240 } }, box,
+          { ...text('H2', 'Amount', 3100, 240), position: { x: 3100, y: 100 }, size: { width: 1200, height: 240 } }] }] },
+        { name: 'GroupFooterArea1', sections: [{ name: 'GF', height: 0, objects: [] }] },
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [{ ...field('N', 'T.Kind', 120), size: { width: 2800, height: 221 } }, { ...field('A', 'T.Amount', 3100), size: { width: 1200, height: 221 } }] }] },
+      ],
+    } as unknown as ReportDefinition;
+    const root = parseXml(applyConventions(convertToRdl(definition, source, { reportName: 'Holdings' }).rdl, 'Holdings', conventions).rdl);
+    const heading = descendants(root).find((e) => e.attributes.Name === 'Holdings_Tab_1_Kind_ColTxt')!;
+    const cell = descendants(root).find((e) => e.name === 'TablixCell' && descendants(e).includes(heading))!;
+    assert.equal(childElements(child(cell, 'CellContents')!)[0], heading, 'the heading straight in its cell');
+    assert.match(textOf(child(childElements(heading, 'Style')[0]!, 'Border/Style')), /Solid/);
+  });
+
+  it('shows two texts Crystal put over each other, one hidden while the other has a value, as one text', () => {
+    const definition = {
+      saveInfo: {}, selectionFormulas: {}, sqlExpressions: [], parameters: [], groups: [], sortFields: [], summarizedFields: [],
+      formulas: [{ name: 'dash', index: 1, kind: 'formula', text: '"--"', referencedFields: [] },
+        { name: 'Object_Visibility', index: 2, kind: 'conditionalFormat', text: 'isnull({T.Amount})=false', referencedFields: [] }],
+      layout: [
+        ...['PageHeaderArea1', 'PageFooterArea1', 'ReportFooterArea1'].map((name) => ({ name, sections: [{ name, height: 0, objects: [] }] })),
+        { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 400, objects: [text('H1', 'Kind', 0), text('H2', 'Amount', 2880)] }] },
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [field('K', 'T.Kind', 0), field('A', 'T.Amount', 2880),
+          { ...field('Dash', '@dash', 3000), size: { width: 1500, height: 240 }, conditions: { suppress: { name: 'Object_Visibility', index: 2 } } }] }] },
+      ],
+    } as unknown as ReportDefinition;
+    const root = parseXml(applyConventions(convertToRdl(definition, source, { reportName: 'Holdings' }).rdl, 'Holdings', conventions).rdl);
+    const value = descendants(root).find((e) => e.attributes.Name === 'Holdings_Tab_1_Amount_ColVal')!;
+    assert.ok(value, 'one text, named after its field');
+    assert.match(textOf(descendants(value).find((e) => e.name === 'Value')), /^=IIf\(.*IsNothing\(Fields!Amount\.Value\).*, Fields!Amount\.Value, \(?"--"\)?\)$/);
+    const cell = descendants(root).find((e) => e.name === 'TablixCell' && descendants(e).includes(value))!;
+    assert.equal(descendants(cell).filter((e) => e.name === 'Textbox').length, 1);
+  });
 });

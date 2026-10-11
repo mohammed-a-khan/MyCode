@@ -574,7 +574,7 @@ class RdlBuilder {
 
   private readonly formulaContext: FormulaContext = {
     field: (table, column) => this.lookupField(table, column)?.name,
-    formula: (name) => this.formulaExpression(name) ?? undefined,
+    formula: (name) => (/^__shared_/i.test(name) ? sharedToken(name.slice(9).toLowerCase()) : this.formulaExpression(name) ?? undefined),
     parameter: (name) => this.parameterName(name),
     groupScope: (ref) => this.groupScopeOf(ref),
     dataset: () => this.dataset,
@@ -730,7 +730,8 @@ class RdlBuilder {
       return joined;
     }
     const assigned = this.options.formulasInQuery ? sharedAssignment(formula.text) : undefined;
-    const t = translateFormula(assigned ? assigned.value : formula.text, this.formulaContext, { codeName: this.codeNames.make(`F_${formula.name}`) });
+    const reads = this.options.formulasInQuery && !assigned && !sharedRead(formula.text) ? sharedReads(formula.text) : undefined;
+    const t = translateFormula(assigned ? assigned.value : reads ?? formula.text, this.formulaContext, { codeName: this.codeNames.make(`F_${formula.name}`) });
     const reader = this.options.formulasInQuery && !!t.code && !!sharedRead(formula.text);
     if (!reader) {
       this.addCode(t);
@@ -1159,7 +1160,7 @@ class RdlBuilder {
       }
       if (column) return boolean ? `=(Fields!${column}.Value = True)` : `=Fields!${column}.Value`;
     }
-    const t = translateFormula(formula.text, this.formulaContext, { colors, boolean, codeName: this.codeNames.make(`C_${ref.name}_${ref.index}`) });
+    const t = translateFormula((this.options.formulasInQuery && sharedReads(formula.text)) || formula.text, this.formulaContext, { colors, boolean, codeName: this.codeNames.make(`C_${ref.name}_${ref.index}`) });
     this.addCode(t);
     for (const issue of t.issues) this.note(`${item}: formula ${ref.name}`, issue);
     if (t.expression === '=Nothing') return undefined;
@@ -5629,6 +5630,21 @@ export function formatFor(format: ValueFormat, type: string | undefined): string
 }
 
 /** Placeholder for a shared variable's value in expressions, replaced when the report is written. */
+function sharedReads(text: string): string | undefined {
+  const parts = text.split(/("(?:[^"]|"")*"|'(?:[^']|'')*')/);
+  const code = parts.filter((_, i) => i % 2 === 0).join(' ');
+  const declared = [...code.matchAll(/\bshared\s+\w+var\s+(\w+)\s*;/gi)].map((m) => m[1]!.toLowerCase());
+  if (!declared.length || /:=/.test(code) || /\bshared\s+\w+var\s+\w+\s*:=/i.test(code)) return undefined;
+  const names = new Set(declared);
+  const out = parts.map((part, i) => {
+    if (i % 2) return part;
+    return part.replace(/\b(WhilePrintingRecords|WhileReadingRecords|BeforeReadingRecords)\s*;/gi, '')
+      .replace(/\bshared\s+\w+var\s+\w+\s*;/gi, '')
+      .replace(/\b(\w+)\b/g, (m, w: string) => (names.has(w.toLowerCase()) ? `{@__shared_${w.toLowerCase()}}` : m));
+  }).join('').trim();
+  return out.split(';').filter((x) => x.trim()).length === 1 ? out.replace(/;\s*$/, '') : undefined;
+}
+
 const SHARED_TOKEN = '__CrShared_';
 const sharedToken = (variable: string) => `${SHARED_TOKEN}${variable}__`;
 

@@ -228,7 +228,7 @@ function fieldOf(textbox: XmlElement): string | undefined {
   const v = valueOf(textbox).trim();
   const m = /^=\s*(?:\w+\(\s*)?Fields!(\w+)\.Value(?:\s*(?:,\s*"[^"]*"\s*)?\))?\s*$/i.exec(v)
     // (A field shown in one of the places it can stand: "IIf(<its place> = k, Fields!X.Value, Nothing)".)
-    ?? /^=\s*IIf\([\s\S]*,\s*Fields!(\w+)\.Value\s*,\s*Nothing\s*\)\s*$/i.exec(v);
+    ?? /^=\s*IIf\([\s\S]*,\s*Fields!(\w+)\.Value\s*,\s*(?:Nothing|\(?"[^"]*"\)?)\s*\)\s*$/i.exec(v);
   return m?.[1]?.replace(/^F_(?=\w)/, '');
 }
 /** A name worked from an item's Crystal name (its number dropped). */
@@ -886,6 +886,56 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
               inner = [tb];
             }
           }
+          if (inner.length === 2 && inner.every((e) => e.name === 'Textbox')) {
+            const hiddenBy = (t: XmlElement) => textOf(child(t, 'Visibility/Hidden'));
+            const [a, b] = inner as [XmlElement, XmlElement];
+            const hidden = hiddenBy(a).startsWith('=') && !child(b, 'Visibility') ? a : hiddenBy(b).startsWith('=') && !child(a, 'Visibility') ? b : undefined;
+            const shown = hidden === a ? b : a;
+            const runs = (t: XmlElement) => descendants(t).filter((e) => e.name === 'TextRun');
+            const left = Math.max(len(a, 'Left'), len(b, 'Left'));
+            const right = Math.min(len(a, 'Left') + len(a, 'Width'), len(b, 'Left') + len(b, 'Width'));
+            if (hidden && runs(hidden).length === 1 && runs(shown).length === 1 && right - left > 0.5 * Math.min(len(a, 'Width'), len(b, 'Width'))) {
+              const vb = (t: XmlElement) => {
+                const v = textOf(child(runs(t)[0]!, 'Value'));
+                return v.startsWith('=') ? v.slice(1) : `"${v.replace(/"/g, '""')}"`;
+              };
+              child(runs(shown)[0]!, 'Value')!.children = [`=IIf(${hiddenBy(hidden).slice(1)}, ${vb(shown)}, ${vb(hidden)})`];
+              const from = Math.min(len(a, 'Left'), len(b, 'Left'));
+              const to = Math.max(len(a, 'Left') + len(a, 'Width'), len(b, 'Left') + len(b, 'Width'));
+              setChild(shown, 'Left', inch(from));
+              setChild(shown, 'Width', inch(to - from));
+              const holder = child(item, 'ReportItems')!;
+              holder.children = holder.children.filter((x) => x !== hidden);
+              inner = [shown];
+            }
+          }
+          {
+            const texts = inner.filter((e) => e.name === 'Textbox');
+            const frames = inner.filter((e) => e.name === 'Rectangle' && !childElements(child(e, 'ReportItems') ?? el('x')).some((x) => ITEMS.has(x.name)) && drawnAs(e));
+            const across = Number(textOf(child(child(cell, 'CellContents'), 'ColSpan')) || 1);
+            const room = widths.slice(c, c + across).reduce((a, b) => a + b, 0);
+            if (texts.length === 1 && frames.length === 1 && inner.length === 2) {
+              const t = texts[0]!;
+              const f = frames[0]!;
+              const fl = len(f, 'Left');
+              const fr = fl + len(f, 'Width');
+              const inside = len(t, 'Left') >= fl - 0.1 && len(t, 'Left') + len(t, 'Width') <= fr + 0.1 && len(t, 'Top') >= len(f, 'Top') - 0.1 && len(t, 'Top') + len(t, 'Height') <= len(f, 'Top') + len(f, 'Height') + 0.1;
+              if (inside && fl <= 0.1 && room - fr <= 0.1 && !child(f, 'Visibility')) {
+                const own = ownStyle(t);
+                const fs = childElements(f, 'Style')[0];
+                for (const side of ['Border', ...BORDER_SIDES].reverse()) {
+                  const border = child(fs, side);
+                  if (border) {
+                    removeChildren(own, [side]);
+                    own.children.unshift(structuredClone(border));
+                  }
+                }
+                const holder = child(item, 'ReportItems')!;
+                holder.children = holder.children.filter((x) => x !== f);
+                inner = [t];
+              }
+            }
+          }
           const rs = ownStyle(item);
           const plain = !/^(solid|dashed|dotted|double)/i.test(textOf(child(rs, 'Border/Style'))) && !BORDER_SIDES.some((s) => /^(solid|dashed|dotted|double)/i.test(textOf(child(rs, `${s}/Style`))))
             && (!textOf(child(rs, 'BackgroundColor')) || /^(transparent|#00ffffff)$/i.test(textOf(child(rs, 'BackgroundColor'))));
@@ -893,7 +943,27 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           const across = Number(textOf(child(child(cell, 'CellContents'), 'ColSpan')) || 1);
           const room = widths.slice(c, c + across).reduce((a, b) => a + b, 0);
           const shortRule = !!only && ruledAbove(only) && (len(only, 'Left') > 0.02 || room - len(only, 'Left') - len(only, 'Width') > 0.02);
-          if (only && plain && !shortRule && !child(item, 'Visibility')) {
+          const drawn = (st: XmlElement | undefined, side: string) => /solid|dashed|dotted|double/i.test(textOf(child(st, `${side}/Style`)));
+          const filled = (st: XmlElement | undefined) => { const v = textOf(child(st, 'BackgroundColor')); return !!v && !/^(transparent|#00ffffff)$/i.test(v); };
+          const ts = only ? ownStyle(only) : undefined;
+          const movable = !plain && !!only && !shortRule
+            && !['Border', ...BORDER_SIDES].some((side) => drawn(rs, side) && (drawn(ts, side) || drawn(ts, 'Border') || (side === 'Border' && BORDER_SIDES.some((x) => drawn(ts, x)))))
+            && !(filled(rs) && filled(ts) && textOf(child(rs, 'BackgroundColor')) !== textOf(child(ts, 'BackgroundColor')));
+          if (movable && ts) {
+            for (const side of [...BORDER_SIDES].reverse()) {
+              const border = child(rs, side);
+              if (border && drawn(rs, side)) {
+                removeChildren(ts, [side]);
+                ts.children.unshift(structuredClone(border));
+              }
+            }
+            if (drawn(rs, 'Border')) {
+              removeChildren(ts, ['Border']);
+              ts.children.unshift(structuredClone(child(rs, 'Border')!));
+            }
+            if (filled(rs) && !filled(ts)) setChild(ts, 'BackgroundColor', textOf(child(rs, 'BackgroundColor')));
+          }
+          if (only && (plain || movable) && !shortRule && !child(item, 'Visibility')) {
             const tb = only;
             const span = across;
             const cellWidth = room;
