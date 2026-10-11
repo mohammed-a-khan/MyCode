@@ -474,7 +474,15 @@ class RdlBuilder {
   private readonly dataSourceName: string;
 
   constructor(definition: ReportDefinition, source: DataSourceInfo, options: RdlOptions) {
-    const spread = spreadFormulaColumns(definition);
+    const formulaText = (ref: { index: number } | undefined) => (ref ? definition.formulaTexts?.[ref.index] ?? definition.formulas.find((f) => f.index === ref.index)?.text ?? '' : '');
+    const quiet = (o: ReportObject) => o.kind === 'text' ? !o.embeddedFields?.length
+      : !!o.field && (!o.field.startsWith('@') || !/:=|\b(shared|global|local)\b/i.test(definition.formulas.find((f) => f.name.toLowerCase() === o.field!.slice(1).toLowerCase())?.text ?? ':='));
+    const neverShown = (o: ReportObject) => (o.kind === 'field' || o.kind === 'text') && quiet(o)
+      && (o.suppressed || /^\s*\(?\s*true\s*\)?\s*;?\s*$/i.test(formulaText(o.conditions?.suppress)) && !!o.conditions?.suppress);
+    const shown = options.rulesAsText
+      ? { ...definition, layout: definition.layout.map((area) => ({ ...area, sections: area.sections.map((section) => ({ ...section, objects: section.objects.filter((o) => !neverShown(o)) })) })) }
+      : definition;
+    const spread = spreadFormulaColumns(shown);
     // Text objects show only the lines their height holds, as in Crystal.
     this.definition = { ...spread.definition, layout: spread.definition.layout.map((area) => ({ ...area,
       sections: area.sections.map((section) => ({ ...section, objects: section.objects.map(clippedText) })) })) };

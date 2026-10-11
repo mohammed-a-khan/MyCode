@@ -145,12 +145,14 @@ export function layoutSummary(doc: CfbDocument, find: string[]): string {
       const name = /^Group #\d+/.test(f.name) ? f.name : hide(f.name, 'F');
       lines.push(`  formula ${f.kind ?? '?'} ${name}: {${shownFormula(f.text ?? '')}}`);
     }
-    return `${lines.join('\n')}\n\n(Positions and sizes in twips; names and text are replaced by S1, N1, F1, ...; <tN> is N characters of text.)\n`;
   }
+  const all = find.includes('--all') && !!main?.definition;
   // "#339" asks for Subdocument 339 by number.
-  const numbers = new Set(find.map((f) => /^#(\d+)$/.exec(f.trim())?.[1]).filter((n): n is string => !!n).map(Number));
+  const numbers = all
+    ? new Set(reports.filter((r) => r.storage).map((r) => Number(/(\d+)$/.exec(r.storage)?.[1])))
+    : new Set(find.map((f) => /^#(\d+)$/.exec(f.trim())?.[1]).filter((n): n is string => !!n).map(Number));
   // Main-report sections showing a searched text, with what is placed around them.
-  if (main?.definition) {
+  if (main?.definition && !all) {
     for (const area of main.definition.layout) {
       for (const section of area.sections) {
         if (!section.objects.some((o) => o.text && matched(o.text))) continue;
@@ -181,12 +183,13 @@ export function layoutSummary(doc: CfbDocument, find: string[]): string {
     if (sorts.length) lines.push(`  sorts: ${sorts.map((s) => `${shownField(s.field)}${s.descending ? ' desc' : ' asc'}${s.bySummary ? ' (by summary)' : ''}`).join(', ')}`);
     if (report.definition!.groups.length) lines.push(`  groups: ${report.definition!.groups.map((g) => shownField(g)).join(', ')}`);
     lines.push(...selections(report.definition!));
+    if (all) for (const f of report.definition!.formulas) lines.push(`  formula ${f.kind ?? '?'} ${/^Group #\d+/.test(f.name) ? f.name : hide(f.name, 'F')}: {${shownFormula(f.text ?? '')}}`);
     // Its parameters, and the main-report field each linked one takes its value from.
     const params = report.definition!.parameters.map((p) => `?${hide(p.name, 'P')}${p.linkedField ? ` <- {${shownField(p.linkedField)}}` : ''}`);
     if (params.length) lines.push(`  parameters: ${params.join(', ')}`);
   }
   // The main report's record and group selection and its groups (what decides which rows are shown, and how).
-  if (main?.definition && lines.length) {
+  if (main?.definition && lines.length && !all) {
     lines.push('', '== main report selection and groups', ...selections(main.definition));
     const sorts = main.definition.sorts ?? [];
     if (sorts.length) lines.push(`  sorts: ${sorts.map((s) => `${shownField(s.field)}${s.descending ? ' desc' : ' asc'}${s.bySummary ? ' (by summary)' : ''}`).join(', ')}`);
