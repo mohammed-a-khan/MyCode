@@ -93,6 +93,10 @@ export function diagnoseRdl(xml: string, template = false, standardParameters: s
   for (const t of descendants(report).filter((e) => e.name === 'Textbox' && /_(?:SubTotVal|TotVal)_[^_]+$/i.test(e.attributes.Name ?? ''))) {
     out.push({ kind: 'merge', item: t.attributes.Name!, message: 'read by the merge as the total of a column named after its last part, which no column has: the merge blanks it' });
   }
+  for (const box of descendants(report).filter((e) => e.name === 'Rectangle')) {
+    const heads = childElements(child(box, 'ReportItems') ?? box).filter((e) => e.name === 'Textbox' && /_ColTxt$/i.test(e.attributes.Name ?? ''));
+    if (heads.length > 1) out.push({ kind: 'merge', item: box.attributes.Name ?? 'Rectangle', message: `holds ${heads.length} column headings (${heads.map((e) => e.attributes.Name).join(', ')}): the merge takes one heading per column` });
+  }
   for (const q of descendants(report).filter((e) => e.name === 'QueryParameter')) {
     if (/^=\s*Nothing\s*$/i.test(textOf(child(q, 'Value')))) out.push({ kind: 'value', item: `${q.attributes.Name}`, message: 'passed as Nothing: set the value this schedule needs' });
   }
