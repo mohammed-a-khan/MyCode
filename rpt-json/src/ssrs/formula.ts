@@ -23,6 +23,7 @@ export interface FormulaContext {
   customFunction?(name: string): string | undefined;
   /** The Crystal text of a custom function, for writing one of a single value in place (see inlineFunctions). */
   customFunctionText?(name: string): string | undefined;
+  customFunctionExpression?(name: string, args: string[]): string | undefined;
   /** Custom functions of a single value (an expression, or an if/select choosing one) are written in place, not as code. */
   inlineFunctions?(): boolean;
   /** For a range parameter: the SSRS parameters holding its start and end. */
@@ -1736,6 +1737,8 @@ export class Emitter {
     if (vb) return `${vb}(${a().join(', ')})`;
     const inlined = this.inlined(name, args);
     if (inlined) return this.within(inlined.name, () => `(${this.emit(inlined.node)})`);
+    const written = this.inCode ? undefined : this.ctx.customFunctionExpression?.(name, a());
+    if (written) return `(${written})`;
     const custom = this.ctx.customFunction?.(name);
     if (custom) return `${this.inCode ? '' : 'Code.'}${custom}(${a().join(', ')})`;
     // Left as it is, the function would not compile in SSRS (the report would not upload): nothing is shown
