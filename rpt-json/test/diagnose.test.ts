@@ -10,6 +10,7 @@ const source = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', k
 const at = (x: number, width = 2880, height = 240) => ({ position: { x, y: 0 }, size: { width, height } });
 const text = (name: string, value: string, x: number, height = 240): ReportObject => ({ kind: 'text', name, text: value, style: { size: 8 }, ...at(x, 2880, height) });
 const field = (name: string, f: string, x: number): ReportObject => ({ kind: 'field', name, field: f, style: { size: 8 }, ...at(x) });
+const valueOf = (e: XmlElement) => descendants(e).filter((x) => x.name === 'Value').map(textOf).join('');
 const conventions = readConventions(JSON.stringify({ names: { table: '{S}_Tab_{n}', title: '{S}_SchTitle_Txt', heading: '{T}_{col}_ColTxt', value: '{T}_{col}_ColVal', blank: '{T}_blnk{n}', totalText: '{T}_TotTxt', total: '{T}_{col}_TotVal', footer: '{S}_Footer_Txt' } }));
 
 /** A grouped report with a heading of two lines and an empty group header a few points high. */
@@ -240,7 +241,58 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     const totals = descendants(root).filter((e) => e.name === 'Textbox' && /_S\d_SubtotalLabel$/.test(e.attributes.Name ?? ''));
     assert.equal(totals.length, 3, out.match(/Name="[^"]*S\d[^"]*"/g)?.join(" "));
     assert.ok(totals.every((t) => !!child(t, 'Width')), 'each total in a box of its own, the last too');
+    const later = parseXml(applyConventions(out.replace(/(<Tablix Name=")([^"]+)(">[\s\S]*?<\/Tablix>)/, (m) => m + m.replace(/Name="([^"]+)"/g, 'Name="$1_b"').replace(/(<\/TablixRowHierarchy>[\s\S]*?<Top>)[^<]*(<\/Top>)/, '$15in$2')), 'Holdings', styled).rdl);
+    const [first, second] = descendants(later).filter((e) => e.name === 'Tablix');
+    const firstCount = childElements(child(first!, 'TablixBody/TablixColumns')!, 'TablixColumn').length;
+    assert.ok(!descendants(second!).some((e) => e.name === 'ColSpan' && Number(textOf(e)) === firstCount), 'no span in a later table that the merge would take for the first table\'s width');
     const bands = descendants(root).filter((e) => e.name === 'BackgroundColor' && /Mod 2/.test(textOf(e))).map(textOf);
     assert.ok(bands.length && bands.every((b) => b.startsWith('=IIF(RunningValue(')), `rows counted as shown: ${bands[0]}`);
+  });
+
+  it('puts a box drawn under a total on a row of its own, gives each heading its own cell and a total room for its digits', () => {
+    const src = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Name', type: 'string' }, { name: 'Code', type: 'string' }, { name: 'Amount', type: 'currency' }, { name: 'Kind', type: 'string' }, { name: 'Rank', type: 'string' }, { name: 'G', type: 'string' }] }] } as never;
+    const box = (x: number, y: number, width: number, height: number) => ({ position: { x, y }, size: { width, height } });
+    const t = (name: string, value: string, x: number, y: number, width: number, height: number, extra = {}) => ({ kind: 'text', name, text: value, style: { size: 8 }, ...box(x, y, width, height), ...extra });
+    const f = (name: string, ref: string, x: number, y: number, width: number, height: number, extra = {}) => ({ kind: 'field', name, field: ref, style: { size: 8 }, ...box(x, y, width, height), ...extra });
+    const rule = { border: { sides: [0, 0, 1, 0], width: 20 }, align: 'right' };
+    const definition = {
+      saveInfo: {}, selectionFormulas: {}, sqlExpressions: [], parameters: [], groups: ['@all', 'T.G'], sortFields: [], summarizedFields: [],
+      formulas: [{ name: 'all', index: 1, kind: 'formula', text: 'WhileReadingRecords; "All"', referencedFields: [] },
+        { name: 'Group #1 Order', index: 2, kind: 'internal', text: '', referencedFields: ['@all'] },
+        { name: 'Group #2 Order', index: 3, kind: 'internal', text: '', referencedFields: ['T.G'] }],
+      layout: [
+        ...['PageHeaderArea1', 'PageFooterArea1', 'ReportHeaderArea1', 'ReportFooterArea1'].map((name) => ({ name, sections: [{ name, height: 0, objects: [] }] })),
+        { name: 'GroupHeaderArea1', sections: [{ name: 'GH1', height: 900, objects: [
+          t('Title', 'Holdings by Rank', 0, 0, 8640, 300, { align: 'center' }),
+          t('NameHead', 'Name', 100, 560, 2800, 225), t('CodeHead', 'Code', 3000, 560, 1000, 225),
+          t('AmountHead', 'Amount', 4100, 500, 1000, 400), t('KindHead', 'Kind of Rank', 5200, 420, 653, 450), t('RankHead', 'Rank Name', 5897, 500, 788, 400)] }] },
+        { name: 'GroupFooterArea1', sections: [{ name: 'GF1', height: 1195, objects: [
+          t('TotalLabel', 'Total:', 100, 120, 1755, 225), f('Total', 'Sum of T.Amount', 3980, 120, 1253, 180, rule),
+          t('Legend', 'A note on the marks', 5200, 500, 2500, 655, { border: { sides: [1, 1, 1, 1], width: 20 } })] }] },
+        { name: 'GroupHeaderArea2', sections: [{ name: 'GH2', height: 0, suppressed: true, objects: [] }] },
+        { name: 'GroupFooterArea2', sections: [{ name: 'GF2', height: 300, objects: [f('Sub', 'Sum of T.Amount', 4100, 40, 1000, 180, rule)] }] },
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 210, objects: [f('N', 'T.Name', 100, 0, 2800, 195), f('C', 'T.Code', 3000, 0, 1000, 180),
+          f('A', 'T.Amount', 4100, 0, 1000, 180, { align: 'right' }), f('K', 'T.Kind', 5223, 0, 690, 180), f('R', 'T.Rank', 6063, 0, 615, 180)] }] },
+      ],
+    } as unknown as ReportDefinition;
+    const out = applyConventions(convertToRdl(definition, src, { reportName: 'Holdings', formulasInQuery: true, rulesAsText: true }).rdl, 'Holdings', conventions).rdl;
+    const root = parseXml(out);
+    const tablix = descendants(root).find((e) => e.name === 'Tablix')!;
+    const rows = childElements(child(tablix, 'TablixBody/TablixRows')!, 'TablixRow');
+    const rowOf = (name: string) => rows.findIndex((r) => descendants(r).some((e) => e.attributes.Name === name));
+    const total = descendants(tablix).find((e) => e.name === 'Textbox' && /^=Sum/.test(valueOf(e)) && rows[rowOf(e.attributes.Name!)] && descendants(rows[rowOf(e.attributes.Name!)]!).some((x) => x.name === 'Value' && textOf(x) === 'Total:'))!;
+    const legend = descendants(tablix).find((e) => e.name === 'Textbox' && valueOf(e).includes('A note'))!;
+    assert.ok(total && legend, 'the total and the note');
+    assert.equal(rowOf(legend.attributes.Name!), rowOf(total.attributes.Name!) + 1, 'the note on the row under the total');
+    assert.ok(!descendants(rows[rowOf(total.attributes.Name!)]!).some((e) => e.name === 'ColSpan'), 'the total\'s row spans nothing, so it is reordered with the columns');
+    assert.ok(!/TotTxt|TotVal/.test(legend.attributes.Name!), legend.attributes.Name);
+    const headings = descendants(tablix).filter((e) => e.name === 'Textbox' && /_ColTxt$/.test(e.attributes.Name ?? ''));
+    assert.ok(headings.some((e) => valueOf(e) === 'Kind of Rank') && headings.some((e) => valueOf(e) === 'Rank Name'), headings.map((e) => e.attributes.Name).join(' '));
+    assert.ok(headings.every((e) => !textOf(child(childElements(e, 'Style')[0]!, 'PaddingTop')) || /^0(\.0+)?pt$/.test(textOf(child(childElements(e, 'Style')[0]!, 'PaddingTop')))), 'headings on one level');
+    const widths = childElements(child(tablix, 'TablixBody/TablixColumns')!, 'TablixColumn').map((c) => parseFloat(textOf(child(c, 'Width'))));
+    const cells = childElements(child(rows[rowOf(total.attributes.Name!)]!, 'TablixCells')!, 'TablixCell');
+    const at = cells.findIndex((c) => descendants(c).includes(total));
+    assert.ok(widths[at]! >= 1253 / 1440 - 0.005, `the total's column as wide as Crystal drew the total: ${widths[at]}`);
+    assert.deepEqual(diagnoseRdl(out, true).filter((x) => x.kind === 'overlap' || x.kind === 'cut off' || x.kind === 'empty row'), []);
   });
 });
