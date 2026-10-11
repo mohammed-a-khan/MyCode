@@ -257,6 +257,113 @@ function restack(tablix: XmlElement): void {
   const widths = widthsOf(tablix);
   const spanOf = (cell: XmlElement) => Number(textOf(child(child(cell, 'CellContents') ?? el('x'), 'ColSpan')) || 1);
   const inner = (item: XmlElement | undefined) => (item?.name === 'Rectangle' ? childElements(child(item, 'ReportItems') ?? el('x')).filter((e) => ITEMS.has(e.name)) : []);
+  const startsOf = (c: number, span: number) => widths.slice(c, c + span).map((_, k) => widths.slice(c, c + k).reduce((a, b) => a + b, 0));
+  const columnAt = (starts: number[], x: number) => { let k = 0; while (k + 1 < starts.length && starts[k + 1]! <= x + 0.01) k++; return k; };
+  for (const row of rowsOf(tablix)) {
+    const cells = cellsOf(row);
+    for (let i = 0, c = 0; i < cells.length; i++) {
+      const cell = cells[i]!;
+      if (!child(cell, 'CellContents')) continue;
+      const span = spanOf(cell);
+      const item = cellItem(cell);
+      const parts = inner(item);
+      const starts = startsOf(c, span);
+      const texts = parts.filter((e) => e.name === 'Textbox');
+      if (span >= 2 && texts.length >= 2 && parts.every((e) => e.name === 'Textbox') && cells.slice(i + 1, i + span).every((x) => !child(x, 'CellContents'))) {
+        const hidden = (e: XmlElement) => !!child(e, 'Visibility');
+        const shown = texts.filter((e) => !hidden(e));
+        const home = (e: XmlElement) => columnAt(starts, hidden(e) ? len(e, 'Left') : len(e, 'Left') + len(e, 'Width') / 2);
+        const fits = shown.every((e) => len(e, 'Left') + len(e, 'Width') <= starts[home(e)]! + widths[c + home(e)]! + 0.06);
+        const homes = new Set(texts.map(home));
+        if (fits && homes.size >= 2 && new Set(shown.map(home)).size === shown.length) {
+          for (let k = 0; k < span; k++) {
+            const mine = texts.filter((e) => home(e) === k);
+            for (const e of mine) {
+              const left = Math.max(0, len(e, 'Left') - starts[k]!);
+              setChild(e, 'Left', inch(left));
+              setChild(e, 'Width', inch(Math.max(0.01, Math.min(len(e, 'Width'), widths[c + k]! - left))));
+            }
+            const content = mine.length
+              ? el('Rectangle', { Name: `${item!.attributes.Name ?? 'Rect'}_${k + 1}` }, el('ReportItems', ...mine), ...childElements(item!).filter((e) => e.name === 'Style').map((e) => structuredClone(e)))
+              : newTextbox(`__split_${k}`, '', '0pt');
+            const target = cells[i + k]!;
+            removeChildren(target, ['CellContents']);
+            target.children.push(el('CellContents', content));
+          }
+        }
+      }
+      c += span;
+    }
+  }
+  const leavesNow = rowLeaves(tablix);
+  for (const [r, row] of rowsOf(tablix).entries()) {
+    const cells = cellsOf(row);
+    if (leavesNow[r]?.kind !== 'heading' && leavesNow[r]?.kind !== 'groupHeading') continue;
+    for (let i = 0, c = 0; i < cells.length; i++) {
+      const cell = cells[i]!;
+      if (!child(cell, 'CellContents')) continue;
+      const span = spanOf(cell);
+      const item = cellItem(cell);
+      const parts = inner(item);
+      const texts = parts.filter((e) => e.name === 'Textbox' && fixedText(e) !== undefined);
+      const starts = startsOf(c, span);
+      const lowest = texts.length ? Math.max(...texts.map((e) => len(e, 'Top'))) : 0;
+      const bottom = texts.filter((e) => len(e, 'Top') >= lowest - 0.05);
+      const above = texts.filter((e) => !bottom.includes(e));
+      const home = (e: XmlElement) => columnAt(starts, len(e, 'Left') + len(e, 'Width') / 2);
+      if (span >= 2 && !groupLabels.has(item!) && bottom.length >= 2 && above.length >= 1 && new Set(bottom.map(home)).size === bottom.length && parts.every((e) => e.name === 'Textbox' || e.name === 'Line')) {
+        const cut = Math.min(...bottom.map((e) => len(e, 'Top')));
+        const lowerCells: XmlElement[] = [];
+        const rulesAt = new Map<number, XmlElement>();
+        for (const line of parts.filter((e) => e.name === 'Line')) {
+          const top = len(line, 'Top');
+          const bottomOf = top + len(line, 'Height');
+          if (len(line, 'Height') > 0.01 && bottomOf > cut + 0.02) {
+            const k = starts.findIndex((x) => Math.abs(x - len(line, 'Left')) < 0.06);
+            if (k > 0) rulesAt.set(k, childElements(line, 'Style')[0] ?? el('Style'));
+            if (top >= cut - 0.01) removeChildren(child(item!, 'ReportItems')!, []), (child(item!, 'ReportItems')!.children = child(item!, 'ReportItems')!.children.filter((x) => x !== line));
+            else setChild(line, 'Height', inch(cut - top));
+          }
+          headingLines.add(line);
+        }
+        for (let k = 0, j = 0; j < cells.length; j++) {
+          if (!child(cells[j]!, 'CellContents')) continue;
+          const sp = spanOf(cells[j]!);
+          for (let q = 0; q < sp; q++, k++) {
+            const within = j === i ? q : -1;
+            const tb = within >= 0 ? bottom.find((e) => home(e) === within) : undefined;
+            let content: XmlElement;
+            if (tb) {
+              child(item!, 'ReportItems')!.children = child(item!, 'ReportItems')!.children.filter((x) => x !== tb);
+              unplace(tb);
+              content = tb;
+            } else content = newTextbox(`__band_${j}_${q}`, '', '0pt');
+            const rule = within > 0 ? rulesAt.get(within) : undefined;
+            if (rule) {
+              const border = el('LeftBorder', ...childElements(child(rule, 'Border') ?? rule).filter((x) => ['Color', 'Style', 'Width'].includes(x.name)).map((x) => structuredClone(x)));
+              if (!child(border, 'Style')) border.children.push(el('Style', 'Solid'));
+              removeChildren(ownStyle(content), ['LeftBorder']);
+              ownStyle(content).children.push(border);
+              headingLines.add(border);
+            }
+            lowerCells.push(el('TablixCell', el('CellContents', content)));
+          }
+        }
+        const height = len(row, 'Height');
+        const band = Math.max(...bottom.map((e) => len(e, 'Height'))) + 0.03;
+        setChild(row, 'Height', inch(Math.max(cut, height - band)));
+        const lower = el('TablixRow', el('Height', inch(band)), el('TablixCells', ...lowerCells));
+        const rowsEl = child(tablix, 'TablixBody/TablixRows')!;
+        rowsEl.children.splice(rowsEl.children.indexOf(row) + 1, 0, lower);
+        const leaf = leavesNow[r]!.member;
+        const parent = parentOf(tablix, leaf);
+        parent.children.splice(parent.children.indexOf(leaf) + 1, 0, structuredClone(leaf));
+        groupLabels.add(item!);
+        return restack(tablix);
+      }
+      c += span;
+    }
+  }
   for (const row of rowsOf(tablix)) {
     const cells = cellsOf(row);
     const texts = cells.flatMap((cell) => { const item = cellItem(cell); return item?.name === 'Rectangle' ? inner(item) : item ? [item] : []; })
@@ -325,7 +432,7 @@ function restack(tablix: XmlElement): void {
         for (const e of item?.name === 'Rectangle' ? inner(item) : item ? [item] : []) {
           if (e.name !== 'Textbox' || isBlank(e)) continue;
           if (headingRow) {
-            const { size, bold } = drawnFont(e, designText);
+            const { size, bold } = drawnFont(e, true);
             need[c] = Math.max(need[c]!, Math.max(...fixedText(e)!.split(/\s+/).map((w) => arialWidth(w, size, bold))) + 0.04);
           } else if (descendants(e).some((x) => x.name === 'Format') && child(e, 'Width')) need[c] = Math.max(need[c]!, len(e, 'Left') + len(e, 'Width'));
         }
@@ -335,15 +442,17 @@ function restack(tablix: XmlElement): void {
   }
   const short = need.map((n, k) => Math.max(0, n - widths[k]!));
   const wanted = short.reduce((a, b) => a + b, 0);
-  if (wanted > 0.005) {
+  if (wanted > 0.005 && !widened.has(tablix)) {
+    widened.add(tablix);
     const widest = widths.indexOf(Math.max(...widths));
-    const give = Math.min(wanted, Math.max(0, widths[widest]! - Math.max(1.5, need[widest]!)));
+    const spare = widths.map((w, k) => (short[k]! > 0 ? 0 : Math.max(0, w - Math.max(need[k]! + 0.05, k === widest ? w * 0.75 : 0))));
+    const room = spare.reduce((a, b) => a + b, 0);
+    const give = Math.min(wanted, room);
     if (give > 0.005) {
-      const share = give / wanted;
       const columnEls = childElements(child(tablix, 'TablixBody/TablixColumns')!, 'TablixColumn');
       columnEls.forEach((col, k) => {
-        if (k === widest) setChild(col, 'Width', inch(widths[k]! - give));
-        else if (short[k]! > 0) setChild(col, 'Width', inch(widths[k]! + short[k]! * share));
+        if (spare[k]! > 0) setChild(col, 'Width', inch(widths[k]! - spare[k]! * give / room));
+        else if (short[k]! > 0) setChild(col, 'Width', inch(widths[k]! + short[k]! * give / wanted));
       });
     }
   }
@@ -356,9 +465,25 @@ function restack(tablix: XmlElement): void {
           const span = spanOf(cells[i]!);
           const room = now.slice(c, c + span).reduce((x, y) => x + y, 0);
           const was = widths.slice(c, c + span).reduce((x, y) => x + y, 0);
+          const oldEdges = [0, ...widths.slice(c, c + span).map((_, k) => widths.slice(c, c + k + 1).reduce((x, y) => x + y, 0))];
+          const newEdges = [0, ...now.slice(c, c + span).map((_, k) => now.slice(c, c + k + 1).reduce((x, y) => x + y, 0))];
+          const moved = (x: number) => {
+            for (let k = 0; k < span; k++) {
+              if (x <= oldEdges[k + 1]! + 0.0005 || k === span - 1) {
+                const part = oldEdges[k + 1]! - oldEdges[k]!;
+                return newEdges[k]! + (part > 0 ? (Math.min(x, oldEdges[k + 1]!) - oldEdges[k]!) / part : 0) * (newEdges[k + 1]! - newEdges[k]!);
+              }
+            }
+            return x;
+          };
           for (const e of inner(cellItem(cells[i]!))) {
             if (!child(e, 'Width')) continue;
-            if (len(e, 'Left') + len(e, 'Width') > room + 0.0005 || (room > was + 0.001 && Math.abs(len(e, 'Left') + len(e, 'Width') - was) < 0.01)) setChild(e, 'Width', inch(Math.max(0.01, room - len(e, 'Left'))));
+            if (span > 1 && Math.abs(room - was) > 0.001) {
+              const l = moved(len(e, 'Left'));
+              const r = moved(len(e, 'Left') + len(e, 'Width'));
+              setChild(e, 'Left', inch(l));
+              setChild(e, 'Width', inch(e.name === 'Line' && len(e, 'Width') < 0.02 ? len(e, 'Width') : Math.max(0.01, r - l)));
+            } else if (len(e, 'Left') + len(e, 'Width') > room + 0.0005 || (room > was + 0.001 && Math.abs(len(e, 'Left') + len(e, 'Width') - was) < 0.01)) setChild(e, 'Width', inch(Math.max(0.01, room - len(e, 'Left'))));
           }
           const box = cellItem(cells[i]!);
           if (box?.name === 'Rectangle' && child(box, 'Width')) setChild(box, 'Width', inch(room));
@@ -419,6 +544,9 @@ function restack(tablix: XmlElement): void {
 }
 
 const stackedRows = new WeakSet<XmlElement>();
+const widened = new WeakSet<XmlElement>();
+const headingLines = new Set<XmlElement>();
+const groupLabels = new WeakSet<XmlElement>();
 
 function parentOf(root: XmlElement, target: XmlElement): XmlElement {
   return [root, ...descendants(root)].find((e) => e.children.includes(target))!;
@@ -486,6 +614,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
   const root = parseXml(rdl);
   const report = root.name === 'Report' ? root : descendants(root).find((e) => e.name === 'Report')!;
   const S = snake(prefix ?? conv.prefixes[reportName.toLowerCase()] ?? reportName) || 'Report';
+  designText = !!conv.style;
   const names = new Names();
   const itemRenames = new Map<string, string>();
   const scopeRenames = new Map<string, string>();
@@ -1168,6 +1297,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
         const textboxes = item.name === 'Textbox' ? [item] : descendants(item).filter((e) => e.name === 'Textbox');
         const cellName = (tb: XmlElement) => {
           if (named.has(tb)) return tb.attributes.Name;
+          if (item.name === 'Rectangle' && groupLabels.has(item)) return rename(tb, 'text', { T });
           const col = fieldOf(tb) ?? colNames[c] ?? ownWord(tb) ?? `col${c + 1}`;
           if (kind === 'noData') return rename(tb, 'noData', { T });
           const across = Number(textOf(child(child(cell, 'CellContents') ?? el('x'), 'ColSpan')) || 1);
@@ -1459,6 +1589,24 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
 
   // ----- Looks from the style dataset.
   if (conv.style) applyStyleRoles(report, conv.style, roles, tableCells, unbanded, bandRows, review, dataSources[0]?.attributes.Name ?? conv.dataSource?.name ?? '');
+  if (conv.style) {
+    for (const t of descendants(report).filter((e) => e.name === 'Tablix')) {
+      const heads = descendants(t).filter((e) => e.name === 'Textbox' && roles.get(e) === 'heading');
+      const ink = heads.flatMap((e) => descendants(e).filter((x) => x.name === 'Color')).map(textOf).find(Boolean);
+      if (!ink) continue;
+      const kinds = rowLeaves(t).map((l) => l.kind);
+      rowsOf(t).forEach((row, r) => {
+        if (kinds[r] !== 'heading' && kinds[r] !== 'groupHeading') return;
+        if (!descendants(row).some((e) => heads.includes(e))) return;
+        for (const line of descendants(row).filter((e) => e.name === 'Line')) {
+          const st = childElements(line, 'Style')[0];
+          const border = child(st, 'Border') ?? st;
+          if (border) setChild(border, 'Color', ink);
+        }
+      });
+      for (const b of headingLines) if (b.name !== 'Line' && descendants(t).includes(b)) setChild(b, 'Color', ink);
+    }
+  }
   for (const row of descendants(report).filter((e) => e.name === 'TablixRow')) {
     const texts = descendants(row).filter((e) => e.name === 'Textbox');
     if (!texts.some((t) => ruledAbove(t) && !isBlank(t))) continue;

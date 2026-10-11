@@ -301,4 +301,37 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     const rdl = `<Report><ReportSections><ReportSection><Body><ReportItems><Rectangle Name="A_x_Rect"><ReportItems><Textbox Name="A_x_ColTxt"><Paragraphs/></Textbox><Textbox Name="A_x_2_ColTxt"><Paragraphs/></Textbox></ReportItems></Rectangle></ReportItems></Body></ReportSection></ReportSections></Report>`;
     assert.ok(diagnoseRdl(rdl, true).some((f) => f.kind === 'merge' && f.item === 'A_x_Rect'));
   });
+
+  it('puts the lowest line of a grouped heading in a row of its own, a heading per column named after its field', () => {
+    const names = ['Name', 'NowRating', 'NowWatch', 'WasRating', 'WasWatch'];
+    const src = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: names.map((name) => ({ name, type: 'string' })) }] } as never;
+    const box = (x: number, y: number, width: number, height: number) => ({ position: { x, y }, size: { width, height } });
+    const t = (name: string, value: string, x: number, y: number, width: number, height = 230) => ({ kind: 'text', name, text: value, style: { size: 8 }, align: 'center', ...box(x, y, width, height) });
+    const rule = (name: string, x: number, y: number, width: number, height: number) => ({ kind: 'line', name, ...box(x, y, width, height), border: { sides: height ? [1, 0, 0, 0] : [0, 0, 1, 0], width: 20 } });
+    const definition = {
+      saveInfo: {}, selectionFormulas: {}, sqlExpressions: [], parameters: [], groups: ['@all'], sortFields: [], summarizedFields: [],
+      formulas: [{ name: 'all', index: 1, kind: 'formula', text: 'WhileReadingRecords; "All"', referencedFields: [] },
+        { name: 'Group #1 Order', index: 2, kind: 'internal', text: '', referencedFields: ['@all'] }],
+      layout: [
+        ...['PageHeaderArea1', 'PageFooterArea1', 'ReportHeaderArea1', 'ReportFooterArea1'].map((name) => ({ name, sections: [{ name, height: 0, objects: [] }] })),
+        { name: 'GroupHeaderArea1', sections: [{ name: 'GH', height: 1100, objects: [
+          t('Title', 'Ratings by Name', 0, 0, 8000, 288), { ...rule('TitleRule', 0, 300, 8000, 0), border: { sides: [0, 0, 1, 0], width: 60 } }, t('NameHead', 'Name', 100, 600, 2800),
+          t('Group', 'Ratings', 3000, 360, 2880), t('Now', 'Now', 3000, 600, 1440), t('Was', 'Before', 4440, 600, 1440),
+          t('H1', 'Rating', 3000, 840, 720), t('H2', 'Watch', 3720, 840, 720), t('H3', 'Rating', 4440, 840, 720), t('H4', 'Watch', 5160, 840, 720),
+          rule('Under', 3000, 590, 2880, 0), rule('Middle', 4440, 360, 0, 720), rule('Left', 3000, 360, 0, 720)] }] },
+        { name: 'GroupFooterArea1', sections: [{ name: 'GF', height: 0, objects: [] }] },
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 230, objects: [
+          { kind: 'field', name: 'N', field: 'T.Name', style: { size: 8 }, ...box(100, 0, 2800, 210) },
+          ...names.slice(1).map((f, i) => ({ kind: 'field', name: f, field: `T.${f}`, style: { size: 8 }, ...box(3000 + i * 720, 0, 720, 210) }))] }] },
+      ],
+    } as unknown as ReportDefinition;
+    const styled = { ...conventions, style: { dataset: 'Theme', commandType: 'StoredProcedure', command: 'dbo.theme_get', field: '{role}_{prop}', props: { Color: 'ink' }, roles: { title: 'Title', heading: 'Head' } } } as never;
+    const out = applyConventions(convertToRdl(definition, src, { reportName: 'Holdings', formulasInQuery: true, rulesAsText: true }).rdl, 'Holdings', styled).rdl;
+    const root = parseXml(out);
+    const headings = descendants(root).filter((e) => e.name === 'Textbox' && /_ColTxt$/.test(e.attributes.Name ?? '')).map((e) => e.attributes.Name);
+    for (const f of names.slice(1)) assert.ok(headings.includes(`Holdings_Tab_1_${f}_ColTxt`), `${f}: ${headings.join(' ')}`);
+    assert.ok(!diagnoseRdl(out, true).some((f) => f.kind === 'merge' || f.kind === 'overlap'), diagnosisLine(diagnoseRdl(out, true)));
+    const lines = descendants(root).filter((e) => e.name === 'Line');
+    assert.ok(lines.length && lines.every((l) => /Head_ink/.test(textOf(descendants(l).find((x) => x.name === 'Color')))), 'the heading\'s rules drawn in the heading\'s colour');
+  });
 });
