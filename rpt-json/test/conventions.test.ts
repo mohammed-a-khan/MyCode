@@ -481,6 +481,9 @@ describe('conventions', () => {
       assert.ok(spans <= cols(tables[1]!));
     }
     assert.equal(childElements(child(tables[1]!, 'TablixColumnHierarchy/TablixMembers')!, 'TablixMember').length, cols(tables[1]!));
+    // Empty cells numbered in reading order, row by row, left to right.
+    const blankNumbers = descendants(tables[1]!).filter((e) => e.name === 'Textbox' && /_empty\d+$/.test(e.attributes.Name ?? '')).map((e) => Number(/(\d+)$/.exec(e.attributes.Name!)![1]));
+    assert.deepEqual(blankNumbers, blankNumbers.map((_, i) => i + 1), `empty cells in reading order: ${blankNumbers}`);
     // Each spare column wide enough to be seen and picked in the designer.
     const widths = childElements(child(tables[1]!, 'TablixBody/TablixColumns')!, 'TablixColumn').map((c) => parseFloat(textOf(child(c, 'Width'))));
     assert.ok(widths.slice(-(cols(tables[0]!) - 1)).every((w) => w >= 0.149), `spare columns seen: ${widths}`);

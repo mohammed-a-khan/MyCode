@@ -1024,6 +1024,25 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     }
   }
 
+  // A table's empty cells numbered in reading order (row by row, left to right), as the designer lists them, rather
+  // than in the order they were made.
+  if (conv.names.blank.includes('{n}')) {
+    const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    for (const t of descendants(report).filter((e) => e.name === 'Tablix')) {
+      const T = t.attributes.Name ?? '';
+      const parts = conv.names.blank.replace(/\{S\}/g, S).replace(/\{T\}/g, T).split('{n}');
+      const shape = new RegExp(`^${parts.map(escape).join('\\d+')}$`);
+      const blanks = rowsOf(t).flatMap((row) => cellsOf(row).flatMap((cell) => {
+        const item = cellItem(cell);
+        return item && item.name === 'Textbox' && shape.test(item.attributes.Name ?? '') ? [item] : [];
+      }));
+      // (Nothing refers to an empty cell by name: the numbers are only shuffled among them.)
+      blanks.forEach((tb, i) => {
+        tb.attributes.Name = parts.join(String(i + 1));
+      });
+    }
+  }
+
   // Names stay unique: an item kept under its Crystal name gives way to a new one taken.
   const seen = new Set<string>();
   for (const e of descendants(report).filter((x) => (ITEMS.has(x.name) || x.name === 'Group') && x.attributes.Name)) {
