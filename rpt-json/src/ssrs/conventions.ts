@@ -733,6 +733,7 @@ const stackedRows = new WeakSet<XmlElement>();
 const widened = new WeakSet<XmlElement>();
 const leftBlank = new WeakSet<XmlElement>();
 const groupLabels = new WeakSet<XmlElement>();
+const underRule = new WeakSet<XmlElement>();
 
 function parentOf(root: XmlElement, target: XmlElement): XmlElement {
   return [root, ...descendants(root)].find((e) => e.children.includes(target))!;
@@ -1247,6 +1248,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           removeChildren(st, ['TopBorder']);
           setChild(st, 'VerticalAlign', 'Top');
           setChild(st, 'PaddingTop', '0pt');
+          underRule.add(r.t);
           setChild(r.t, 'Top', inch(Math.max(0, len(r.t, 'Top') - height)));
           return el('TablixCell', el('CellContents', el('Rectangle', { Name: `__ruleBox_${c}` }, el('ReportItems', line), el('KeepTogether', 'true'), el('Style', el('Border', el('Style', 'None'))))));
         });
@@ -2949,7 +2951,7 @@ function applyStyleRoles(report: XmlElement, style: NonNullable<Conventions['sty
       }
     }
     const own = ownStyle(tb);
-    if (style.props.VerticalAlign) setChild(own, 'VerticalAlign', `=${expr(field(role, style.props.VerticalAlign))}`);
+    if (style.props.VerticalAlign && !underRule.has(tb)) setChild(own, 'VerticalAlign', `=${expr(field(role, style.props.VerticalAlign))}`);
     // Fills: a table's title, headings, group rows and totals take their role's; data rows the odd and even bands.
     const fillWord = style.props.BackgroundColor;
     const current = textOf(child(own, 'BackgroundColor'));
