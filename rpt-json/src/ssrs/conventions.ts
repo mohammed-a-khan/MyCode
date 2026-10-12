@@ -977,6 +977,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     const container = parents.get(tablix);
     foldMargins(tablix);
     restack(tablix, tablix === tablixes[0]);
+    foldMargins(tablix);
     const widths = widthsOf(tablix);
     const columns = widths.length;
     const isNumber = (tb: XmlElement) => {
@@ -1497,7 +1498,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           const only = inner.length === 1 && inner[0]!.name === 'Textbox' ? inner[0]! : undefined;
           const across = Number(textOf(child(child(cell, 'CellContents'), 'ColSpan')) || 1);
           const room = widths.slice(c, c + across).reduce((a, b) => a + b, 0);
-          const shortRule = !!only && ruledAbove(only) && (shortInRow || len(only, 'Left') > 0.02 || room - len(only, 'Left') - len(only, 'Width') > 0.02);
+          const shortRule = false;
           const drawn = (st: XmlElement | undefined, side: string) => /solid|dashed|dotted|double/i.test(textOf(child(st, `${side}/Style`)));
           const filled = (st: XmlElement | undefined) => { const v = textOf(child(st, 'BackgroundColor')); return !!v && !/^(transparent|#00ffffff)$/i.test(v); };
           const ts = only ? ownStyle(only) : undefined;
