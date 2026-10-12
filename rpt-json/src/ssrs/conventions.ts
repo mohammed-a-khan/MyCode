@@ -431,6 +431,30 @@ function restack(tablix: XmlElement, whole = false): void {
           groupLabels.add(box);
           for (const e of mine) groupLabels.add(e);
         }
+        if (whole) {
+          const upper = cellsOf(row);
+          const boxes: { box: XmlElement; left: number; width: number }[] = [];
+          let plain = true;
+          for (let q = 0, cc = 0; q < upper.length; q++) {
+            const contents = child(upper[q]!, 'CellContents');
+            if (!contents) continue;
+            const sp = spanOf(upper[q]!);
+            const it = cellItem(upper[q]!);
+            if (it && groupLabels.has(it)) boxes.push({ box: it, left: widths.slice(0, cc).reduce((x, y) => x + y, 0), width: widths.slice(cc, cc + sp).reduce((x, y) => x + y, 0) });
+            else if (it && !(it.name === 'Textbox' && isBlank(it)) && !(it.name === 'Rectangle' && !inner(it).length)) plain = false;
+            cc += sp;
+          }
+          if (plain && boxes.length) {
+            for (const g of boxes) {
+              removeChildren(g.box, ['Top', 'Left', 'Height', 'Width']);
+              g.box.children.splice(1, 0, el('Top', '0in'), el('Left', inch(g.left)), el('Height', inch(cut)), el('Width', inch(g.width)));
+            }
+            const band = el('Rectangle', { Name: `${item!.attributes.Name ?? 'Rect'}_band` }, el('ReportItems', ...boxes.map((g) => g.box)), el('KeepTogether', 'true'), el('Style', el('Border', el('Style', 'None'))));
+            groupLabels.add(band);
+            const all = widths.length;
+            child(row, 'TablixCells')!.children = [el('TablixCell', el('CellContents', band, all > 1 ? el('ColSpan', String(all)) : null)), ...Array.from({ length: all - 1 }, () => el('TablixCell'))];
+          }
+        }
         const height = len(row, 'Height');
         const band = Math.max(lifted, ...bottom.map((e) => len(e, 'Height'))) + 0.03;
         setChild(row, 'Height', inch(cut));
@@ -1313,6 +1337,23 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
         }
       }
       colNames.push(name);
+    }
+    if (tablix === tablixes[0]) {
+      const total = widthsOf(tablix).length;
+      for (const row of rowsOf(tablix)) {
+        const cells = cellsOf(row);
+        const filled = cells.filter((x) => child(x, 'CellContents'));
+        const first = filled[0];
+        const span = first ? Number(textOf(child(child(first, 'CellContents')!, 'ColSpan')) || 1) : 0;
+        if (!first || span < 2 || span >= total || cells.indexOf(first) !== 0) continue;
+        const tail = cells.slice(span);
+        const emptyTail = tail.every((x) => { const it = cellItem(x); return !child(x, 'CellContents') || (it?.name === 'Textbox' && isBlank(it)) || (it?.name === 'Rectangle' && !child(it, 'ReportItems')?.children.length); });
+        if (!emptyTail || span + tail.length !== total) continue;
+        const contents = child(first, 'CellContents')!;
+        removeChildren(contents, ['ColSpan']);
+        contents.children.push(el('ColSpan', String(total)));
+        child(row, 'TablixCells')!.children = [first, ...Array.from({ length: total - 1 }, () => el('TablixCell'))];
+      }
     }
     // Each text in its row: named after its column, given its looks.
     const headingCols = new Set<string>();
