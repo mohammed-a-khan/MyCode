@@ -3142,6 +3142,15 @@ class RdlBuilder {
     for (let level = levels; level >= 1; level--) {
       this.ungroupedRows = level === 1 && this.isConstantGroup(this.groupFields[0]);
       footerMembers[level - 1] = addRows(areas.groupFooters.get(level), `Group${level}Footer`, `Group Footer ${level}`, 'Before');
+      if (this.ungroupedRows) {
+        footerMembers[0] = footerMembers[0].map((m) => {
+          const own = (m.children.find((c) => typeof c === 'object' && c !== null && (c as XmlElement).name === 'Visibility') as XmlElement | undefined)
+            ?.children.map((c) => (typeof c === 'object' && c !== null ? String((c as XmlElement).children[0] ?? '') : '')).find(Boolean);
+          if (own === 'true') return m;
+          const hidden = own && own.startsWith('=') ? `=CountRows() = 0 OrElse (${own.slice(1)})` : '=CountRows() = 0';
+          return { ...m, children: [el('Visibility', el('Hidden', hidden)), ...m.children.filter((c) => !(typeof c === 'object' && c !== null && (c as XmlElement).name === 'Visibility'))] };
+        });
+      }
       this.ungroupedRows = false;
       // A box framing a group that holds every record is closed by the table's own bottom border (drawn at the
       // foot of each page, as Crystal closes a box running on to the next page).
