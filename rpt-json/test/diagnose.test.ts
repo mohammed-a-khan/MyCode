@@ -265,6 +265,7 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
         ...['PageHeaderArea1', 'PageFooterArea1', 'ReportHeaderArea1', 'ReportFooterArea1'].map((name) => ({ name, sections: [{ name, height: 0, objects: [] }] })),
         { name: 'GroupHeaderArea1', sections: [{ name: 'GH1', height: 900, objects: [
           t('Title', 'Holdings by Rank', 0, 0, 8640, 300, { align: 'center' }),
+          { kind: 'line', name: 'TitleRule', ...box(0, 320, 8640, 0), border: { sides: [0, 0, 1, 0], width: 60 } },
           t('NameHead', 'Name', 100, 560, 2800, 225), t('CodeHead', 'Code', 3000, 560, 1000, 225),
           t('AmountHead', 'Amount', 4100, 500, 1000, 400), t('KindHead', 'Kind of Rank', 5200, 420, 653, 450), t('RankHead', 'Rank Name', 5897, 500, 788, 400)] }] },
         { name: 'GroupFooterArea1', sections: [{ name: 'GF1', height: 1195, objects: [
@@ -288,7 +289,7 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     assert.ok(!descendants(rows[rowOf(total.attributes.Name!)]!).some((e) => e.name === 'ColSpan'), 'the total\'s row spans nothing, so it is reordered with the columns');
     assert.ok(!/TotTxt|TotVal/.test(legend.attributes.Name!), legend.attributes.Name);
     const headings = descendants(tablix).filter((e) => e.name === 'Textbox' && /_ColTxt$/.test(e.attributes.Name ?? ''));
-    assert.ok(headings.some((e) => valueOf(e) === 'Kind of Rank') && headings.some((e) => valueOf(e) === 'Rank Name'), headings.map((e) => e.attributes.Name).join(' '));
+    assert.ok(headings.some((e) => valueOf(e) === 'Kind of Rank') && headings.some((e) => valueOf(e) === 'Rank Name'), headings.map((e) => valueOf(e)).join(' | '));
     assert.ok(headings.every((e) => !textOf(child(childElements(e, 'Style')[0]!, 'PaddingTop')) || /^0(\.0+)?pt$/.test(textOf(child(childElements(e, 'Style')[0]!, 'PaddingTop')))), 'headings on one level');
     const widths = childElements(child(tablix, 'TablixBody/TablixColumns')!, 'TablixColumn').map((c) => parseFloat(textOf(child(c, 'Width'))));
     const cells = childElements(child(rows[rowOf(total.attributes.Name!)]!, 'TablixCells')!, 'TablixCell');
@@ -331,7 +332,8 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     const headings = descendants(root).filter((e) => e.name === 'Textbox' && /_ColTxt$/.test(e.attributes.Name ?? '')).map((e) => e.attributes.Name);
     for (const f of names.slice(1)) assert.ok(headings.includes(`Holdings_Tab_1_${f}_ColTxt`), `${f}: ${headings.join(' ')}`);
     assert.ok(!diagnoseRdl(out, true).some((f) => f.kind === 'merge' || f.kind === 'overlap'), diagnosisLine(diagnoseRdl(out, true)));
-    const lines = descendants(root).filter((e) => e.name === 'Line');
-    assert.ok(lines.length && lines.every((l) => /Head_ink/.test(textOf(descendants(l).find((x) => x.name === 'Color')))), 'the heading\'s rules drawn in the heading\'s colour');
+    assert.ok(!descendants(root).some((e) => e.name === 'Line'), 'the heading\'s rules drawn as the cells\' borders');
+    const rules = descendants(root).filter((e) => e.name === 'LeftBorder');
+    assert.ok(rules.length && rules.every((r) => /Head_ink/.test(textOf(child(r, 'Color')))), 'in the heading\'s colour');
   });
 });
