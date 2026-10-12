@@ -345,4 +345,32 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     const rules = descendants(root).filter((e) => e.name === 'LeftBorder');
     assert.ok(rules.length && rules.every((r) => /Head_ink/.test(textOf(child(r, 'Color')))), 'in the heading\'s colour');
   });
+  it('keeps the band behind a value shown by condition and a subtotal label in its own column', () => {
+    const src = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: ['D', 'S', 'P', 'N', 'A'].map((name) => ({ name, type: name === 'A' ? 'currency' : 'string' })) }] } as never;
+    const box = (x: number, y: number, width: number, height: number) => ({ position: { x, y }, size: { width, height } });
+    const f = (name: string, fld: string, x: number, y: number, w: number, extra = {}) => ({ kind: 'field', name, field: fld, style: { size: 8 }, ...box(x, y, w, 210), ...extra });
+    const t = (name: string, value: string, x: number, y: number, w: number) => ({ kind: 'text', name, text: value, style: { size: 8, bold: true }, ...box(x, y, w, 210) });
+    const definition = {
+      saveInfo: {}, selectionFormulas: {}, sqlExpressions: [], parameters: [], groups: [], sortFields: [], summarizedFields: [],
+      formulas: [{ name: 'all', index: 1, kind: 'formula', text: 'WhileReadingRecords; "All"', referencedFields: [] },
+        { name: 'Group #1 Order', index: 2, kind: 'internal', text: '', referencedFields: ['@all'] },
+        { name: 'plan', index: 3, kind: 'conditionalFormat', text: '{T.P}="N"', referencedFields: ['T.P'] }],
+      layout: [
+        ...['PageHeaderArea1', 'PageFooterArea1', 'ReportHeaderArea1', 'ReportFooterArea1'].map((name) => ({ name, sections: [{ name, height: 0, objects: [] }] })),
+        { name: 'GroupHeaderArea1', sections: [{ name: 'GH', height: 700, objects: [{ ...t('Title', 'Orders', 0, 0, 7200), style: { size: 11, bold: true } },
+          t('DH', 'Order Date', 180, 375, 1065), t('SH', 'Ship Date', 1230, 375, 1110), t('PH', 'Plan', 2340, 375, 810), t('NH', 'Name', 3150, 375, 2500), t('AH', 'Amount', 5700, 375, 1400)] }] },
+        { name: 'GroupFooterArea1', sections: [{ name: 'GF', height: 300, objects: [t('Label', 'Subtotals:', 1680, 60, 1140), f('Sum', 'Sum of T.A', 5700, 60, 1400, { align: 'right' })] }] },
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [f('Dv', 'T.D', 180, 0, 1065), f('Sv', 'T.S', 1245, 0, 1005), f('Pv', 'T.P', 2535, 0, 450, { conditions: { suppress: { name: 'plan', index: 3 } } }), f('Nv', 'T.N', 3150, 0, 2500), f('Av', 'T.A', 5700, 0, 1400)] }] },
+      ],
+    } as unknown as ReportDefinition;
+    const styled = { ...conventions, names: { ...conventions.names, subtotalText: '{T}_{col}_SubTotTxt' }, style: { dataset: 'Theme', commandType: 'StoredProcedure', command: 'dbo.theme_get', field: '{role}_{prop}', props: { BackgroundColor: 'fill' }, roles: { title: 'Title', heading: 'Head', body: 'Body', bodyFirst: 'Body', number: 'Body' }, rowBands: { odd: 'Odd', even: 'Even' } } } as never;
+    const root = parseXml(applyConventions(convertToRdl(definition, src, { reportName: 'Orders', formulasInQuery: true, rulesAsText: true }).rdl, 'Orders', styled).rdl);
+    const plan = descendants(root).find((e) => e.name === 'Textbox' && /_P_ColVal$/.test(e.attributes.Name ?? ''))!;
+    assert.ok(!child(plan, 'Visibility'), 'shown or not, the cell keeps its band');
+    assert.match(valueOf(plan), /^=IIf\(.*"N".*, Nothing, Fields!P\.Value\)$/);
+    assert.match(textOf(child(childElements(plan, 'Style')[0]!, 'BackgroundColor')), /Mod 2/);
+    const label = descendants(root).find((e) => e.name === 'Textbox' && valueOf(e) === 'Subtotals:')!;
+    const cell = descendants(root).find((e) => e.name === 'TablixCell' && descendants(e).includes(label))!;
+    assert.ok(!descendants(cell).some((e) => e.name === 'ColSpan'), 'the label in one column, so the merge moves its row with the columns');
+  });
 });

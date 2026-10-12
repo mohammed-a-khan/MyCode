@@ -1283,8 +1283,15 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
         const label = inner.length === 1 && inner[0]!.name === 'Textbox' ? inner[0]! : undefined;
         if (span < 2 || span >= columns - 1 || !item || !label || fixedText(label) === undefined) continue;
         const offset = item === label ? 0 : len(label, 'Left');
-        if (offset + textWidth(label, true) > widths[c]! - 0.02) continue;
-        if (item !== label && offset + len(label, 'Width') > widths[c]!) setChild(label, 'Width', inch(widths[c]! - offset));
+        const over = offset + textWidth(label, true) - (widths[c]! - 0.02);
+        if (over > 0) {
+          const st = childElements(label, 'Style')[0];
+          const padLeft = inches(textOf(child(st, 'PaddingLeft'))) ?? 0;
+          if (item === label && st && padLeft >= over) setChild(st, 'PaddingLeft', `${Math.round((padLeft - over) * 720) / 10}pt`);
+          else if (item !== label && offset >= over) setChild(label, 'Left', inch(offset - over));
+          else continue;
+        }
+        if (item !== label && len(label, 'Left') + len(label, 'Width') > widths[c]!) setChild(label, 'Width', inch(widths[c]! - len(label, 'Left')));
         const tb = item;
         removeChildren(contents!, ['ColSpan']);
         const st = childElements(tb, 'Style')[0];
@@ -1530,7 +1537,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           if ((kind === 'subtotal' || kind === 'total') && stackedRows.has(row) && !/Fields!/.test(valueOf(tb)) && !rowTexts.some((e) => fieldOf(e)) && !rowTexts.some((e) => TOTALLED.test(valueOf(e)))) return rename(tb, 'text', { T });
           switch (kind) {
             case 'heading': return rename(tb, 'heading', { T, col: colNames[c] ?? col });
-            case 'detail': return rename(tb, 'value', { T, col });
+            case 'detail': return !/Fields!/.test(valueOf(tb)) && !rowTexts.some((e) => fieldOf(e) || /Fields!/.test(valueOf(e))) ? rename(tb, 'text', { T }) : rename(tb, 'value', { T, col });
             case 'groupHeading': return headingsHere ? rename(tb, 'heading', { T, col: colNames[c] ?? col }) : rename(tb, 'groupText', { T, col });
             case 'subtotal': return rename(tb, totalled ? 'subtotal' : 'subtotalText', { T, col });
             default:
@@ -2892,6 +2899,13 @@ function applyStyleRoles(report: XmlElement, style: NonNullable<Conventions['sty
         if (style.rowBands && !unbanded.has(tb)) {
           const counted = hiddenBy.has(tb) ? `RunningValue(IIf(${hiddenBy.get(tb)}, 0, 1), Sum, Nothing)` : 'RowNumber(Nothing)';
           setChild(own, 'BackgroundColor', `=IIF(${counted} Mod 2, ${expr(field(style.rowBands.odd, fillWord))}, ${expr(field(style.rowBands.even, fillWord))})`);
+          const hides = textOf(child(tb, 'Visibility/Hidden')).trim();
+          const values = descendants(tb).filter((e) => e.name === 'Value');
+          if (hides.startsWith('=') && !child(child(tb, 'Visibility')!, 'ToggleItem') && values.length === 1) {
+            const v = textOf(values[0]).trim();
+            values[0]!.children = [`=IIf(${hides.slice(1)}, Nothing, ${v.startsWith('=') ? v.slice(1) : `"${v.replace(/"/g, '""')}"`})`];
+            tb.children = tb.children.filter((x) => typeof x !== 'object' || (x as XmlElement).name !== 'Visibility');
+          }
         }
       } else setChild(own, 'BackgroundColor', `=${expr(field(role, fillWord))}`);
     }
