@@ -263,7 +263,7 @@ interface Leaf {
   kind: RowKind;
 }
 
-function restack(tablix: XmlElement): void {
+function restack(tablix: XmlElement, whole = false): void {
   const widths = widthsOf(tablix);
   const spanOf = (cell: XmlElement) => Number(textOf(child(child(cell, 'CellContents') ?? el('x'), 'ColSpan')) || 1);
   const inner = (item: XmlElement | undefined) => (item?.name === 'Rectangle' ? childElements(child(item, 'ReportItems') ?? el('x')).filter((e) => ITEMS.has(e.name)) : []);
@@ -442,7 +442,7 @@ function restack(tablix: XmlElement): void {
         const parent = parentOf(tablix, leaf);
         parent.children.splice(parent.children.indexOf(leaf) + 1, 0, structuredClone(leaf));
         groupLabels.add(item!);
-        return restack(tablix);
+        return restack(tablix, whole);
       }
       c += span;
     }
@@ -629,8 +629,9 @@ function restack(tablix: XmlElement): void {
     for (const e of all.filter((x) => len(x, 'Top') >= cut && x.name === 'Textbox' && headingText(x) !== undefined)) {
       const v = valueOf(e);
       const lines = Math.max(descendants(e).filter((x) => x.name === 'Paragraph').length, 1 + (v.match(/vbCrLf|vbLf|Chr\(10\)/gi) ?? []).length, (fixedText(e) ?? '').split(/\r?\n/).length);
-      const { size } = drawnFont(e, true);
-      const need = lines * size * DESIGN_LEADING / 72 + paddingOf(e, ['PaddingTop', 'PaddingBottom']) + 0.06;
+      const own = descendants(e).filter((x) => x.name === 'FontSize' && !textOf(x).startsWith('=')).map((x) => (inches(textOf(x)) ?? 0) * 72).filter((x) => x > 0);
+      const size = own.length ? Math.max(...own) : DESIGN_FONT;
+      const need = lines * size * 1.25 / 72 + paddingOf(e, ['PaddingTop', 'PaddingBottom']) + 0.05;
       if (need > len(e, 'Height')) setChild(e, 'Height', inch(need));
     }
     const lowerBottom = Math.max(...all.filter((e) => len(e, 'Top') >= cut).map((e) => len(e, 'Top') + len(e, 'Height')));
@@ -679,12 +680,27 @@ function restack(tablix: XmlElement): void {
     setChild(row, 'Height', inch(cut));
     const lower = el('TablixRow', el('Height', inch(Math.max(height - cut, lowerBottom - cut + 0.02))), el('TablixCells', ...lowerCells));
     stackedRows.add(lower);
+    const filledLow = childElements(child(lower, 'TablixCells')!, 'TablixCell').filter((x) => { const it = cellItem(x); return it && !(it.name === 'Textbox' && isBlank(it)); });
+    if (whole && filledLow.length === 1 && cellItem(filledLow[0]!)!.name === 'Rectangle') {
+      const lowCells = childElements(child(lower, 'TablixCells')!, 'TablixCell');
+      let start = 0;
+      for (let i = 0, c = 0; i < lowCells.length; i++) {
+        if (lowCells[i] === filledLow[0]) { start = c; break; }
+        if (child(lowCells[i]!, 'CellContents')) c += spanOf(lowCells[i]!);
+        else c += 0;
+      }
+      const offset = widths.slice(0, start).reduce((a, b) => a + b, 0);
+      const box = cellItem(filledLow[0]!)!;
+      for (const e of childElements(child(box, 'ReportItems') ?? el('x')).filter((x) => child(x, 'Left'))) setChild(e, 'Left', inch(len(e, 'Left') + offset));
+      const all = widths.length;
+      child(lower, 'TablixCells')!.children = [el('TablixCell', el('CellContents', box, all > 1 ? el('ColSpan', String(all)) : null)), ...Array.from({ length: all - 1 }, () => el('TablixCell'))];
+    }
     const gap = el('TablixRow', el('Height', '0.15in'), el('TablixCells', ...cells.map((_, k) => el('TablixCell', el('CellContents', newTextbox(`__gap_${k}`, '', '0pt'))))));
     const rowsEl = child(tablix, 'TablixBody/TablixRows')!;
     rowsEl.children.splice(rowsEl.children.indexOf(row) + 1, 0, lower, gap);
     const parent = parentOf(tablix, leaf);
     parent.children.splice(parent.children.indexOf(leaf) + 1, 0, structuredClone(leaf), structuredClone(leaf));
-    return restack(tablix);
+    return restack(tablix, whole);
   }
 }
 
@@ -936,7 +952,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     const T = rename(tablix, 'table');
     const container = parents.get(tablix);
     foldMargins(tablix);
-    restack(tablix);
+    restack(tablix, tablix === tablixes[0]);
     const widths = widthsOf(tablix);
     const columns = widths.length;
     const isNumber = (tb: XmlElement) => {
@@ -1470,7 +1486,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           }
           if (isBlank(tb)) return rename(tb, 'blank', { T, col });
           const totalled = TOTALLED.test(valueOf(tb));
-          if ((kind === 'subtotal' || kind === 'total') && stackedRows.has(row) && c > 0 && !/Fields!/.test(valueOf(tb)) && !rowTexts.some((e) => fieldOf(e)) && !rowTexts.some((e) => TOTALLED.test(valueOf(e)))) return rename(tb, 'text', { T });
+          if ((kind === 'subtotal' || kind === 'total') && stackedRows.has(row) && !/Fields!/.test(valueOf(tb)) && !rowTexts.some((e) => fieldOf(e)) && !rowTexts.some((e) => TOTALLED.test(valueOf(e)))) return rename(tb, 'text', { T });
           switch (kind) {
             case 'heading': return rename(tb, 'heading', { T, col: colNames[c] ?? col });
             case 'detail': return rename(tb, 'value', { T, col });
