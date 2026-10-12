@@ -1241,10 +1241,11 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           if (!r) return el('TablixCell', el('CellContents', newTextbox(`__rule_${c}`, '', '0pt')));
           const st = childElements(r.t, 'Style')[0]!;
           const border = child(st, 'TopBorder');
-          const line = el('Line', { Name: `__ruleLine_${c}` }, el('Top', inch(height / 2)), el('Left', inch(len(r.t, 'Left'))), el('Height', '0in'), el('Width', inch(len(r.t, 'Width'))),
+          const line = el('Line', { Name: `__ruleLine_${c}` }, el('Top', inch(height - 0.01)), el('Left', inch(len(r.t, 'Left'))), el('Height', '0in'), el('Width', inch(len(r.t, 'Width'))),
             el('Style', el('Border', ...childElements(border ?? el('Border', el('Style', 'Solid'))).map((e) => structuredClone(e)))));
           removeChildren(st, ['TopBorder']);
           setChild(st, 'VerticalAlign', 'Top');
+          setChild(st, 'PaddingTop', '0pt');
           setChild(r.t, 'Top', inch(Math.max(0, len(r.t, 'Top') - height)));
           return el('TablixCell', el('CellContents', el('Rectangle', { Name: `__ruleBox_${c}` }, el('ReportItems', line), el('KeepTogether', 'true'), el('Style', el('Border', el('Style', 'None'))))));
         });

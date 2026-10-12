@@ -127,7 +127,7 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     const gap = rows[headingRow + 1]!;
     assert.ok(parseFloat(textOf(childElements(gap, 'Height')[0])) < 0.1 && names(gap).every((n) => /blnk/.test(n ?? '')), 'the space under the rule stays');
     const total = descendants(root).find((e) => e.attributes.Name === 'Holdings_Tab_1_Amount_TotVal')!;
-    assert.equal(textOf(child(childElements(total, 'Style')[0]!, 'PaddingTop')), '2pt');
+    assert.equal(textOf(child(childElements(total, 'Style')[0]!, 'PaddingTop')), '0pt', 'the total right under its rule');
     assert.equal(textOf(child(childElements(total, 'Style')[0]!, 'VerticalAlign')), 'Top');
     const totalCell = descendants(root).find((e) => e.name === 'TablixCell' && descendants(e).includes(total))!;
     assert.ok(childElements(child(totalCell, 'CellContents')!).includes(total), 'the total right in its cell');
