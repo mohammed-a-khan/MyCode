@@ -250,7 +250,8 @@ class Names {
     const clean = base.replace(/[^A-Za-z0-9_]/g, '_').replace(/^([^A-Za-z])/, 'R$1');
     const typed = /^(.*)(_(?:SubTotVal|TotVal|SubTotTxt|TotTxt|ColTxt|ColVal|HdrTxt|HdrVal))$/i.exec(clean);
     let name = clean;
-    for (let k = 2; this.used.has(name.toLowerCase()); k++) name = typed ? `${typed[1]}_${k}${typed[2]}` : `${clean}_${k}`;
+    const counted = typed && /TotVal$/i.test(typed[2]!) ? /^(.*_Tab_\d+)_(.+)$/.exec(typed[1]!) : null;
+    for (let k = 2; this.used.has(name.toLowerCase()); k++) name = counted ? `${counted[1]}_${k}_${counted[2]}${typed![2]}` : typed ? `${typed[1]}_${k}${typed[2]}` : `${clean}_${k}`;
     this.used.add(name.toLowerCase());
     return name;
   }
@@ -1595,7 +1596,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           const totalled = TOTALLED.test(valueOf(tb));
           if ((kind === 'subtotal' || kind === 'total') && stackedRows.has(row) && !/Fields!/.test(valueOf(tb)) && !rowTexts.some((e) => fieldOf(e)) && !rowTexts.some((e) => TOTALLED.test(valueOf(e)))) return rename(tb, 'text', { T });
           switch (kind) {
-            case 'heading': return rename(tb, 'heading', { T, col: colNames[c] ?? col });
+            case 'heading': return across >= columns && columns > 1 ? rename(tb, 'text', { T }) : rename(tb, 'heading', { T, col: colNames[c] ?? col });
             case 'detail': return !/Fields!/.test(valueOf(tb)) && !rowTexts.some((e) => fieldOf(e) || /Fields!/.test(valueOf(e))) ? rename(tb, 'text', { T }) : rename(tb, 'value', { T, col });
             case 'groupHeading': return headingsHere ? rename(tb, 'heading', { T, col: colNames[c] ?? col }) : rename(tb, 'groupText', { T, col });
             case 'subtotal': return rename(tb, totalled ? 'subtotal' : 'subtotalText', { T, col });
