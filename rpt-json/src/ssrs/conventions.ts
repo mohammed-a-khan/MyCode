@@ -1349,14 +1349,30 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       const total = widthsOf(tablix).length;
       for (const row of rowsOf(tablix)) {
         const cells = cellsOf(row);
-        const filled = cells.filter((x) => child(x, 'CellContents'));
-        const first = filled[0];
-        const span = first ? Number(textOf(child(child(first, 'CellContents')!, 'ColSpan')) || 1) : 0;
-        if (!first || span < 2 || span >= total || cells.indexOf(first) !== 0) continue;
-        const tail = cells.slice(span);
-        const emptyTail = tail.every((x) => { const it = cellItem(x); return !child(x, 'CellContents') || (it?.name === 'Textbox' && isBlank(it)) || (it?.name === 'Rectangle' && !child(it, 'ReportItems')?.children.length); });
-        if (!emptyTail || span + tail.length !== total) continue;
+        const empty = (x: XmlElement) => { const it = cellItem(x); return !child(x, 'CellContents') || (it?.name === 'Textbox' && isBlank(it)) || (it?.name === 'Rectangle' && !child(it, 'ReportItems')?.children.length); };
+        const spanOf = (x: XmlElement) => Number(textOf(child(child(x, 'CellContents') ?? el('x'), 'ColSpan')) || 1);
+        const first = cells.find((x) => !empty(x));
+        if (!first || cells.some((x) => x !== first && !empty(x))) continue;
+        const span = spanOf(first);
+        const start = cells.indexOf(first);
+        if (span < 2 || span >= total || cells.length !== total) continue;
         const contents = child(first, 'CellContents')!;
+        if (start > 0) {
+          let it = cellItem(first)!;
+          if (it.name === 'Rectangle' && !child(it, 'Visibility') && !drawnAs(it)) {
+            const inner = childElements(child(it, 'ReportItems') ?? el('x')).filter((e) => ITEMS.has(e.name));
+            if (inner.length === 1 && inner[0]!.name === 'Textbox') {
+              const text = inner[0]!;
+              pad(text, { left: len(text, 'Left'), top: ruledAbove(text) ? 0 : len(text, 'Top') });
+              unplace(text);
+              const box = it;
+              contents.children = contents.children.map((x) => (x === box ? text : x));
+              it = text;
+            }
+          }
+          if (it.name !== 'Textbox' || drawnAs(it)) continue;
+          pad(it, { left: widthsOf(tablix).slice(0, start).reduce((a, w) => a + w, 0) });
+        }
         removeChildren(contents, ['ColSpan']);
         contents.children.push(el('ColSpan', String(total)));
         child(row, 'TablixCells')!.children = [first, ...Array.from({ length: total - 1 }, () => el('TablixCell'))];
