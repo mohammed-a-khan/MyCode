@@ -330,7 +330,10 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     const out = applyConventions(convertToRdl(definition, src, { reportName: 'Holdings', formulasInQuery: true, rulesAsText: true }).rdl, 'Holdings', styled).rdl;
     const root = parseXml(out);
     const headings = descendants(root).filter((e) => e.name === 'Textbox' && /_ColTxt$/.test(e.attributes.Name ?? '')).map((e) => e.attributes.Name);
-    for (const f of names.slice(1)) assert.ok(headings.includes(`Holdings_Tab_1_${f}_ColTxt`), `${f}: ${headings.join(' ')}`);
+    for (const f of names) assert.ok(headings.includes(`Holdings_Tab_1_${f}_ColTxt`), `${f}: ${headings.join(' ')}`);
+    const headRow = descendants(root).filter((e) => e.name === 'TablixRow').find((r) => descendants(r).some((e) => e.attributes.Name === 'Holdings_Tab_1_Name_ColTxt'))!;
+    assert.ok(names.every((f) => descendants(headRow).some((e) => e.attributes.Name === `Holdings_Tab_1_${f}_ColTxt`)), 'every heading on one row');
+    assert.ok(!descendants(headRow).some((e) => e.name === 'ColSpan'), 'which spans nothing, so the merge reorders it');
     assert.ok(!diagnoseRdl(out, true).some((f) => f.kind === 'merge' || f.kind === 'overlap'), diagnosisLine(diagnoseRdl(out, true)));
     assert.ok(!descendants(root).some((e) => e.name === 'Line'), 'the heading\'s rules drawn as the cells\' borders');
     const rules = descendants(root).filter((e) => e.name === 'LeftBorder');
