@@ -372,5 +372,7 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     const label = descendants(root).find((e) => e.name === 'Textbox' && valueOf(e) === 'Subtotals:')!;
     const cell = descendants(root).find((e) => e.name === 'TablixCell' && descendants(e).includes(label))!;
     assert.ok(!descendants(cell).some((e) => e.name === 'ColSpan'), 'the label in one column, so the merge moves its row with the columns');
+    const members = descendants(root).filter((e) => e.name === 'TablixMember' && textOf(child(e, 'KeepWithGroup')) === 'Before');
+    assert.equal(textOf(child(members[members.length - 1]!, 'Visibility/Hidden')), '=CountRows() = 0', 'no totals without records, as no group prints');
   });
 });
