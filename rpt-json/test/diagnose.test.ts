@@ -267,7 +267,7 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
           t('Title', 'Holdings by Rank', 0, 0, 8640, 300, { align: 'center' }),
           { kind: 'line', name: 'TitleRule', ...box(0, 320, 8640, 0), border: { sides: [0, 0, 1, 0], width: 60 } },
           t('NameHead', 'Name', 100, 560, 2800, 225), t('CodeHead', 'Code', 3000, 560, 1000, 225),
-          t('AmountHead', 'Amount', 4100, 500, 1000, 400), t('KindHead', 'Kind of Rank', 5200, 420, 653, 450), t('RankHead', 'Rank Name', 5897, 500, 788, 400)] }] },
+          t('AmountHead', 'Amount', 4100, 500, 1000, 400), t('KindHead', 'Kind Classification', 5200, 420, 653, 450), t('RankHead', 'Rank Differential', 5897, 500, 788, 400)] }] },
         { name: 'GroupFooterArea1', sections: [{ name: 'GF1', height: 1195, objects: [
           t('TotalLabel', 'Total:', 100, 120, 1755, 225), f('Total', 'Sum of T.Amount', 3980, 120, 1253, 180, rule),
           t('Legend', 'A note on the marks', 5200, 500, 2500, 655, { border: { sides: [1, 1, 1, 1], width: 20 } })] }] },
@@ -289,12 +289,14 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     assert.ok(!descendants(rows[rowOf(total.attributes.Name!)]!).some((e) => e.name === 'ColSpan'), 'the total\'s row spans nothing, so it is reordered with the columns');
     assert.ok(!/TotTxt|TotVal/.test(legend.attributes.Name!), legend.attributes.Name);
     const headings = descendants(tablix).filter((e) => e.name === 'Textbox' && /_ColTxt$/.test(e.attributes.Name ?? ''));
-    assert.ok(headings.some((e) => valueOf(e) === 'Kind of Rank') && headings.some((e) => valueOf(e) === 'Rank Name'), headings.map((e) => valueOf(e)).join(' | '));
+    assert.ok(headings.some((e) => valueOf(e) === 'Kind Classification') && headings.some((e) => valueOf(e) === 'Rank Differential'), headings.map((e) => valueOf(e)).join(' | '));
     assert.ok(headings.every((e) => !textOf(child(childElements(e, 'Style')[0]!, 'PaddingTop')) || /^0(\.0+)?pt$/.test(textOf(child(childElements(e, 'Style')[0]!, 'PaddingTop')))), 'headings on one level');
     const widths = childElements(child(tablix, 'TablixBody/TablixColumns')!, 'TablixColumn').map((c) => parseFloat(textOf(child(c, 'Width'))));
     const cells = childElements(child(rows[rowOf(total.attributes.Name!)]!, 'TablixCells')!, 'TablixCell');
     const at = cells.findIndex((c) => descendants(c).includes(total));
     assert.ok(widths[at]! >= 1253 / 1440 - 0.005, `the total's column as wide as Crystal drew the total: ${widths[at]}`);
+    const diffAt = childElements(child(rows.find((r) => descendants(r).some((e) => e.name === 'Value' && textOf(e) === 'Rank Differential'))!, 'TablixCells')!, 'TablixCell').findIndex((c) => descendants(c).some((e) => e.name === 'Value' && textOf(e) === 'Rank Differential'));
+    assert.ok(widths[diffAt]! >= 0.75, `a heading's longest word fits its column: ${widths[diffAt]}`);
     assert.deepEqual(diagnoseRdl(out, true).filter((x) => x.kind === 'overlap' || x.kind === 'cut off' || x.kind === 'empty row'), []);
   });
 
