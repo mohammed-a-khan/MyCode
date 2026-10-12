@@ -130,8 +130,8 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     assert.equal(textOf(child(childElements(total, 'Style')[0]!, 'PaddingTop')), '2pt');
     assert.equal(textOf(child(childElements(total, 'Style')[0]!, 'VerticalAlign')), 'Top');
     const totalCell = descendants(root).find((e) => e.name === 'TablixCell' && descendants(e).includes(total))!;
-    assert.equal(childElements(child(totalCell, 'CellContents')!).find((e) => e.name !== 'ColSpan')!.name, 'Rectangle', 'the rule keeps its own width');
-    assert.equal(textOf(child(total, 'Width')), '1.389in');
+    assert.ok(childElements(child(totalCell, 'CellContents')!).includes(total), 'the total right in its cell, ruled by its own top border');
+    assert.match(textOf(child(childElements(total, 'Style')[0]!, 'TopBorder/Style')), /Solid/);
     const label = descendants(root).find((e) => e.attributes.Name === 'Holdings_Tab_1_TotTxt')!;
     const labelCell = descendants(root).find((e) => e.name === 'TablixCell' && descendants(e).includes(label))!;
     assert.ok(!descendants(labelCell).some((e) => e.name === 'ColSpan'), 'the label in its own column, as the merge reads a totals row');
@@ -240,8 +240,9 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     assert.ok(!/Name="[^"]*Max[^"]*"/.test(out), 'no column for the hidden field');
     const totals = descendants(root).filter((e) => e.name === 'Textbox' && /_S\d_SubtotalLabel$/.test(e.attributes.Name ?? ''));
     assert.equal(totals.length, 3, out.match(/Name="[^"]*S\d[^"]*"/g)?.join(" "));
-    assert.ok(totals.every((t) => !!child(t, 'Width')), 'each total in a box of its own, the last too');
-    assert.ok(totals.every((t) => parseFloat(textOf(child(t, 'Top'))) >= 0.02), 'each total\'s rule drawn inside its cell, not on its edge');
+    const inCell = (t: XmlElement) => descendants(root).some((e) => e.name === 'CellContents' && childElements(e).includes(t));
+    assert.ok(totals.every(inCell), 'each total right in its cell, where reports are combined');
+    assert.ok(totals.every((t) => /Solid/.test(textOf(child(childElements(t, 'Style')[0]!, 'TopBorder/Style')))), 'each total ruled by its own top border');
     const later = parseXml(applyConventions(out.replace(/(<Tablix Name=")([^"]+)(">[\s\S]*?<\/Tablix>)/, (m) => m + m.replace(/Name="([^"]+)"/g, 'Name="$1_b"').replace(/(<\/TablixRowHierarchy>[\s\S]*?<Top>)[^<]*(<\/Top>)/, '$15in$2')), 'Holdings', styled).rdl);
     const [first, second] = descendants(later).filter((e) => e.name === 'Tablix');
     const firstCount = childElements(child(first!, 'TablixBody/TablixColumns')!, 'TablixColumn').length;
