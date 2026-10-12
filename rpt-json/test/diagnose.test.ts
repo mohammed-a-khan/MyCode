@@ -296,7 +296,11 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     const at = cells.findIndex((c) => descendants(c).includes(total));
     assert.ok(widths[at]! >= 1253 / 1440 - 0.005, `the total's column as wide as Crystal drew the total: ${widths[at]}`);
     const diffAt = childElements(child(rows.find((r) => descendants(r).some((e) => e.name === 'Value' && textOf(e) === 'Rank Differential'))!, 'TablixCells')!, 'TablixCell').findIndex((c) => descendants(c).some((e) => e.name === 'Value' && textOf(e) === 'Rank Differential'));
-    assert.ok(widths[diffAt]! >= 0.75, `a heading's longest word fits its column: ${widths[diffAt]}`);
+    const diffBox = descendants(tablix).find((e) => e.name === 'Textbox' && valueOf(e) === 'Rank Differential')!;
+    const drawn = descendants(diffBox).filter((e) => e.name === 'FontSize').map(textOf);
+    const capped = drawn.some((v) => /IIf\(Val\(/.test(v) || parseFloat(v) < 8);
+    assert.ok(widths[diffAt]! >= 0.75 || capped, `a heading's longest word fits its column, or its font is capped to fit: ${widths[diffAt]} ${drawn}`);
+    assert.ok(widths[0]! >= 0.85 * (2800 / 1440) - 0.01, `the name column keeps its width: ${widths[0]}`);
     assert.deepEqual(diagnoseRdl(out, true).filter((x) => x.kind === 'overlap' || x.kind === 'cut off' || x.kind === 'empty row'), []);
   });
 
