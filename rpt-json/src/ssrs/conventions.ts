@@ -1218,6 +1218,47 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     // Column names: the field each column shows in its data row, else its heading.
     const rows = rowsOf(tablix);
     const kinds = rowLeaves(tablix).map((l) => l.kind);
+    {
+      const leaves = rowLeaves(tablix);
+      const colWidths = widthsOf(tablix);
+      for (let i = rows.length - 1; i >= 0; i--) {
+        if (kinds[i] !== 'total' && kinds[i] !== 'subtotal') continue;
+        const row = rows[i]!;
+        const ruled = cellsOf(row).map((cell, c) => {
+          const box = cellItem(cell);
+          if (box?.name !== 'Rectangle' || child(box, 'Visibility')) return undefined;
+          const inside = childElements(child(box, 'ReportItems') ?? el('x')).filter((e) => ITEMS.has(e.name));
+          const t = inside.length === 1 && inside[0]!.name === 'Textbox' ? inside[0]! : undefined;
+          const tst = t ? childElements(t, 'Style')[0] : undefined;
+          if (!t || !TOTALLED.test(valueOf(t)) || !/solid|dashed|dotted|double/i.test(textOf(child(tst, 'TopBorder/Style'))) || /solid|dashed|dotted|double/i.test(textOf(child(tst, 'Border/Style')))) return undefined;
+          const room = colWidths.slice(c, c + Number(textOf(child(child(cell, 'CellContents'), 'ColSpan')) || 1)).reduce((x, y) => x + y, 0);
+          return { c, t, short: len(t, 'Left') > 0.02 || room - len(t, 'Left') - len(t, 'Width') > 0.02 };
+        });
+        if (!ruled.some((r) => r?.short)) continue;
+        const height = 0.04;
+        const cells = cellsOf(row).map((cell, c) => {
+          const r = ruled[c];
+          if (!r) return el('TablixCell', el('CellContents', newTextbox(`__rule_${c}`, '', '0pt')));
+          const st = childElements(r.t, 'Style')[0]!;
+          const border = child(st, 'TopBorder');
+          const line = el('Line', { Name: `__ruleLine_${c}` }, el('Top', inch(height / 2)), el('Left', inch(len(r.t, 'Left'))), el('Height', '0in'), el('Width', inch(len(r.t, 'Width'))),
+            el('Style', el('Border', ...childElements(border ?? el('Border', el('Style', 'Solid'))).map((e) => structuredClone(e)))));
+          removeChildren(st, ['TopBorder']);
+          setChild(st, 'VerticalAlign', 'Top');
+          setChild(r.t, 'Top', inch(Math.max(0, len(r.t, 'Top') - height)));
+          return el('TablixCell', el('CellContents', el('Rectangle', { Name: `__ruleBox_${c}` }, el('ReportItems', line), el('KeepTogether', 'true'), el('Style', el('Border', el('Style', 'None'))))));
+        });
+        setChild(row, 'Height', inch(Math.max(0.1, len(row, 'Height') - height)));
+        const newRow = el('TablixRow', el('Height', inch(height)), el('TablixCells', ...cells));
+        const body = child(tablix, 'TablixBody/TablixRows')!;
+        body.children.splice(body.children.indexOf(row), 0, newRow);
+        const member = leaves[i]!.member;
+        const holder = descendants(child(tablix, 'TablixRowHierarchy')!).find((e) => e.name === 'TablixMembers' && e.children.includes(member))!;
+        holder.children.splice(holder.children.indexOf(member), 0, structuredClone(member));
+        rows.splice(i, 0, newRow);
+        kinds.splice(i, 0, kinds[i]!);
+      }
+    }
     // Rows of column headings (Crystal's, or fixed text only in a group's header).
     const headingRow = (row: XmlElement, i: number) => {
       const texts = descendants(row).filter((e) => e.name === 'Textbox' && !isBlank(e));

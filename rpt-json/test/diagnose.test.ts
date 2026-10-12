@@ -130,8 +130,11 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     assert.equal(textOf(child(childElements(total, 'Style')[0]!, 'PaddingTop')), '2pt');
     assert.equal(textOf(child(childElements(total, 'Style')[0]!, 'VerticalAlign')), 'Top');
     const totalCell = descendants(root).find((e) => e.name === 'TablixCell' && descendants(e).includes(total))!;
-    assert.ok(childElements(child(totalCell, 'CellContents')!).includes(total), 'the total right in its cell, ruled by its own top border');
-    assert.match(textOf(child(childElements(total, 'Style')[0]!, 'TopBorder/Style')), /Solid/);
+    assert.ok(childElements(child(totalCell, 'CellContents')!).includes(total), 'the total right in its cell');
+    const totalRow = rows.findIndex((r) => descendants(r).includes(total));
+    const cellsIn = (r: XmlElement) => childElements(child(r, 'TablixCells')!, 'TablixCell');
+    const rule = descendants(cellsIn(rows[totalRow - 1]!)[cellsIn(rows[totalRow]!).indexOf(totalCell)]!).find((e) => e.name === 'Line');
+    assert.equal(textOf(child(rule!, 'Width')), '1.389in', 'its rule on the row above, as wide as Crystal drew it');
     const label = descendants(root).find((e) => e.attributes.Name === 'Holdings_Tab_1_TotTxt')!;
     const labelCell = descendants(root).find((e) => e.name === 'TablixCell' && descendants(e).includes(label))!;
     assert.ok(!descendants(labelCell).some((e) => e.name === 'ColSpan'), 'the label in its own column, as the merge reads a totals row');
