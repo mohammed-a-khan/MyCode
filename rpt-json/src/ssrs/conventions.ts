@@ -1252,6 +1252,21 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           setChild(r.t, 'Top', inch(Math.max(0, len(r.t, 'Top') - height)));
           return el('TablixCell', el('CellContents', el('Rectangle', { Name: `__ruleBox_${c}` }, el('ReportItems', line), el('KeepTogether', 'true'), el('Style', el('Border', el('Style', 'None'))))));
         });
+        const at = Math.min(...ruled.filter((r) => r).map((r) => len(r!.t, 'Top')));
+        cellsOf(row).forEach((cell, c) => {
+          if (ruled[c]) return;
+          const box = cellItem(cell);
+          const texts = box?.name === 'Textbox' ? [box] : childElements(child(box ?? el('x'), 'ReportItems') ?? el('x')).filter((e) => e.name === 'Textbox');
+          for (const t of texts.filter((x) => !isBlank(x))) {
+            const st = childElements(t, 'Style')[0];
+            if (!st) continue;
+            if (t === box) setChild(st, 'PaddingTop', `${Math.round(at * 720) / 10}pt`);
+            else setChild(t, 'Top', inch(at));
+            if (t !== box) setChild(st, 'PaddingTop', '0pt');
+            setChild(st, 'VerticalAlign', 'Top');
+            underRule.add(t);
+          }
+        });
         setChild(row, 'Height', inch(Math.max(0.1, len(row, 'Height') - height)));
         const newRow = el('TablixRow', el('Height', inch(height)), el('TablixCells', ...cells));
         const body = child(tablix, 'TablixBody/TablixRows')!;
