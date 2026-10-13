@@ -2538,7 +2538,12 @@ function summarize(tablix: XmlElement): void {
       if (st) for (const side of ['PaddingLeft', 'PaddingRight', 'PaddingTop', 'PaddingBottom']) setChild(st, side, '2pt');
       if (st && widths[k]! > it.w * 1.5 && fixedText(it.t) !== undefined && /solid/i.test(textOf(child(child(st, 'BottomBorder') ?? el('x'), 'Style') ?? el('x')))) {
         removeChildren(st, ['BottomBorder']);
-        for (const run of descendants(it.t).filter((e) => e.name === 'TextRun')) setChild(ownStyle(run), 'TextDecoration', 'Underline');
+        const text = fixedText(it.t)!.trim();
+        const { size, bold } = drawnFont(it.t, false);
+        const side = Math.max(0, Math.round((it.w - arialWidth(text, size, bold)) / 2 / arialWidth(' ', size, bold)));
+        const run = descendants(it.t).find((e) => e.name === 'TextRun');
+        if (run && side) setChild(run, 'Value', `${'\u00a0'.repeat(side)}${text}${'\u00a0'.repeat(side)}`);
+        for (const r of descendants(it.t).filter((e) => e.name === 'TextRun')) setChild(ownStyle(r), 'TextDecoration', 'Underline');
         setChild(st, 'VerticalAlign', 'Bottom');
         underRule.add(it.t);
       } else if (st && /solid/i.test(textOf(child(child(st, 'BottomBorder') ?? el('x'), 'Style') ?? el('x')))) {
