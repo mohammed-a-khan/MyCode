@@ -272,7 +272,7 @@ function fillWhenText(textbox: XmlElement, fill: string): string {
   const values = descendants(textbox).filter((e) => e.name === 'Value').map(textOf);
   if (!values.length || !values.every((v) => v.startsWith('=')) || isFixed(textbox)) return fill;
   const text = values.map((v) => `CStr(${v.slice(1)})`).join(' & ');
-  return `=IIf(Trim(${text}) = "", "Transparent", "${fill}")`;
+  return `=IIf(Trim(${text}) = "", Nothing, "${fill}")`;
 }
 
 /** A thick rule drawn as a bar: a filled rectangle with nothing in it, no taller than a few points, at least 2in long. */

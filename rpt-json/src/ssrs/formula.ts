@@ -782,7 +782,7 @@ export const NAMES: Record<string, string> = {
   filename: 'Globals!ReportName', recordnumber: 'RowNumber(Nothing)',
   crblack: '"Black"', crwhite: '"White"', crred: '"Red"', crgreen: '"Green"', crblue: '"Blue"', cryellow: '"Yellow"',
   crmaroon: '"Maroon"', crnavy: '"Navy"', crolive: '"Olive"', crpurple: '"Purple"', crteal: '"Teal"', crgray: '"Gray"',
-  crsilver: '"Silver"', crlime: '"Lime"', craqua: '"Aqua"', crfuchsia: '"Fuchsia"', nocolor: '"Transparent"', crnocolor: '"Transparent"',
+  crsilver: '"Silver"', crlime: '"Lime"', craqua: '"Aqua"', crfuchsia: '"Fuchsia"', nocolor: 'Nothing', crnocolor: 'Nothing',
   crnone: 'Nothing',
   // Font style and line style values of formatting formulas, as SSRS names them.
   crregular: '"Regular"', crbold: '"Bold"', critalic: '"Italic"', crbolditalic: '"BoldItalic"',

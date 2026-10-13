@@ -229,7 +229,7 @@ describe('house style', () => {
     assert.equal(value('Rectangle', 'Rule', 'BackgroundColor'), '#5B6770');
     // A title worked out when the report runs is painted only where it has text.
     const titled = applyHouseStyle(rdl.replace('<BackgroundColor>#336699</BackgroundColor>', ''), readHouseStyle(JSON.stringify({ font: 'Tahoma', chart: { title: { fill: '#336699' } } })));
-    assert.match(item(titled, 'Textbox', 'Heading'), /<BackgroundColor>=IIf\(Trim\(CStr\(Fields!Name\.Value\)\) = "", "Transparent", "#336699"\)<\/BackgroundColor>/);
+    assert.match(item(titled, 'Textbox', 'Heading'), /<BackgroundColor>=IIf\(Trim\(CStr\(Fields!Name\.Value\)\) = "", Nothing, "#336699"\)<\/BackgroundColor>/);
   });
 
   it('paints a heading written as lines one under another as one band, its lines as paragraphs', () => {

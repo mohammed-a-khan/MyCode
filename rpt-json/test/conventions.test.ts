@@ -130,7 +130,7 @@ describe('conventions', () => {
     const value = byName(root, 'Orders_Grid_1_Amount_Val')!;
     const fill = textOf(child(childElements(value, 'Style')[0]!, 'BackgroundColor'));
     const empty = '(IsNothing(Fields!Customer.Value) OrElse Trim(CStr(Fields!Customer.Value)) = "")';
-    assert.equal(fill, `=IIF(${empty}, "Transparent", IIF(RunningValue(IIf(${empty}, 0, 1), Sum, Nothing) Mod 2, First(Fields!Odd_fill.Value, "Theme"), First(Fields!Even_fill.Value, "Theme")))`, 'an empty record keeps no band and is not counted');
+    assert.equal(fill, `=IIF(${empty}, Nothing, IIF(RunningValue(IIf(${empty}, 0, 1), Sum, Nothing) Mod 2, First(Fields!Odd_fill.Value, "Theme"), First(Fields!Even_fill.Value, "Theme")))`, 'an empty record keeps no band and is not counted');
     assert.match(descendants(value).map((e) => `${e.name}:${textOf(e)}`).join('|'), /FontSize:=First\(Fields!Num_size.Value, "Theme"\)/);
     const theme = all.find((e) => e.name === 'DataSet' && e.attributes.Name === 'Theme')!;
     const fields = descendants(theme).filter((e) => e.name === 'Field').map((f) => f.attributes.Name);
