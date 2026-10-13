@@ -2524,7 +2524,7 @@ function summarize(tablix: XmlElement): void {
       unplace(it.t);
       const st = childElements(it.t, 'Style')[0];
       if (st) for (const side of ['PaddingLeft', 'PaddingRight', 'PaddingTop', 'PaddingBottom']) setChild(st, side, '2pt');
-      if (!it.right && !/center/i.test(textAlignOf(it.t)) && k === colOf(it)) pad(it.t, { left: Math.max(0, Math.min(it.x - starts[k]!, widths[k]! / 2)) });
+      if (k === 0 && !it.right && !/center/i.test(textAlignOf(it.t))) pad(it.t, { left: Math.max(0, Math.min(it.x - starts[k]!, widths[k]! / 2)) });
     };
     if (label && value) {
       const field = fieldOf(value.t) ?? 'value';
@@ -2564,8 +2564,12 @@ function summarize(tablix: XmlElement): void {
   const edge = (row: XmlElement, side: string) => cellsOf(row).map((c) => child(childElements(cellItem(c) ?? el('x'), 'Style')[0] ?? el('x'), side)).find((x) => x && /solid|dashed|dotted|double/i.test(textOf(child(x, 'Style'))));
   for (const [row, side] of [[rows[block[0]!]!, 'TopBorder'], [rows[block[block.length - 1]!]!, 'BottomBorder']] as const) {
     const border = edge(row, side);
-    const target = side === 'TopBorder' ? built[0]! : built[built.length - 1]!;
+    const target = side === 'TopBorder' ? built[0]! : built[built.length - (built.length > lines.length ? 2 : 1)]!;
     if (border) for (const c of cellsOf(target)) { const st = childElements(cellItem(c)!, 'Style')[0]; if (st) { removeChildren(st, [side]); st.children.push(structuredClone(border)); } }
+  }
+  const gapAfter = rows[block[block.length - 1]! + 1];
+  if (gapAfter && headAt === block[block.length - 1]! + 1) {
+    built.push(el('TablixRow', el('Height', '0.1in'), el('TablixCells', ...widths.map((_, k) => el('TablixCell', el('CellContents', newTextbox(`__summary_gap_${k}`, '', '0pt')))))));
   }
   const body = child(tablix, 'TablixBody/TablixRows')!;
   const at = body.children.indexOf(rows[block[0]!]!);
@@ -3197,7 +3201,7 @@ function applyStyleRoles(report: XmlElement, style: NonNullable<Conventions['sty
         if (style.rowBands && !unbanded.has(tb)) {
           const row = rowOfBox.get(tb);
           const firstBox = row ? descendants(cellsOf(row)[0] ?? el('x')).find((e) => e.name === 'Textbox') : undefined;
-          const key = firstBox ? /Fields!(\w+)\.Value/.exec(valueOf(firstBox))?.[1] : undefined;
+          const key = firstBox ? [...valueOf(firstBox).matchAll(/(\w+\(\s*)?Fields!(\w+)\.Value/g)].find((m) => !m[1] || /^IIf\(/i.test(m[1]))?.[2] : undefined;
           const empty = key ? `(IsNothing(Fields!${key}.Value) OrElse Trim(CStr(Fields!${key}.Value)) = "")` : '';
           const skip = [hiddenBy.get(tb), empty].filter(Boolean).join(' OrElse ');
           const counted = skip ? `RunningValue(IIf(${skip}, 0, 1), Sum, Nothing)` : 'RowNumber(Nothing)';
