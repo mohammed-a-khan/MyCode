@@ -537,13 +537,32 @@ function restack(tablix: XmlElement, whole = false): void {
       if (!child(cells[i]!, 'CellContents')) continue;
       const span = spanOf(cells[i]!);
       const item = cellItem(cells[i]!);
+      if (span > 1 && !headingRow && headed.some((x) => TOTALLED.test(valueOf(x)))) {
+        const label = (item?.name === 'Rectangle' ? inner(item) : item ? [item] : []).find((x) => x.name === 'Textbox' && /:\s*$/.test(fixedText(x) ?? '') && !isBlank(x));
+        if (label) {
+          const { size } = drawnFont(label, true);
+          dataNeed[c] = Math.max(dataNeed[c]!, arialWidth(fixedText(label)!, size, true) * 1.05 + 0.08);
+        }
+      }
       if (span === 1) {
         for (const e of item?.name === 'Rectangle' ? inner(item) : item ? [item] : []) {
           if (e.name !== 'Textbox' || isBlank(e)) continue;
           if (headingRow) {
             const { size, bold } = drawnFont(e, true);
             headNeed[c] = Math.max(headNeed[c]!, Math.max(...headingText(e)!.split(/\s+/).map((w) => arialWidth(w, size, bold) * 1.05)) + 0.06);
-          } else if (descendants(e).some((x) => x.name === 'Format') && child(e, 'Width')) dataNeed[c] = Math.max(dataNeed[c]!, len(e, 'Left') + len(e, 'Width'));
+          } else if (descendants(e).some((x) => x.name === 'Format')) {
+            if (child(e, 'Width')) dataNeed[c] = Math.max(dataNeed[c]!, len(e, 'Left') + len(e, 'Width'));
+            const format = textOf(descendants(e).find((x) => x.name === 'Format'));
+            const decimals = /^[NCP](\d+)$/i.exec(format)?.[1] ?? /\.(0+)/.exec(format)?.[1]?.length;
+            const sample = /^[dDgG]$/.test(format) || /yy|MM|dd/.test(format)
+              ? format.length > 1 ? format.replace(/yyyy/g, '0000').replace(/yy|MM|dd|HH|mm|ss/g, '00').replace(/[Mdy]/g, '00') : '00/00/0000'
+              : decimals !== undefined ? `000.${'0'.repeat(Number(decimals))}` : '';
+            if (sample) {
+              const { size, bold } = drawnFont(e, false);
+              const pads = paddingOf(e, ['PaddingLeft', 'PaddingRight']);
+              dataNeed[c] = Math.max(dataNeed[c]!, (child(e, 'Left') ? len(e, 'Left') : 0) + arialWidth(sample, size, bold) * 1.05 + pads + 0.02);
+            }
+          }
         }
       }
       c += span;
