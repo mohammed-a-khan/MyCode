@@ -251,7 +251,7 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     const firstCount = childElements(child(first!, 'TablixBody/TablixColumns')!, 'TablixColumn').length;
     assert.ok(!descendants(second!).some((e) => e.name === 'ColSpan' && Number(textOf(e)) === firstCount), 'no span in a later table that the merge would take for the first table\'s width');
     const bands = descendants(root).filter((e) => e.name === 'BackgroundColor' && /Mod 2/.test(textOf(e))).map(textOf);
-    assert.ok(bands.length && bands.every((b) => b.startsWith('=IIF(RunningValue(')), `rows counted as shown: ${bands[0]}`);
+    assert.ok(bands.length && bands.every((b) => /RunningValue\(IIf\(\(Not IsNothing/.test(b)), `rows counted as shown: ${bands[0]}`);
   });
 
   it('puts a box drawn under a total on a row of its own, gives each heading its own cell and a total room for its digits', () => {
