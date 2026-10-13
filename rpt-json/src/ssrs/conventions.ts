@@ -1717,7 +1717,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           }
         };
         if (item.name === 'Rectangle') {
-          const col = colNames[c] ?? ownWord(item) ?? `col${c + 1}`;
+          const col = summaryNames.get(item) ?? colNames[c] ?? ownWord(item) ?? `col${c + 1}`;
           rename(item, 'cellRect', { T, col });
           for (const d of descendants(item)) {
             if (d === item || named.has(d) || inTable(d, item)) continue;
@@ -2523,6 +2523,7 @@ function summarize(tablix: XmlElement): void {
   const headerCols = new Map<number, string>();
   const usedVals = new Set<string>();
   let blanks = 0;
+  const rules = new Map<number, { k: number; left: number; width: number; border: XmlElement; word: string }[]>();
   const built = lines.map((line, li) => {
     const slots: (XmlElement | undefined)[] = Array.from({ length: n }, () => undefined);
     line.sort((a, b) => a.x - b.x);
@@ -2537,15 +2538,15 @@ function summarize(tablix: XmlElement): void {
       const st = childElements(it.t, 'Style')[0];
       if (st) for (const side of ['PaddingLeft', 'PaddingRight', 'PaddingTop', 'PaddingBottom']) setChild(st, side, '2pt');
       if (st && widths[k]! > it.w * 1.5 && fixedText(it.t) !== undefined && /solid/i.test(textOf(child(child(st, 'BottomBorder') ?? el('x'), 'Style') ?? el('x')))) {
+        const border = structuredClone(child(st, 'BottomBorder')!);
         removeChildren(st, ['BottomBorder']);
-        const text = fixedText(it.t)!.trim();
-        const { size, bold } = drawnFont(it.t, false);
-        const side = Math.max(0, Math.round((it.w - arialWidth(text, size, bold)) / 2 / arialWidth(' ', size, bold)));
-        const run = descendants(it.t).find((e) => e.name === 'TextRun');
-        if (run && side) setChild(run, 'Value', `${'\u00a0'.repeat(side)}${text}${'\u00a0'.repeat(side)}`);
-        for (const r of descendants(it.t).filter((e) => e.name === 'TextRun')) setChild(ownStyle(r), 'TextDecoration', 'Underline');
         setChild(st, 'VerticalAlign', 'Bottom');
+        setChild(st, 'PaddingBottom', '1pt');
         underRule.add(it.t);
+        const left = Math.max(0, Math.min(it.x - starts[k]!, widths[k]! - it.w));
+        rules.set(li, [...(rules.get(li) ?? []), { k, left, width: Math.min(it.w, widths[k]! - left), border, word: (summaryNames.get(it.t) ?? 'Hdr').replace(/_HdrTxt$/, '') }]);
+        setChild(st, 'PaddingLeft', `${Math.round(left * 720) / 10}pt`);
+        setChild(st, 'PaddingRight', `${Math.round(Math.max(0, widths[k]! - left - it.w) * 720) / 10}pt`);
       } else if (st && /solid/i.test(textOf(child(child(st, 'BottomBorder') ?? el('x'), 'Style') ?? el('x')))) {
         setChild(st, 'VerticalAlign', 'Bottom');
         setChild(st, 'PaddingBottom', '1pt');
@@ -2608,6 +2609,25 @@ function summarize(tablix: XmlElement): void {
         setChild(st, 'PaddingBottom', '2pt');
       }
     }
+  }
+  for (const li of [...rules.keys()].sort((x, y) => y - x)) {
+    const height = 0.03;
+    let named = false;
+    const cells = widths.map((_, k) => {
+      const r = rules.get(li)!.find((x) => x.k === k);
+      if (!r) {
+        const blank = newTextbox(`__summary_rule_${k}`, '', '0pt');
+        summaryNames.set(blank, named ? `Txt_${++blanks}` : `Rule_HdrVal_Txt_${++blanks}`);
+        named = true;
+        return el('TablixCell', el('CellContents', blank));
+      }
+      const line = el('Line', { Name: `__summaryLine_${k}` }, el('Top', inch(0.005)), el('Left', inch(r.left)), el('Height', '0in'), el('Width', inch(r.width)),
+        el('Style', el('Border', ...childElements(r.border).map((e) => structuredClone(e)))));
+      const box = el('Rectangle', { Name: `__summaryBox_${k}` }, el('ReportItems', line), el('KeepTogether', 'true'), el('Style', el('Border', el('Style', 'None'))));
+      summaryNames.set(box, `${r.word}_Rule`);
+      return el('TablixCell', el('CellContents', box));
+    });
+    built.splice(li + 1, 0, el('TablixRow', el('Height', inch(height)), el('TablixCells', ...cells)));
   }
   const body = child(tablix, 'TablixBody/TablixRows')!;
   const at = body.children.indexOf(rows[block[0]!]!);
