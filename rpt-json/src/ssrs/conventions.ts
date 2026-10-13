@@ -2536,6 +2536,11 @@ function summarize(tablix: XmlElement): void {
       unplace(it.t);
       const st = childElements(it.t, 'Style')[0];
       if (st) for (const side of ['PaddingLeft', 'PaddingRight', 'PaddingTop', 'PaddingBottom']) setChild(st, side, '2pt');
+      if (st && /solid/i.test(textOf(child(child(st, 'BottomBorder') ?? el('x'), 'Style') ?? el('x')))) {
+        setChild(st, 'VerticalAlign', 'Bottom');
+        setChild(st, 'PaddingBottom', '1pt');
+        underRule.add(it.t);
+      }
       if (k === 0 && !it.right && !/center/i.test(textAlignOf(it.t))) pad(it.t, { left: Math.max(0, Math.min(it.x - starts[k]!, widths[k]! / 2)) });
     };
     if (label && value) {
@@ -2582,7 +2587,17 @@ function summarize(tablix: XmlElement): void {
     const border = edge(row, side);
     const target = side === 'TopBorder' ? built[0]! : built[built.length - 1]!;
     if (border) for (const c of cellsOf(target)) { const st = childElements(cellItem(c)!, 'Style')[0]; if (st) { removeChildren(st, [side]); st.children.push(structuredClone(border)); } }
-    if (border && side === 'BottomBorder' && built.length > lines.length) for (const c of cellsOf(built[lines.length - 1]!)) { const st = childElements(cellItem(c)!, 'Style')[0]; if (st) removeChildren(st, [side]); }
+    if (border && side === 'BottomBorder' && built.length > lines.length) for (const c of cellsOf(built[lines.length - 1]!)) {
+      const t = cellItem(c)!;
+      const st = childElements(t, 'Style')[0];
+      if (!st) continue;
+      removeChildren(st, [side]);
+      if (underRule.has(t)) {
+        underRule.delete(t);
+        removeChildren(st, ['VerticalAlign']);
+        setChild(st, 'PaddingBottom', '2pt');
+      }
+    }
   }
   const body = child(tablix, 'TablixBody/TablixRows')!;
   const at = body.children.indexOf(rows[block[0]!]!);
