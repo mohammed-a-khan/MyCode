@@ -2562,14 +2562,15 @@ function summarize(tablix: XmlElement): void {
     function isFieldItem(x: Item) { return isField(x.t); }
   });
   const edge = (row: XmlElement, side: string) => cellsOf(row).map((c) => child(childElements(cellItem(c) ?? el('x'), 'Style')[0] ?? el('x'), side)).find((x) => x && /solid|dashed|dotted|double/i.test(textOf(child(x, 'Style'))));
-  for (const [row, side] of [[rows[block[0]!]!, 'TopBorder'], [rows[block[block.length - 1]!]!, 'BottomBorder']] as const) {
-    const border = edge(row, side);
-    const target = side === 'TopBorder' ? built[0]! : built[built.length - (built.length > lines.length ? 2 : 1)]!;
-    if (border) for (const c of cellsOf(target)) { const st = childElements(cellItem(c)!, 'Style')[0]; if (st) { removeChildren(st, [side]); st.children.push(structuredClone(border)); } }
-  }
   const gapAfter = rows[block[block.length - 1]! + 1];
   if (gapAfter && headAt === block[block.length - 1]! + 1) {
     built.push(el('TablixRow', el('Height', '0.1in'), el('TablixCells', ...widths.map((_, k) => el('TablixCell', el('CellContents', newTextbox(`__summary_gap_${k}`, '', '0pt')))))));
+  }
+  for (const [row, side] of [[rows[block[0]!]!, 'TopBorder'], [rows[block[block.length - 1]!]!, 'BottomBorder']] as const) {
+    const border = edge(row, side);
+    const target = side === 'TopBorder' ? built[0]! : built[built.length - 1]!;
+    if (border) for (const c of cellsOf(target)) { const st = childElements(cellItem(c)!, 'Style')[0]; if (st) { removeChildren(st, [side]); st.children.push(structuredClone(border)); } }
+    if (border && side === 'BottomBorder' && built.length > lines.length) for (const c of cellsOf(built[lines.length - 1]!)) { const st = childElements(cellItem(c)!, 'Style')[0]; if (st) removeChildren(st, [side]); }
   }
   const body = child(tablix, 'TablixBody/TablixRows')!;
   const at = body.children.indexOf(rows[block[0]!]!);
