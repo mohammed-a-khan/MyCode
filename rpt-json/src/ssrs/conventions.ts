@@ -969,6 +969,13 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     });
     headerTitle = candidates.sort((a, b) => size(b) - size(a))[0];
     if (headerTitle) {
+      const under = len(headerTitle, 'Top') + len(headerTitle, 'Height');
+      const rule = descendants(child(page, 'PageHeader') ?? el('x')).find((e) => (e.name === 'Line' || (e.name === 'Rectangle' && !child(e, 'ReportItems') && child(childElements(e, 'Style')[0] ?? el('x'), 'BackgroundColor') && len(e, 'Height') <= 0.08))
+        && !child(e, 'Visibility') && len(e, 'Top') >= under - 0.02 && len(e, 'Top') <= under + 0.3 && len(e, 'Width') >= len(headerTitle!, 'Width') / 2);
+      if (rule && !child(ownStyle(headerTitle), 'BottomBorder')) {
+        const width = rule.name === 'Line' ? textOf(child(childElements(rule, 'Style')[0] ?? el('x'), 'Border/Width') ?? el('x')) || '1pt' : `${((Math.round(len(rule, 'Height') * 1440) + 10) / 20).toFixed(2)}pt`;
+        ownStyle(headerTitle).children.push(el('BottomBorder', el('Style', 'Solid'), el('Width', width)));
+      }
       const parent = descendants(page).find((e) => childElements(e).includes(headerTitle!));
       if (parent) parent.children = parent.children.filter((c) => c !== headerTitle);
     }
