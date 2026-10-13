@@ -1271,7 +1271,13 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           }
           removeChildren(contents, ['ColSpan']);
           const moved = cells[c]!.children;
-          for (let k = 0; k < span; k++) cells[c + k]!.children = c + k === j ? moved : [el('CellContents', newTextbox(`__moved_${c + k}`, '', '0pt'))];
+          const bottom = child(childElements(item, 'Style')[0] ?? el('x'), 'BottomBorder');
+          for (let k = 0; k < span; k++) {
+            if (c + k === j) { cells[c + k]!.children = moved; continue; }
+            const blank = newTextbox(`__moved_${c + k}`, '', '0pt');
+            if (bottom) childElements(blank, 'Style')[0]!.children.push(structuredClone(bottom));
+            cells[c + k]!.children = [el('CellContents', blank)];
+          }
           c += span - 1;
         }
       });
