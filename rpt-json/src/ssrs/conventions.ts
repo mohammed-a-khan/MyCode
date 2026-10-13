@@ -1240,6 +1240,43 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     const rows = rowsOf(tablix);
     const kinds = rowLeaves(tablix).map((l) => l.kind);
     {
+      const colWidths = widthsOf(tablix);
+      const fieldAt: (string | undefined)[] = colWidths.map(() => undefined);
+      rows.forEach((row, i) => {
+        if (kinds[i] !== 'detail') return;
+        cellsOf(row).forEach((cell, c) => {
+          const it = cellItem(cell);
+          const t = it?.name === 'Textbox' ? it : it ? childElements(child(it, 'ReportItems') ?? el('x')).find((e) => e.name === 'Textbox') : undefined;
+          const f = t ? /Fields!(\w+)\.Value/.exec(valueOf(t))?.[1] : undefined;
+          if (f && !fieldAt[c]) fieldAt[c] = f;
+        });
+      });
+      rows.forEach((row, i) => {
+        if (kinds[i] !== 'total' && kinds[i] !== 'subtotal') return;
+        const cells = cellsOf(row);
+        for (let c = 0; c < cells.length; c++) {
+          const contents = child(cells[c]!, 'CellContents');
+          const span = Number(textOf(child(contents ?? el('x'), 'ColSpan')) || 1);
+          const item = cellItem(cells[c]!);
+          if (!contents || !item || span < 2) continue;
+          const t = item.name === 'Textbox' ? item : childElements(child(item, 'ReportItems') ?? el('x')).filter((e) => ITEMS.has(e.name)).length === 1 ? childElements(child(item, 'ReportItems')!).find((e) => e.name === 'Textbox') : undefined;
+          const f = t && TOTALLED.test(valueOf(t)) ? /Fields!(\w+)\.Value/.exec(valueOf(t))?.[1] : undefined;
+          const j = f ? fieldAt.findIndex((x, k) => k >= c && k < c + span && x === f) : -1;
+          if (j < 0) continue;
+          const shift = colWidths.slice(c, j).reduce((a, w) => a + w, 0);
+          if (t !== item) {
+            setChild(t!, 'Left', inch(Math.max(0, len(t!, 'Left') - shift)));
+            setChild(t!, 'Width', inch(Math.min(len(t!, 'Width'), colWidths[j]! - len(t!, 'Left'))));
+            setChild(item, 'Width', inch(colWidths[j]!));
+          }
+          removeChildren(contents, ['ColSpan']);
+          const moved = cells[c]!.children;
+          for (let k = 0; k < span; k++) cells[c + k]!.children = c + k === j ? moved : [el('CellContents', newTextbox(`__moved_${c + k}`, '', '0pt'))];
+          c += span - 1;
+        }
+      });
+    }
+    {
       const leaves = rowLeaves(tablix);
       const colWidths = widthsOf(tablix);
       for (let i = rows.length - 1; i >= 0; i--) {
@@ -1392,7 +1429,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     });
     // A table without column headings, or placing its lines by formula (a statement's indented labels), is lines of
     // text, not rows of data: its rows are not banded.
-    const statement = !rows.some((row, i) => kinds[i] === 'heading' && !descendants(row).some((e) => roles.get(e) === 'title')) || rows.some((row, i) => kinds[i] === 'detail'
+    const statement = !rows.some((row, i) => (kinds[i] === 'heading' || headingRow(row, i)) && !descendants(row).some((e) => roles.get(e) === 'title')) || rows.some((row, i) => kinds[i] === 'detail'
       && descendants(row).some((e) => e.name === 'Textbox' && textOf(child(childElements(e, 'Style')[0] ?? el('x'), 'PaddingLeft')).startsWith('=')));
     const colNames: (string | undefined)[] = [];
     const fromField: boolean[] = [];
@@ -1460,6 +1497,13 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     }
     // Each text in its row: named after its column, given its looks.
     const headingCols = new Set<string>();
+    rows.forEach((row, i) => {
+      if (!headingRow(row, i)) return;
+      cellsOf(row).forEach((cell, c) => {
+        const tb = textboxIn(cell);
+        if (tb && !isBlank(tb) && colNames[c]) headingCols.add(colNames[c]!);
+      });
+    });
     let footerInTable = false;
     rows.forEach((row, i) => {
       const kind = kinds[i]!;
@@ -1663,7 +1707,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           if (roles.has(tb) || isBlank(tb)) continue;
           const numeric = isNumber(tb);
           const totalled = TOTALLED.test(valueOf(tb));
-          roles.set(tb, kind === 'heading' ? (c === 0 ? 'headingFirst' : 'heading')
+          roles.set(tb, kind === 'heading' || headingsHere ? (c === 0 ? 'headingFirst' : 'heading')
             : kind === 'detail' ? (numeric ? 'number' : c === 0 ? 'bodyFirst' : 'body')
               : kind === 'groupHeading' ? 'group'
                 : kind === 'noData' ? 'body'
