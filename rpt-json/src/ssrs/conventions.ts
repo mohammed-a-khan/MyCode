@@ -238,7 +238,7 @@ function fieldOf(textbox: XmlElement): string | undefined {
   const v = valueOf(textbox).trim();
   const m = /^=\s*(?:\w+\(\s*)?Fields!(\w+)\.Value(?:\s*(?:,\s*"[^"]*"\s*)?\))?\s*$/i.exec(v)
     // (A field shown in one of the places it can stand: "IIf(<its place> = k, Fields!X.Value, Nothing)".)
-    ?? /^=\s*IIf\([\s\S]*,\s*Fields!(\w+)\.Value\s*,\s*(?:Nothing|\(?"[^"]*"\)?)\s*\)\s*$/i.exec(v);
+    ?? /^=\s*IIf\([\s\S]*,\s*Fields!(\w+)\.Value\s*,\s*(?:Nothing|\(?"[^"]*"\)?|Fields!F_\w+\.Value)\s*\)\s*$/i.exec(v);
   return m?.[1] ? sourceOf.get(m[1]) ?? m[1].replace(/^F_(?=\w)/, '') : undefined;
 }
 /** A name worked from an item's Crystal name (its number dropped). */
@@ -997,10 +997,13 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
   for (const tablix of tablixes) {
     const T = rename(tablix, 'table');
     const container = parents.get(tablix);
+    foldOverlays(tablix);
     foldMargins(tablix);
     restack(tablix, tablix === tablixes[0]);
     foldMargins(tablix);
+    if (headerTitle && tablix === tablixes[0] && container) takeBlock(tablix, container);
     summarize(tablix);
+    if (tablix === tablixes[0]) closeGap(tablix);
     const widths = widthsOf(tablix);
     const columns = widths.length;
     const isNumber = (tb: XmlElement) => {
@@ -2597,6 +2600,83 @@ function summarize(tablix: XmlElement): void {
   }
 }
 
+function foldOverlays(tablix: XmlElement): void {
+  const leaves = rowLeaves(tablix);
+  rowsOf(tablix).forEach((row, i) => {
+    if (leaves[i]?.kind !== 'detail') return;
+    for (const box of descendants(row).filter((e) => e.name === 'Rectangle')) {
+      const holder = child(box, 'ReportItems');
+      if (!holder) continue;
+      const boxes = childElements(holder).filter((e) => e.name === 'Textbox' && !child(e, 'Visibility'));
+      const plain = (t: XmlElement) => /^=Fields!(\w+)\.Value$/.exec(valueOf(t).trim())?.[1];
+      for (const over of boxes) {
+        const f = plain(over);
+        if (!f || !/^F_/.test(f)) continue;
+        const under = boxes.find((t) => t !== over && plain(t) && !/^F_/.test(plain(t)!) && Math.abs(len(t, 'Left') - len(over, 'Left')) < 0.05
+          && Math.min(len(t, 'Top') + len(t, 'Height'), len(over, 'Top') + len(over, 'Height')) - Math.max(len(t, 'Top'), len(over, 'Top')) > 0.05);
+        if (!under) continue;
+        const v = descendants(under).find((e) => e.name === 'Value')!;
+        v.children = [`=IIf(IsNothing(Fields!${f}.Value) OrElse CStr(Fields!${f}.Value) = "", Fields!${plain(under)}.Value, Fields!${f}.Value)`];
+        holder.children = holder.children.filter((c) => c !== over);
+      }
+    }
+  });
+}
+
+function closeGap(tablix: XmlElement): void {
+  const rows = rowsOf(tablix);
+  const leaves = rowLeaves(tablix);
+  if (leaves.length !== rows.length) return;
+  const head = rows.findIndex((row, i) => {
+    const shown = cellsOf(row).map((c) => { const it = cellItem(c); const inside = it?.name === 'Rectangle' ? childElements(child(it, 'ReportItems') ?? el('x')).filter((e) => ITEMS.has(e.name)) : []; return inside.length === 1 ? inside[0] : it; }).filter((t) => t && !isBlank(t));
+    return leaves[i]!.kind === 'heading' && shown.length >= 3 && shown.every((t) => t!.name === 'Textbox' && fixedText(t!) !== undefined);
+  });
+  if (head < 2) return;
+  const gap = rows[head - 1]!;
+  const items = cellsOf(gap).map((c) => cellItem(c));
+  const ruled = (row: XmlElement) => cellsOf(row).every((c) => { const st = childElements(cellItem(c) ?? el('x'), 'Style')[0]; return !!st && /solid/i.test(textOf(child(child(st, 'BottomBorder') ?? el('x'), 'Style') ?? el('x'))); });
+  if (len(gap, 'Height') > 0.06 || !items.every((t) => t?.name === 'Textbox' && isBlank(t) && !drawnAs(t)) || !ruled(rows[head - 2]!)) return;
+  const member = leaves[head - 1]!.member;
+  const holder = descendants(child(tablix, 'TablixRowHierarchy')!).find((e) => e.name === 'TablixMembers' && e.children.includes(member));
+  if (!holder) return;
+  holder.children = holder.children.filter((m) => m !== member);
+  const body = child(tablix, 'TablixBody/TablixRows')!;
+  body.children = body.children.filter((r) => r !== gap);
+  setChild(tablix, 'Height', inch(len(tablix, 'Height') - len(gap, 'Height')));
+}
+
+function takeBlock(tablix: XmlElement, container: XmlElement): void {
+  const widths = widthsOf(tablix);
+  const tTop = len(tablix, 'Top');
+  const tLeft = len(tablix, 'Left');
+  const tRight = tLeft + widths.reduce((x, y) => x + y, 0);
+  const others = childElements(container).filter((e) => ITEMS.has(e.name) && e !== tablix);
+  const items = others.filter((e) => len(e, 'Top') + len(e, 'Height') <= tTop + 0.01);
+  if (!items.length || items.some((e) => e.name !== 'Textbox' || child(e, 'Visibility')) || items.some((e) => len(e, 'Left') < tLeft - 0.1 || len(e, 'Left') + len(e, 'Width') > tRight + 0.1)) return;
+  if (!items.some((e) => /Fields!\w+\.Value/.test(valueOf(e)))) return;
+  const top = Math.min(...items.map((e) => len(e, 'Top')));
+  const height = tTop - top;
+  const starts = widths.map((_, k) => tLeft + widths.slice(0, k).reduce((x, y) => x + y, 0));
+  const colAt = (x: number) => { let k = 0; while (k + 1 < widths.length && starts[k + 1]! <= x + 0.001) k++; return k; };
+  const cells = widths.map((_, k) => {
+    const mine = items.filter((e) => colAt(len(e, 'Left')) === k);
+    if (!mine.length) return el('TablixCell', el('CellContents', newTextbox(`__block_${k}`, '', '0pt')));
+    for (const e of mine) {
+      for (const v of descendants(e).filter((x) => x.name === 'Value')) v.children = [textOf(v).replace(/\bFirst\((Fields!\w+\.Value),\s*"[^"]*"\)/g, '$1')];
+      setChild(e, 'Top', inch(len(e, 'Top') - top));
+      setChild(e, 'Left', inch(len(e, 'Left') - starts[k]!));
+    }
+    return el('TablixCell', el('CellContents', el('Rectangle', { Name: `__block_box_${k}` }, el('ReportItems', ...mine), el('KeepTogether', 'true'), el('Style', el('Border', el('Style', 'None'))))));
+  });
+  container.children = container.children.filter((c) => !items.includes(c as XmlElement));
+  child(tablix, 'TablixBody/TablixRows')!.children.unshift(el('TablixRow', el('Height', inch(height)), el('TablixCells', ...cells)));
+  const first = rowLeaves(tablix)[1];
+  const repeat = first?.kind === 'heading' && textOf(child(first.member, 'RepeatOnNewPage')) === 'true';
+  child(tablix, 'TablixRowHierarchy/TablixMembers')!.children.unshift(el('TablixMember', el('KeepWithGroup', 'After'), repeat ? el('RepeatOnNewPage', 'true') : null));
+  setChild(tablix, 'Top', inch(top));
+  setChild(tablix, 'Height', inch(len(tablix, 'Height') + height));
+}
+
 function foldMargins(tablix: XmlElement): void {
   const columnsEl = child(tablix, 'TablixBody/TablixColumns');
   const members = child(tablix, 'TablixColumnHierarchy/TablixMembers');
@@ -3207,7 +3287,7 @@ function applyStyleRoles(report: XmlElement, style: NonNullable<Conventions['sty
           const skip = [hiddenBy.get(tb), empty].filter(Boolean).join(' OrElse ');
           const counted = skip ? `RunningValue(IIf(${skip}, 0, 1), Sum, Nothing)` : 'RowNumber(Nothing)';
           const band = `IIF(${counted} Mod 2, ${expr(field(style.rowBands.odd, fillWord))}, ${expr(field(style.rowBands.even, fillWord))})`;
-          setChild(own, 'BackgroundColor', empty ? `=IIF(${empty}, Nothing, ${band})` : `=${band}`);
+          setChild(own, 'BackgroundColor', empty ? `=IIF(${empty}, "White", ${band})` : `=${band}`);
           const hides = textOf(child(tb, 'Visibility/Hidden')).trim();
           const values = descendants(tb).filter((e) => e.name === 'Value');
           if (hides.startsWith('=') && !child(child(tb, 'Visibility')!, 'ToggleItem') && values.length === 1) {

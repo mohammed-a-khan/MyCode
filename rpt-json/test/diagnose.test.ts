@@ -379,4 +379,37 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     const members = descendants(root).filter((e) => e.name === 'TablixMember' && textOf(child(e, 'KeepWithGroup')) === 'Before');
     assert.equal(textOf(child(members[members.length - 1]!, 'Visibility/Hidden')), '=CountRows() = 0', 'no totals without records, as no group prints');
   });
+  it('puts a first-page block of figures into the table under the title, and a message drawn over a value into that value', () => {
+    const src = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Name', type: 'string' }, { name: 'Code', type: 'string' }, { name: 'Amount', type: 'currency' }, { name: 'Base', type: 'currency' }, { name: 'Part', type: 'currency' }, { name: 'C', type: 'number' }] }] } as never;
+    const box = (x: number, y: number, width: number, height: number) => ({ position: { x, y }, size: { width, height } });
+    const t = (name: string, value: string, x: number, y: number, w: number, extra = {}) => ({ kind: 'text', name, text: value, style: { size: 8, bold: true }, ...box(x, y, w, 240), ...extra });
+    const f = (name: string, fld: string, x: number, y: number, w: number, extra = {}) => ({ kind: 'field', name, field: fld, style: { size: 8 }, ...box(x, y, w, 210), ...extra });
+    const line = (name: string, y: number) => ({ kind: 'line', name, ...box(0, y, 8640, 0), border: { sides: [0, 0, 1, 0], width: 60 } });
+    const definition = {
+      saveInfo: {}, selectionFormulas: {}, sqlExpressions: [], parameters: [], groups: [], sortFields: [], summarizedFields: [],
+      formulas: [{ name: 'Empty', index: 1, kind: 'formula', text: 'if {T.C} = 0 then "NONE THIS PERIOD"', referencedFields: ['T.C'] },
+        { name: 'First', index: 2, kind: 'conditionalFormat', text: 'pagenumber <> 1', referencedFields: [] }],
+      layout: [
+        { name: 'PageHeaderArea1', sections: [
+          { name: 'PH1', height: 441, objects: [t('Title', 'Orders in Detail', 0, 0, 8640, { style: { size: 11, bold: true } }), line('Rule', 340)] },
+          { name: 'PH2', height: 1150, conditions: { suppress: { name: 'First', index: 2 } }, objects: [
+            t('BaseLabel', 'Base Amount:', 360, 480, 2400), f('BaseValue', 'T.Base', 3000, 480, 1440, { align: 'right' }), t('A', '(A)', 4500, 480, 360),
+            t('PartLabel', 'Part Amount', 360, 840, 2400), f('PartValue', 'T.Part', 3000, 840, 1440, { align: 'right' }), t('B', '(B)', 4500, 840, 360),
+            t('Way', 'METHOD', 5400, 240, 1320, { align: 'center' }), t('Share', '(B)/(A)', 5400, 840, 1320, { align: 'center' })] },
+          { name: 'PH3', height: 888, objects: [line('Top', 35), t('NameHeading', 'Name', 360, 360, 2400), t('CodeHeading', 'Code', 3000, 360, 1440), t('AmountHeading', 'Amount', 5400, 360, 1440), line('Bottom', 840)] }] },
+        ...['PageFooterArea1', 'ReportHeaderArea1', 'ReportFooterArea1'].map((name) => ({ name, sections: [{ name, height: 0, objects: [] }] })),
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [f('N', 'T.Name', 360, 0, 2400), f('M', '@Empty', 360, 30, 3600), f('K', 'T.Code', 3000, 0, 1440), f('V', 'T.Amount', 5400, 0, 1440, { align: 'right' })] }] },
+      ],
+    } as unknown as ReportDefinition;
+    const root = parseXml(applyConventions(convertToRdl(definition, src, { reportName: 'Orders', formulasInQuery: true }).rdl, 'Orders', conventions).rdl);
+    const tablix = descendants(root).find((e) => e.name === 'Tablix')!;
+    const names = descendants(tablix).filter((e) => e.name === 'Textbox').map((e) => e.attributes.Name ?? '');
+    assert.ok(names.indexOf('Orders_SchTitle_Txt') >= 0 && names.indexOf('Orders_SchTitle_Txt') < names.findIndex((n) => /Base_HdrVal$/.test(n)), 'the title above the block');
+    assert.ok(names.some((n) => /Base_HdrTxt$/.test(n)) && names.some((n) => /METHOD_HdrTxt$/.test(n)) && names.some((n) => /METHOD_HdrVal$/.test(n)));
+    assert.ok(!descendants(root).some((e) => e.name === 'Rectangle' && !descendants(tablix).includes(e) && !descendants(e).includes(tablix)), 'nothing left beside the table');
+    const value = descendants(tablix).find((e) => e.attributes.Name === 'Orders_Tab_1_Name_ColVal')!;
+    assert.match(valueOf(value), /^=IIf\(IsNothing\(Fields!F_Empty\.Value\).*, Fields!Name\.Value, Fields!F_Empty\.Value\)$/);
+    assert.ok(names.includes('Orders_Tab_1_Name_ColTxt') && names.includes('Orders_Tab_1_Code_ColTxt'));
+    assert.ok(!names.some((n) => /Empty_ColVal/.test(n)), 'the message is no item of its own');
+  });
 });

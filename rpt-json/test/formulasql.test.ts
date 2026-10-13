@@ -168,7 +168,7 @@ describe('a team template without custom code', () => {
       layout: [{ name: 'DetailArea1', sections: [{ name: 'D', height: 240, conditions: { backColor: { name: 'Section_Back_Color', index: 2 } }, objects: [field('A', 'Orders.Amount')] }] }] };
     const { rdl } = await convert(definition);
     assert.ok(!rdl.includes('<Code>'), 'no custom code');
-    assert.match(rdl, /=IIf\(\(\(RowNumber\(Nothing\) Mod 2\) = 0\), "#efebdc", Nothing\)/);
+    assert.match(rdl, /=IIf\(\(\(RowNumber\(Nothing\) Mod 2\) = 0\), "#efebdc", "White"\)/);
     assert.match((await convert(definition, false)).rdl, /Code\.F_Shade\(RowNumber\(Nothing\)\)/);
   });
 });
