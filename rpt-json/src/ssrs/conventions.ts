@@ -2536,7 +2536,12 @@ function summarize(tablix: XmlElement): void {
       unplace(it.t);
       const st = childElements(it.t, 'Style')[0];
       if (st) for (const side of ['PaddingLeft', 'PaddingRight', 'PaddingTop', 'PaddingBottom']) setChild(st, side, '2pt');
-      if (st && /solid/i.test(textOf(child(child(st, 'BottomBorder') ?? el('x'), 'Style') ?? el('x')))) {
+      if (st && widths[k]! > it.w * 1.5 && fixedText(it.t) !== undefined && /solid/i.test(textOf(child(child(st, 'BottomBorder') ?? el('x'), 'Style') ?? el('x')))) {
+        removeChildren(st, ['BottomBorder']);
+        for (const run of descendants(it.t).filter((e) => e.name === 'TextRun')) setChild(ownStyle(run), 'TextDecoration', 'Underline');
+        setChild(st, 'VerticalAlign', 'Bottom');
+        underRule.add(it.t);
+      } else if (st && /solid/i.test(textOf(child(child(st, 'BottomBorder') ?? el('x'), 'Style') ?? el('x')))) {
         setChild(st, 'VerticalAlign', 'Bottom');
         setChild(st, 'PaddingBottom', '1pt');
         underRule.add(it.t);
