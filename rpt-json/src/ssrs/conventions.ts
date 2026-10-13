@@ -3207,7 +3207,7 @@ function applyStyleRoles(report: XmlElement, style: NonNullable<Conventions['sty
           const skip = [hiddenBy.get(tb), empty].filter(Boolean).join(' OrElse ');
           const counted = skip ? `RunningValue(IIf(${skip}, 0, 1), Sum, Nothing)` : 'RowNumber(Nothing)';
           const band = `IIF(${counted} Mod 2, ${expr(field(style.rowBands.odd, fillWord))}, ${expr(field(style.rowBands.even, fillWord))})`;
-          setChild(own, 'BackgroundColor', empty ? `=IIF(${empty}, "Transparent", ${band})` : `=${band}`);
+          setChild(own, 'BackgroundColor', empty ? `=IIF(${empty}, Nothing, ${band})` : `=${band}`);
           const hides = textOf(child(tb, 'Visibility/Hidden')).trim();
           const values = descendants(tb).filter((e) => e.name === 'Value');
           if (hides.startsWith('=') && !child(child(tb, 'Visibility')!, 'ToggleItem') && values.length === 1) {
