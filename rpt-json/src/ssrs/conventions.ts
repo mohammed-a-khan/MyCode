@@ -975,6 +975,8 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       if (rule && !child(ownStyle(headerTitle), 'BottomBorder')) {
         const width = rule.name === 'Line' ? textOf(child(childElements(rule, 'Style')[0] ?? el('x'), 'Border/Width') ?? el('x')) || '1pt' : `${((Math.round(len(rule, 'Height') * 1440) + 10) / 20).toFixed(2)}pt`;
         ownStyle(headerTitle).children.push(el('BottomBorder', el('Style', 'Solid'), el('Width', width)));
+        setChild(ownStyle(headerTitle), 'PaddingBottom', '4pt');
+        setChild(headerTitle, 'Height', inch(len(headerTitle, 'Height') + 4 / 72));
       }
       const parent = descendants(page).find((e) => childElements(e).includes(headerTitle!));
       if (parent) parent.children = parent.children.filter((c) => c !== headerTitle);
