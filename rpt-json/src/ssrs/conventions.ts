@@ -1722,7 +1722,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           if (roles.has(tb) || isBlank(tb)) continue;
           const numeric = isNumber(tb);
           const totalled = TOTALLED.test(valueOf(tb));
-          roles.set(tb, kind === 'heading' || headingsHere ? (c === 0 ? 'headingFirst' : 'heading')
+          roles.set(tb, summaryNames.has(tb) ? (/HdrVal$/.test(summaryNames.get(tb)!) ? 'totalValue' : 'totalLabel') : kind === 'heading' || headingsHere ? (c === 0 ? 'headingFirst' : 'heading')
             : kind === 'detail' ? (numeric ? 'number' : c === 0 ? 'bodyFirst' : 'body')
               : kind === 'groupHeading' ? 'group'
                 : kind === 'noData' ? 'body'
@@ -2531,7 +2531,7 @@ function summarize(tablix: XmlElement): void {
       summaryNames.set(label.t, `${field}_HdrTxt`);
       summaryNames.set(value.t, `${field}_HdrVal`);
       place(label, 0);
-      place(value, 1);
+      place(value, Math.max(1, colOf(value)));
     }
     for (const it of line) {
       if (it === label || it === value) continue;
@@ -2576,12 +2576,19 @@ function summarize(tablix: XmlElement): void {
   const where = holder.children.indexOf(member);
   holder.children = holder.children.filter((m) => !block.some((i) => leaves[i]!.member === m));
   holder.children.splice(where, 0, ...built.map(() => structuredClone(member)));
-  const valueBoxes = [...descendants(tablix)].filter((e) => e.name === 'Textbox' && /_HdrVal$/.test(summaryNames.get(e) ?? '') && cellsOf(built.find((r) => descendants(r).includes(e)) ?? el('x')).findIndex((c) => descendants(c).includes(e)) === 1);
-  const need = Math.max(0, ...valueBoxes.map((e) => { const { size } = drawnFont(e, false); return arialWidth('000,000,000.00', size, true) * 1.05 + 0.1; }));
   const columnEls = childElements(child(tablix, 'TablixBody/TablixColumns')!, 'TablixColumn');
-  if (need > widths[1]! && widths[0]! - (need - widths[1]!) > 1.5) {
-    setChild(columnEls[0]!, 'Width', inch(widths[0]! - (need - widths[1]!)));
-    setChild(columnEls[1]!, 'Width', inch(need));
+  for (const r of built) {
+    cellsOf(r).forEach((c, k) => {
+      const e = cellItem(c);
+      if (!e || k === 0 || !/_HdrVal$/.test(summaryNames.get(e) ?? '') || !isField(e)) return;
+      const { size } = drawnFont(e, false);
+      const need = arialWidth('000,000,000.00', size, true) * 1.05 + 0.1;
+      const now = widthsOf(tablix);
+      if (need > now[k]! && now[0]! - (need - now[k]!) > 1.5) {
+        setChild(columnEls[0]!, 'Width', inch(now[0]! - (need - now[k]!)));
+        setChild(columnEls[k]!, 'Width', inch(need));
+      }
+    });
   }
 }
 
@@ -3132,6 +3139,8 @@ function applyStyleRoles(report: XmlElement, style: NonNullable<Conventions['sty
   const expr = (name: string) => `First(Fields!${name}.Value, "${style.dataset}")`;
   const banded = new Set(bandRows);
   const hiddenBy = new Map<XmlElement, string>();
+  const rowOfBox = new Map<XmlElement, XmlElement>();
+  for (const t of descendants(report).filter((e) => e.name === 'Tablix')) for (const row of rowsOf(t)) for (const tb of descendants(row).filter((e) => e.name === 'Textbox')) rowOfBox.set(tb, row);
   for (const t of descendants(report).filter((e) => e.name === 'Tablix')) {
     const rows = rowsOf(t);
     let r = 0;
@@ -3186,8 +3195,14 @@ function applyStyleRoles(report: XmlElement, style: NonNullable<Conventions['sty
     if (fillWord && tableCells.has(tb) && plain) {
       if (roleKey === 'body' || roleKey === 'bodyFirst' || roleKey === 'number') {
         if (style.rowBands && !unbanded.has(tb)) {
-          const counted = hiddenBy.has(tb) ? `RunningValue(IIf(${hiddenBy.get(tb)}, 0, 1), Sum, Nothing)` : 'RowNumber(Nothing)';
-          setChild(own, 'BackgroundColor', `=IIF(${counted} Mod 2, ${expr(field(style.rowBands.odd, fillWord))}, ${expr(field(style.rowBands.even, fillWord))})`);
+          const row = rowOfBox.get(tb);
+          const firstBox = row ? descendants(cellsOf(row)[0] ?? el('x')).find((e) => e.name === 'Textbox') : undefined;
+          const key = firstBox ? /Fields!(\w+)\.Value/.exec(valueOf(firstBox))?.[1] : undefined;
+          const empty = key ? `(IsNothing(Fields!${key}.Value) OrElse Trim(CStr(Fields!${key}.Value)) = "")` : '';
+          const skip = [hiddenBy.get(tb), empty].filter(Boolean).join(' OrElse ');
+          const counted = skip ? `RunningValue(IIf(${skip}, 0, 1), Sum, Nothing)` : 'RowNumber(Nothing)';
+          const band = `IIF(${counted} Mod 2, ${expr(field(style.rowBands.odd, fillWord))}, ${expr(field(style.rowBands.even, fillWord))})`;
+          setChild(own, 'BackgroundColor', empty ? `=IIF(${empty}, "Transparent", ${band})` : `=${band}`);
           const hides = textOf(child(tb, 'Visibility/Hidden')).trim();
           const values = descendants(tb).filter((e) => e.name === 'Value');
           if (hides.startsWith('=') && !child(child(tb, 'Visibility')!, 'ToggleItem') && values.length === 1) {
@@ -3202,7 +3217,7 @@ function applyStyleRoles(report: XmlElement, style: NonNullable<Conventions['sty
   // Blank cells of painted rows take the row's fill, so the band runs across.
   for (const row of banded) {
     const cells = cellsOf(row).map(cellItem).filter((x): x is XmlElement => !!x && (x.name === 'Textbox' || x.name === 'Rectangle'));
-    const painted = descendants(row).filter((e) => e.name === 'Textbox').map((c) => textOf(child(ownStyle(c), 'BackgroundColor'))).find((v) => v.startsWith('=First(') || v.startsWith('=IIF(RowNumber') || v.startsWith('=IIF(RunningValue'));
+    const painted = descendants(row).filter((e) => e.name === 'Textbox').map((c) => textOf(child(ownStyle(c), 'BackgroundColor'))).find((v) => v.startsWith('=First(') || v.startsWith('=IIF(RowNumber') || v.startsWith('=IIF(RunningValue') || v.startsWith('=IIF((IsNothing('));
     if (!painted) continue;
     for (const c of cells) {
       const s = ownStyle(c);
