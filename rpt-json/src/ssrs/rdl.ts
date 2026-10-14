@@ -579,6 +579,7 @@ class RdlBuilder {
     const level = this.groupFields.findIndex((g) => g.toLowerCase() === ref.toLowerCase());
     // The outer group on a constant holds every record: no group of its own, its scope is the whole table.
     if (level === 0 && this.isConstantGroup(this.groupFields[0])) return '';
+    if (level < 0 && this.foldedGroups.has(ref.toLowerCase())) return '';
     return level >= 0 ? this.groupNames[level] : undefined;
   }
 
@@ -3767,13 +3768,31 @@ class RdlBuilder {
     // Table sections: an object shown only on a condition and laid across a row's other fields gets a row of its own.
     const tableShown = (sections: SectionInfo[]) => shown(sections).flatMap((s) => splitConditionalSpans(s, (o) => this.isBlankMessage(o)));
     const levels = (map: Map<number, SectionInfo[]>) => new Map([...map].map(([level, sections]) => [level, tableShown(sections)]));
-    return {
+    return this.foldConstantGroups({
       pageHeader: shown(areas.pageHeader), pageFooter: shown(areas.pageFooter),
       reportHeader: shown(areas.reportHeader), reportFooter: shown(areas.reportFooter),
       detail: tableShown(areas.detail),
       groupHeaders: levels(areas.groupHeaders), groupFooters: levels(areas.groupFooters),
       columnHeadings: [],
-    };
+    });
+  }
+
+  private readonly foldedGroups = new Set<string>();
+
+  private foldConstantGroups(areas: Classified): Classified {
+    let k = 0;
+    while (k < this.groupFields.length && (this.isConstantGroup(this.groupFields[k]) || this.foldedGroups.has(this.groupFields[k]!.toLowerCase()))) k++;
+    const total = Math.max(k, ...[...areas.groupHeaders.keys(), ...areas.groupFooters.keys()].filter((l) => l <= k));
+    if (k < 2 || total < 2) return areas;
+    const shift = (map: Map<number, SectionInfo[]>, outer: SectionInfo[]) => new Map<number, SectionInfo[]>([[1, outer], ...[...map].filter(([l]) => l > k).map(([l, s]) => [l - k + 1, s] as [number, SectionInfo[]])]);
+    const heads = Array.from({ length: k }, (_, i) => areas.groupHeaders.get(i + 1) ?? []).flat();
+    const foots = Array.from({ length: k }, (_, i) => areas.groupFooters.get(k - i) ?? []).flat();
+    if (this.groupFields.length >= k && !this.foldedGroups.size) {
+      for (const f of this.groupFields.slice(1, k)) this.foldedGroups.add(f.toLowerCase());
+      this.groupFields.splice(1, k - 1);
+      this.groupNames.splice(1, k - 1);
+    }
+    return { ...areas, groupHeaders: shift(areas.groupHeaders, heads), groupFooters: shift(areas.groupFooters, foots) };
   }
 
   // ---- report ---------------------------------------------------------------------------
