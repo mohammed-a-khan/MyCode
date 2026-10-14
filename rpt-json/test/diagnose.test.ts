@@ -444,6 +444,7 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     assert.ok(!names.some((n) => /Empty_ColVal/.test(n)), 'a message across the table is no column value');
     const rule = descendants(tablix).find((e) => e.name === 'Line' && /Amount/.test(e.attributes.Name ?? ''))!;
     assert.match(textOf(child(rule, 'Visibility/Hidden')), /Flag.*OrElse IsNothing\(Sum\(Fields!Amount\.Value\)\)/);
+    assert.ok(parseFloat(textOf(child(rule, 'Style/Border/Width'))) >= 1.5, 'the rule over a total is drawn as heavy as the total\'s border prints');
     const title = descendants(tablix).find((e) => e.attributes.Name === 'Orders_SchTitle_Txt')!;
     assert.equal(textOf(child(childElements(title, 'Style')[0]!, 'PaddingBottom')), '4pt', 'room between the title and its rule');
   });
