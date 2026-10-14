@@ -303,8 +303,8 @@ function restack(tablix: XmlElement, whole = false): void {
               setChild(e, 'Width', inch(Math.max(0.01, Math.min(len(e, 'Width'), widths[c + k]! - left))));
             }
             const content = mine.length
-              ? el('Rectangle', { Name: `${item!.attributes.Name ?? 'Rect'}_${k + 1}` }, el('ReportItems', ...mine), ...childElements(item!).filter((e) => e.name === 'Style').map((e) => structuredClone(e)))
-              : newTextbox(`__split_${k}`, '', '0pt');
+              ? el('Rectangle', { Name: `${item!.attributes.Name ?? 'Rect'}_${k + 1}` }, el('ReportItems', ...mine), ...sidesOf(item!, k, span))
+              : splitBlank(`__split_${k}`, item!, k, span);
             const target = cells[i + k]!;
             removeChildren(target, ['CellContents']);
             target.children.push(el('CellContents', content));
@@ -508,12 +508,12 @@ function restack(tablix: XmlElement, whole = false): void {
           const tb = parts[placed.indexOf(k)];
           let content: XmlElement;
           if (tb) {
-            const box = el('Rectangle', { Name: `${item!.attributes.Name ?? 'Rect'}_${k + 1}` }, el('ReportItems', tb), ...childElements(item!).filter((e) => e.name === 'Style').map((e) => structuredClone(e)));
+            const box = el('Rectangle', { Name: `${item!.attributes.Name ?? 'Rect'}_${k + 1}` }, el('ReportItems', tb), ...sidesOf(item!, k, span));
             const left = Math.max(0, len(tb, 'Left') - starts[k]!);
             setChild(tb, 'Left', inch(left));
             setChild(tb, 'Width', inch(Math.max(0.01, Math.min(len(tb, 'Width'), widths[c + k]! - left))));
             content = box;
-          } else content = newTextbox(`__split_${k}`, '', '0pt');
+          } else content = splitBlank(`__split_${k}`, item!, k, span);
           const target = cells[i + k]!;
           removeChildren(target, ['CellContents']);
           target.children.push(el('CellContents', content));
@@ -797,6 +797,26 @@ function rowLeaves(tablix: XmlElement): Leaf[] {
 const rowsOf = (tablix: XmlElement) => childElements(child(tablix, 'TablixBody/TablixRows') ?? el('TablixRows'), 'TablixRow');
 const cellsOf = (row: XmlElement) => childElements(child(row, 'TablixCells') ?? el('TablixCells'), 'TablixCell');
 const widthsOf = (tablix: XmlElement) => childElements(child(tablix, 'TablixBody/TablixColumns') ?? el('TablixColumns'), 'TablixColumn').map((c) => len(c, 'Width'));
+
+function sidesOf(item: XmlElement, k: number, span: number): XmlElement[] {
+  return childElements(item).filter((e) => e.name === 'Style').map((e) => {
+    const style = structuredClone(e);
+    if (k > 0) removeChildren(style, ['LeftBorder']);
+    if (k < span - 1) removeChildren(style, ['RightBorder']);
+    return style;
+  });
+}
+
+function splitBlank(name: string, item: XmlElement, k: number, span: number): XmlElement {
+  const blank = newTextbox(name, '', '0pt');
+  const style = childElements(blank, 'Style')[0]!;
+  const from = sidesOf(item, k, span)[0];
+  for (const side of ['TopBorder', 'BottomBorder', 'LeftBorder', 'RightBorder']) {
+    const border = from && child(from, side);
+    if (border) style.children.push(structuredClone(border));
+  }
+  return blank;
+}
 
 function newTextbox(name: string, value: string, padding = '2pt'): XmlElement {
   return el('Textbox', { Name: name },
@@ -1543,6 +1563,10 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           if (it.name !== 'Textbox' || drawnAs(it)) continue;
           pad(it, { left: widthsOf(tablix).slice(0, start).reduce((a, w) => a + w, 0) });
         }
+        const sideOf = (cell: XmlElement | undefined, side: string) => child(childElements(cell ? cellItem(cell) ?? el('x') : el('x'), 'Style')[0] ?? el('x'), side);
+        const outer = [['LeftBorder', start > 0 ? sideOf(cells[0], 'LeftBorder') : undefined], ['RightBorder', start + span < total ? sideOf(cells[cells.length - 1], 'RightBorder') : undefined]] as const;
+        const own = childElements(cellItem(first) ?? el('x'), 'Style')[0];
+        for (const [side, border] of outer) if (own && border && /solid|dashed|dotted|double|=/i.test(textOf(child(border, 'Style')))) { removeChildren(own, [side]); own.children.push(structuredClone(border)); }
         removeChildren(contents, ['ColSpan']);
         contents.children.push(el('ColSpan', String(total)));
         child(row, 'TablixCells')!.children = [first, ...Array.from({ length: total - 1 }, () => el('TablixCell'))];
@@ -2163,6 +2187,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     for (const side of ['PaddingTop', 'PaddingBottom']) if (!textOf(child(st, side)).startsWith('=')) setChild(st, side, '0pt');
     setChild(st, 'VerticalAlign', 'Middle');
   }
+  for (const tablix of tablixes) pairSides(tablix);
   const lead = tablixes[0];
   const folded = !!lead && foldLead(lead, review);
   for (const tablix of tablixes) {
@@ -2828,6 +2853,34 @@ function foldOverlays(tablix: XmlElement): void {
       }
     }
   });
+}
+
+function pairSides(tablix: XmlElement): void {
+  const n = widthsOf(tablix).length;
+  const spanOf = (cell: XmlElement) => Number(textOf(child(child(cell, 'CellContents') ?? el('x'), 'ColSpan')) || 1);
+  const styleOf = (cell: XmlElement) => childElements(cellItem(cell) ?? el('x'), 'Style')[0];
+  const drawn = (style: XmlElement | undefined, side: string) => !!style && /solid|dashed|dotted|double|=/i.test(textOf(child(child(style, side) ?? el('x'), 'Style')));
+  const placed = rowsOf(tablix).map((row) => {
+    const out: { cell: XmlElement; end: number }[] = [];
+    for (let i = 0, c = 0, cells = cellsOf(row); i < cells.length; i++) {
+      if (!child(cells[i]!, 'CellContents')) continue;
+      c += spanOf(cells[i]!);
+      out.push({ cell: cells[i]!, end: c });
+    }
+    return out;
+  });
+  if (!placed.some((cells) => cells.some(({ cell, end }) => end === n && drawn(styleOf(cell), 'RightBorder')))) return;
+  for (const cells of placed) {
+    cells.forEach(({ cell }, k) => {
+      const next = cells[k + 1];
+      const own = styleOf(cell);
+      const theirs = next && styleOf(next.cell);
+      if (!own || !theirs) return;
+      const copy = (from: XmlElement, side: string) => ({ ...structuredClone(from), name: side });
+      if (drawn(theirs, 'LeftBorder') && !drawn(own, 'RightBorder')) { removeChildren(own, ['RightBorder']); own.children.push(copy(child(theirs, 'LeftBorder')!, 'RightBorder')); }
+      else if (drawn(own, 'RightBorder') && !drawn(theirs, 'LeftBorder')) { removeChildren(theirs, ['LeftBorder']); theirs.children.push(copy(child(own, 'RightBorder')!, 'LeftBorder')); }
+    });
+  }
 }
 
 function closeGap(tablix: XmlElement): void {

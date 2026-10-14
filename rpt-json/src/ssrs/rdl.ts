@@ -3751,6 +3751,7 @@ class RdlBuilder {
   private tableRules: number[] = [];
   /** The width (twips) of the lines running down the table: its cells' borders are drawn as wide. */
   private tableRuleWidth = 20;
+  private pageFrames: ReportObject[] = [];
 
   private classify(layout: AreaInfo[]): Classified {
     const { unrecognised, ...areas } = classifyAreas(layout, this.options.subreport);
@@ -4157,6 +4158,12 @@ class RdlBuilder {
         }
       }
     }
+    for (const frame of this.pageFrames) {
+      const x = frame.position?.x ?? 0;
+      this.tableRules.push(x, x + (frame.size?.width ?? 0));
+      this.tableRuleWidth = Math.max(this.tableRuleWidth, frame.border?.width ?? 20);
+      this.frameFooters.add(1);
+    }
     const table = this.buildTablix(areas, top);
     this.tableRules = [];
     this.tableRuleWidth = 20;
@@ -4384,6 +4391,12 @@ class RdlBuilder {
         (isHeading ? areas.columnHeadings : keep).push(obj);
       }
       section.objects = keep;
+    }
+    if (this.options.rulesAsText && areas.columnHeadings.length && detailXs.size) {
+      const from = Math.min(...detailXs);
+      const to = Math.max(...detailXs);
+      this.pageFrames = areas.pageHeader.flatMap((section) => section.objects.map((o) => this.runOn.get(o)).filter((o): o is ReportObject => !!o && o.kind === 'box' && !!o.size
+        && (o.position?.x ?? 0) <= from && (o.position?.x ?? 0) + o.size!.width > to));
     }
     if (areas.columnHeadings.length) {
       const top = Math.min(...areas.columnHeadings.map((o) => o.position?.y ?? 0));
