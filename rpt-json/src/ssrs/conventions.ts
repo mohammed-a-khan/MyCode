@@ -756,6 +756,7 @@ const summaryNames = new WeakMap<XmlElement, string>();
 const underRule = new WeakSet<XmlElement>();
 const boxedHeads = new WeakSet<XmlElement>();
 const summaryHeights = new WeakMap<XmlElement, number>();
+const summaryPads = new WeakMap<XmlElement, [string, string]>();
 
 function parentOf(root: XmlElement, target: XmlElement): XmlElement {
   return [root, ...descendants(root)].find((e) => e.children.includes(target))!;
@@ -2137,6 +2138,12 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       const planned = summaryHeights.get(row);
       if (planned !== undefined) setChild(row, 'Height', inch(planned));
     }
+    for (const tb of descendants(lead).filter((e) => e.name === 'Textbox' && summaryPads.has(e))) {
+      const [padLeft, padRight] = summaryPads.get(tb)!;
+      const st = childElements(tb, 'Style')[0];
+      if (st && padLeft) setChild(st, 'PaddingLeft', padLeft);
+      if (st && padRight) setChild(st, 'PaddingRight', padRight);
+    }
     setChild(lead, 'Height', inch(rowsOf(lead).reduce((sum, row) => sum + len(row, 'Height'), 0)));
   }
   return { rdl: toXml(withFunctions(root, extra.sqlFunctions ?? [])), review, settled: conv.dataSource ? ['Data source'] : [], ...(Object.keys(files).length ? { files } : {}) };
@@ -2599,7 +2606,10 @@ function summarize(tablix: XmlElement): void {
         setChild(st, 'PaddingBottom', '1pt');
         underRule.add(it.t);
       }
-      if (k === 0 && !it.right && !/center/i.test(textAlignOf(it.t))) pad(it.t, { left: Math.max(0, Math.min(it.x - starts[k]!, widths[k]! / 2)) });
+      if (k === 0 && !it.right && !/center/i.test(textAlignOf(it.t))) {
+        pad(it.t, { left: Math.max(0, Math.min(it.x - starts[k]!, widths[k]! / 2)) });
+        if (st) summaryPads.set(it.t, [textOf(child(st, 'PaddingLeft')), textOf(child(st, 'PaddingRight'))]);
+      }
       else if (k > 0 && st && textOf(child(st, 'VerticalAlign')) !== 'Bottom') {
         const room = Math.max(0, widths[k]! - it.w);
         const left = Math.min(Math.max(0, it.x - starts[k]!), room);
