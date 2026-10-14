@@ -2915,18 +2915,32 @@ function repeatTogether(tablix: XmlElement): void {
   const holder = child(tablix, 'TablixRowHierarchy/TablixMembers');
   if (!holder) return;
   const members = childElements(holder, 'TablixMember');
-  const at = members.findIndex((m) => descendants(m).some((e) => e.name === 'Group'));
+  const at = members.findIndex((m) => !!child(m, 'Group'));
   if (at < 1) return;
   const repeats = (m: XmlElement) => textOf(child(m, 'RepeatOnNewPage')) === 'true';
   const before = members.slice(0, at);
   if (before.every(repeats) || !before.some(repeats)) return;
-  let from = at;
-  while (from > 0 && repeats(members[from - 1]!)) from--;
-  if (before.slice(0, from).some(repeats)) for (const m of before.slice(0, from)) removeChildren(m, ['RepeatOnNewPage']);
-  for (const m of before.slice(0, from)) removeChildren(m, ['KeepWithGroup']);
-  const inner = members.slice(from);
-  holder.children = holder.children.filter((c) => typeof c !== 'object' || !inner.includes(c as XmlElement));
-  holder.children.push(el('TablixMember', el('TablixMembers', ...inner)));
+  const runs: XmlElement[][] = [];
+  for (const m of before) {
+    const last = runs[runs.length - 1];
+    if (last && repeats(last[0]!) === repeats(m)) last.push(m);
+    else runs.push([m]);
+  }
+  const keep = repeats(runs[runs.length - 1]![0]!);
+  const name = (descendants(tablix).find((e) => e.name === 'Group')?.attributes.Name ?? 'Table_grp_1').replace(/_?\d+$/, '');
+  const used = new Set(descendants(tablix).filter((e) => e.name === 'Group').map((e) => e.attributes.Name));
+  let n = 0;
+  for (const run of runs.slice(0, -1)) {
+    if (repeats(run[0]!) === keep) continue;
+    for (const m of run) removeChildren(m, ['RepeatOnNewPage', 'KeepWithGroup']);
+    while (used.has(`${name}_once${n ? `_${n}` : ''}`)) n++;
+    const group = `${name}_once${n ? `_${n}` : ''}`;
+    used.add(group);
+    const wrapped = el('TablixMember', el('Group', { Name: group }, el('GroupExpressions', el('GroupExpression', '=1'))), el('TablixMembers', ...run));
+    const index = holder.children.indexOf(run[0]!);
+    holder.children = holder.children.filter((c) => typeof c !== 'object' || !run.includes(c as XmlElement));
+    holder.children.splice(index, 0, wrapped);
+  }
 }
 
 function alignTotals(tablix: XmlElement): void {
