@@ -2782,6 +2782,27 @@ function summarize(tablix: XmlElement): void {
     return built;
     function isFieldItem(x: Item) { return isField(x.t); }
   });
+  {
+    const centres = new Map<number, number>();
+    const pts = (st: XmlElement, side: string) => (inches(textOf(child(st, side))) ?? 0) * 72;
+    for (const r of built) {
+      cellsOf(r).forEach((cell, k) => {
+        const t = cellItem(cell);
+        const st = t && childElements(t, 'Style')[0];
+        const name = t ? summaryNames.get(t) ?? '' : '';
+        if (!t || !st || k === 0 || !/center/i.test(textAlignOf(t))) return;
+        const width = widths[k]! * 72;
+        const centre = (pts(st, 'PaddingLeft') + width - pts(st, 'PaddingRight')) / 2;
+        if (/_HdrTxt$/.test(name)) centres.set(k, centre);
+        else if (/_HdrVal$/.test(name) && centres.has(k) && Math.abs(centres.get(k)! - centre) > 2) {
+          const want = centres.get(k)!;
+          const half = Math.min(want, width - want);
+          setChild(st, 'PaddingLeft', `${Math.round((want - half) * 10) / 10}pt`);
+          setChild(st, 'PaddingRight', `${Math.round((width - want - half) * 10) / 10}pt`);
+        }
+      });
+    }
+  }
   const edge = (row: XmlElement, side: string) => cellsOf(row).map((c) => child(childElements(cellItem(c) ?? el('x'), 'Style')[0] ?? el('x'), side)).find((x) => x && /solid|dashed|dotted|double/i.test(textOf(child(x, 'Style'))));
   const gapAfter = rows[block[block.length - 1]! + 1];
   if (gapAfter && headAt === block[block.length - 1]! + 1) {
