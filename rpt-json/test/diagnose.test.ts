@@ -517,6 +517,7 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     const repeats = (name: RegExp) => { const i = rows.findIndex((r) => descendants(r).some((e) => name.test(e.attributes.Name ?? ''))); return textOf(child(members[i]!, 'RepeatOnNewPage')) === 'true'; };
     assert.ok(!repeats(/Base_HdrTxt$/), 'the block above the headings prints once');
     assert.ok(repeats(/Name_ColTxt$/), 'the headings print on every page');
+    assert.ok(descendants(child(tablix, 'TablixRowHierarchy')!).filter((e) => e.name === 'TablixMember' && child(e, 'TablixMembers')).every((e) => child(e, 'Group')), 'repeated rows stay beside their group');
     for (const holder of descendants(child(tablix, 'TablixRowHierarchy')!).filter((e) => e.name === 'TablixMembers')) {
       const kids = childElements(holder, 'TablixMember');
       const at = kids.findIndex((m) => child(m, 'Group'));
