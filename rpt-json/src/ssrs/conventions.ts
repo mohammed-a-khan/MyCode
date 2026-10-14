@@ -755,6 +755,7 @@ const groupLabels = new WeakSet<XmlElement>();
 const summaryNames = new WeakMap<XmlElement, string>();
 const underRule = new WeakSet<XmlElement>();
 const boxedHeads = new WeakSet<XmlElement>();
+const summaryHeights = new WeakMap<XmlElement, number>();
 
 function parentOf(root: XmlElement, target: XmlElement): XmlElement {
   return [root, ...descendants(root)].find((e) => e.children.includes(target))!;
@@ -2130,6 +2131,14 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     files['.sql'] = procedures.text;
   }
   // Notes the conversion made that no longer apply (the shared data source replaces the connection).
+  const lead = tablixes[0];
+  if (lead && foldLead(lead, review)) {
+    for (const row of rowsOf(lead)) {
+      const planned = summaryHeights.get(row);
+      if (planned !== undefined) setChild(row, 'Height', inch(planned));
+    }
+    setChild(lead, 'Height', inch(rowsOf(lead).reduce((sum, row) => sum + len(row, 'Height'), 0)));
+  }
   return { rdl: toXml(withFunctions(root, extra.sqlFunctions ?? [])), review, settled: conv.dataSource ? ['Data source'] : [], ...(Object.keys(files).length ? { files } : {}) };
 }
 
@@ -2651,7 +2660,9 @@ function summarize(tablix: XmlElement): void {
       summaryNames.set(blank, `Txt_${++blanks}`);
       return el('TablixCell', el('CellContents', blank));
     });
-    return el('TablixRow', el('Height', inch(Math.max(0.17, height))), el('TablixCells', ...cells));
+    const built = el('TablixRow', el('Height', inch(Math.max(0.17, height))), el('TablixCells', ...cells));
+    summaryHeights.set(built, Math.max(0.17, height));
+    return built;
     function isFieldItem(x: Item) { return isField(x.t); }
   });
   const edge = (row: XmlElement, side: string) => cellsOf(row).map((c) => child(childElements(cellItem(c) ?? el('x'), 'Style')[0] ?? el('x'), side)).find((x) => x && /solid|dashed|dotted|double/i.test(textOf(child(x, 'Style'))));
@@ -2796,15 +2807,15 @@ function takeBlock(tablix: XmlElement, container: XmlElement): void {
   setChild(tablix, 'Height', inch(len(tablix, 'Height') + height));
 }
 
-function foldLead(tablix: XmlElement, review: ReviewNote[]): void {
+function foldLead(tablix: XmlElement, review: ReviewNote[]): boolean {
   const columnsEl = child(tablix, 'TablixBody/TablixColumns');
   const members = child(tablix, 'TablixColumnHierarchy/TablixMembers');
-  if (!columnsEl || !members || descendants(child(tablix, 'TablixColumnHierarchy')!).some((e) => e.name === 'Group')) return;
+  if (!columnsEl || !members || descendants(child(tablix, 'TablixColumnHierarchy')!).some((e) => e.name === 'Group')) return false;
   const widths = widthsOf(tablix);
   const n = widths.length;
   const rows = rowsOf(tablix);
   const leaves = rowLeaves(tablix);
-  if (n < 3 || childElements(members, 'TablixMember').length !== n) return;
+  if (n < 3 || childElements(members, 'TablixMember').length !== n) return false;
   const aligned = leaves.length === rows.length;
   const spanOf = (cell: XmlElement) => Number(textOf(child(child(cell, 'CellContents') ?? el('x'), 'ColSpan')) || 1);
   const setSpan = (cell: XmlElement, k: number) => {
@@ -2824,10 +2835,13 @@ function foldLead(tablix: XmlElement, review: ReviewNote[]): void {
     : Math.max(-1, ...rows.map((row, i) => (i < (valueRow < 0 ? rows.length : valueRow) && headingLike(row) ? i : -1)));
   if (head < 0) {
     if (!aligned) review.push({ item: tablix.attributes.Name ?? 'Table', message: 'its first column could not be checked for a heading: no row of column headings found' });
-    return;
+    return false;
   }
   const hc = cellsOf(rows[head]!);
-  if (hc.length !== n || !empty(hc[0]!) || empty(hc[1]!)) return;
+  if (hc.length !== n || !empty(hc[0]!) || empty(hc[1]!)) {
+    if (hc.length !== n) review.push({ item: tablix.attributes.Name ?? 'Table', message: `its heading row has ${hc.length} cells for ${n} columns, so its first column was not folded` });
+    return false;
+  }
   const fits = rows.every((row) => {
     const cells = cellsOf(row);
     if (!cells.length) return true;
@@ -2837,7 +2851,7 @@ function foldLead(tablix: XmlElement, review: ReviewNote[]): void {
     const blocking = rows.findIndex((row) => { const cells = cellsOf(row); return cells.length > 0 && spanOf(cells[0]!) <= 1 && !empty(cells[0]!) && cells[1] !== undefined && !empty(cells[1]!); });
     const what = (cell: XmlElement | undefined) => (cell ? descendants(cell).filter((e) => e.name === 'Textbox' || e.name === 'Line').map((e) => e.attributes.Name).join('+') : '');
     review.push({ item: tablix.attributes.Name ?? 'Table', message: `its first column has no heading and could not be folded into the next: row ${blocking + 1} has ${what(cellsOf(rows[blocking]!)[0])} and ${what(cellsOf(rows[blocking]!)[1])} side by side` });
-    return;
+    return false;
   }
   const w = widths[0]!;
   for (const row of rows) {
@@ -2862,6 +2876,7 @@ function foldLead(tablix: XmlElement, review: ReviewNote[]): void {
   columnsEl.children = columnsEl.children.filter((c) => c !== columnList[0]);
   const memberList = childElements(members, 'TablixMember');
   members.children = members.children.filter((c) => c !== memberList[0]);
+  return true;
 }
 
 function foldMargins(tablix: XmlElement): void {
