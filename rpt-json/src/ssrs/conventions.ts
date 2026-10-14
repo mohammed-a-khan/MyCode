@@ -1010,7 +1010,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     foldMargins(tablix);
     restack(tablix, tablix === tablixes[0]);
     foldMargins(tablix);
-    if (tablix === tablixes[0]) foldLead(tablix);
+    if (tablix === tablixes[0]) foldLead(tablix, review);
     if (headerTitle && tablix === tablixes[0] && container) takeBlock(tablix, container);
     summarize(tablix);
     if (tablix === tablixes[0]) closeGap(tablix);
@@ -2576,17 +2576,47 @@ function summarize(tablix: XmlElement): void {
         underRule.add(it.t);
         const left = Math.max(0, Math.min(it.x - starts[k]!, widths[k]! - it.w));
         rules.set(li, [...(rules.get(li) ?? []), { k, left, width: Math.min(it.w, widths[k]! - left), border, word: (summaryNames.get(it.t) ?? 'Hdr').replace(/_HdrTxt$/, '') }]);
-        setChild(st, 'PaddingLeft', `${Math.round(left * 720) / 10}pt`);
-        setChild(st, 'PaddingRight', `${Math.round(Math.max(0, widths[k]! - left - it.w) * 720) / 10}pt`);
+        const { size, bold } = drawnFont(it.t, true);
+        const span = Math.max(it.w, arialWidth((fixedText(it.t) ?? '').trim(), size, bold) + 6 / 72);
+        const middle = left + Math.min(it.w, widths[k]! - left) / 2;
+        const padLeft = Math.max(0, Math.min(middle - span / 2, widths[k]! - span));
+        setChild(st, 'PaddingLeft', `${Math.round(padLeft * 720) / 10}pt`);
+        setChild(st, 'PaddingRight', `${Math.round(Math.max(0, widths[k]! - padLeft - span) * 720) / 10}pt`);
       } else if (st && /solid/i.test(textOf(child(child(st, 'BottomBorder') ?? el('x'), 'Style') ?? el('x')))) {
         setChild(st, 'VerticalAlign', 'Bottom');
         setChild(st, 'PaddingBottom', '1pt');
         underRule.add(it.t);
       }
       if (k === 0 && !it.right && !/center/i.test(textAlignOf(it.t))) pad(it.t, { left: Math.max(0, Math.min(it.x - starts[k]!, widths[k]! / 2)) });
+      else if (k > 0 && st && !underRule.has(it.t)) {
+        const room = Math.max(0, widths[k]! - it.w);
+        const left = Math.min(Math.max(0, it.x - starts[k]!), room);
+        const right = Math.min(Math.max(0, starts[k]! + widths[k]! - it.x - it.w), room);
+        const at = (v: number) => `${Math.max(2, Math.round(v * 720) / 10)}pt`;
+        const align = it.right ? 'right' : /center/i.test(textAlignOf(it.t)) ? 'center' : 'left';
+        if (align !== 'right') setChild(st, 'PaddingLeft', at(left));
+        if (align !== 'left') setChild(st, 'PaddingRight', at(right));
+      }
     };
+    const valueField = value ? fieldOf(value.t) : undefined;
     if (label && value) {
-      const field = fieldOf(value.t) ?? 'value';
+      const end = value.x + value.w;
+      const home = Math.max(1, colOf(value));
+      const taken = (k: number) => headerCols.has(k) || line.some((o) => o !== value && o !== label && colOf(o) === k && !/^\([A-Z]\)$/.test((fixedText(o.t) ?? '').trim()));
+      const mark = line.find((m) => m !== value && /^\([A-Z]\)$/.test((fixedText(m.t) ?? '').trim()) && m.x >= end - 0.05 && m.x - end < 0.4 && colOf(m) === home && taken(home + 1));
+      const para = descendants(value.t).find((e) => e.name === 'TextRuns');
+      const run = para && childElements(para, 'TextRun')[0];
+      if (mark && para && run) {
+        const style = structuredClone(childElements(run, 'Style')[0] ?? el('Style'));
+        removeChildren(style, ['Format']);
+        para.children.push(el('TextRun', el('Value', `\u00a0\u00a0${(fixedText(mark.t) ?? '').trim()}`), style));
+        value.w = mark.x + mark.w - value.x;
+        value.right = true;
+        line.splice(line.indexOf(mark), 1);
+      }
+    }
+    if (label && value) {
+      const field = valueField ?? 'value';
       summaryNames.set(label.t, `${field}_HdrTxt`);
       summaryNames.set(value.t, `${field}_HdrVal`);
       place(label, 0);
@@ -2674,7 +2704,8 @@ function summarize(tablix: XmlElement): void {
       const e = cellItem(c);
       if (!e || k === 0 || !/_HdrVal$/.test(summaryNames.get(e) ?? '') || !isField(e)) return;
       const { size } = drawnFont(e, false);
-      const need = arialWidth('000,000,000.00', size, true) * 1.05 + 0.1;
+      const extra = descendants(e).filter((x) => x.name === 'TextRun').slice(1).map((r) => textOf(child(r, 'Value'))).join('');
+      const need = arialWidth(`000,000,000.00${extra}`, size, true) * 1.05 + 0.1;
       const now = widthsOf(tablix);
       if (need > now[k]! && now[0]! - (need - now[k]!) > 1.5) {
         setChild(columnEls[0]!, 'Width', inch(now[0]! - (need - now[k]!)));
@@ -2761,7 +2792,7 @@ function takeBlock(tablix: XmlElement, container: XmlElement): void {
   setChild(tablix, 'Height', inch(len(tablix, 'Height') + height));
 }
 
-function foldLead(tablix: XmlElement): void {
+function foldLead(tablix: XmlElement, review: ReviewNote[]): void {
   const columnsEl = child(tablix, 'TablixBody/TablixColumns');
   const members = child(tablix, 'TablixColumnHierarchy/TablixMembers');
   if (!columnsEl || !members || descendants(child(tablix, 'TablixColumnHierarchy')!).some((e) => e.name === 'Group')) return;
@@ -2790,7 +2821,12 @@ function foldLead(tablix: XmlElement): void {
     if (!cells.length) return true;
     return spanOf(cells[0]!) > 1 || empty(cells[0]!) || (cells[1] !== undefined && empty(cells[1]!));
   });
-  if (!fits) return;
+  if (!fits) {
+    const blocking = rows.findIndex((row) => { const cells = cellsOf(row); return cells.length > 0 && spanOf(cells[0]!) <= 1 && !empty(cells[0]!) && cells[1] !== undefined && !empty(cells[1]!); });
+    const what = (cell: XmlElement | undefined) => (cell ? descendants(cell).filter((e) => e.name === 'Textbox' || e.name === 'Line').map((e) => e.attributes.Name).join('+') : '');
+    review.push({ item: tablix.attributes.Name ?? 'Table', message: `its first column has no heading and could not be folded into the next: row ${blocking + 1} has ${what(cellsOf(rows[blocking]!)[0])} and ${what(cellsOf(rows[blocking]!)[1])} side by side` });
+    return;
+  }
   const w = widths[0]!;
   for (const row of rows) {
     const cells = cellsOf(row);
