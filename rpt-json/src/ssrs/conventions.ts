@@ -754,6 +754,7 @@ const leftBlank = new WeakSet<XmlElement>();
 const groupLabels = new WeakSet<XmlElement>();
 const summaryNames = new WeakMap<XmlElement, string>();
 const underRule = new WeakSet<XmlElement>();
+const boxedHeads = new WeakSet<XmlElement>();
 
 function parentOf(root: XmlElement, target: XmlElement): XmlElement {
   return [root, ...descendants(root)].find((e) => e.children.includes(target))!;
@@ -2267,7 +2268,7 @@ function fitTablix(tablix: XmlElement): number {
       const cellWidth = widths.slice(c, c + span).reduce((a, b) => a + b, 0) || undefined;
       // (Fixed text whose longest word is wider than its cell less Crystal's placing: placed closer to the edges, so
       // the word is not broken.)
-      if (item.name === 'Textbox' && cellWidth && fixedText(item)) roomForWords(item, cellWidth, designText);
+      if (item.name === 'Textbox' && cellWidth && fixedText(item) && !boxedHeads.has(item)) roomForWords(item, cellWidth, designText);
       if (item.name === 'Rectangle') need = Math.max(need, fitItems(child(item, 'ReportItems')));
       else if (item.name === 'Tablix') need = Math.max(need, len(item, 'Height') + fitTablix(item));
       else if (item.name === 'Textbox' && !child(item, 'Visibility') && textOf(child(item, 'CanShrink')) !== 'true') {
@@ -2581,12 +2582,9 @@ function summarize(tablix: XmlElement): void {
         underRule.add(it.t);
         const left = Math.max(0, Math.min(it.x - starts[k]!, widths[k]! - it.w));
         rules.set(li, [...(rules.get(li) ?? []), { k, left, width: Math.min(it.w, widths[k]! - left), border, word: (summaryNames.get(it.t) ?? 'Hdr').replace(/_HdrTxt$/, '') }]);
-        const { size, bold } = drawnFont(it.t, true);
-        const span = Math.max(it.w, arialWidth((fixedText(it.t) ?? '').trim(), size, bold) + 6 / 72);
-        const middle = left + Math.min(it.w, widths[k]! - left) / 2;
-        const padLeft = Math.max(0, Math.min(middle - span / 2, widths[k]! - span));
-        setChild(st, 'PaddingLeft', `${Math.round(padLeft * 720) / 10}pt`);
-        setChild(st, 'PaddingRight', `${Math.round(Math.max(0, widths[k]! - padLeft - span) * 720) / 10}pt`);
+        setChild(st, 'PaddingLeft', `${Math.round(left * 720) / 10}pt`);
+        setChild(st, 'PaddingRight', `${Math.round(Math.max(0, widths[k]! - left - it.w) * 720) / 10}pt`);
+        boxedHeads.add(it.t);
       } else if (st && /solid/i.test(textOf(child(child(st, 'BottomBorder') ?? el('x'), 'Style') ?? el('x')))) {
         setChild(st, 'VerticalAlign', 'Bottom');
         setChild(st, 'PaddingBottom', '1pt');
@@ -2806,7 +2804,8 @@ function foldLead(tablix: XmlElement, review: ReviewNote[]): void {
   const n = widths.length;
   const rows = rowsOf(tablix);
   const leaves = rowLeaves(tablix);
-  if (n < 3 || leaves.length !== rows.length || childElements(members, 'TablixMember').length !== n) return;
+  if (n < 3 || childElements(members, 'TablixMember').length !== n) return;
+  const aligned = leaves.length === rows.length;
   const spanOf = (cell: XmlElement) => Number(textOf(child(child(cell, 'CellContents') ?? el('x'), 'ColSpan')) || 1);
   const setSpan = (cell: XmlElement, k: number) => {
     const contents = child(cell, 'CellContents')!;
@@ -2815,11 +2814,18 @@ function foldLead(tablix: XmlElement, review: ReviewNote[]): void {
   };
   const empty = (cell: XmlElement) => descendants(cell).every((e) => (e.name === 'Value' ? !textOf(e).trim() : !/^(Line|Image|Chart|Subreport|Tablix|Map|GaugePanel)$/.test(e.name)));
   const shown = (cell: XmlElement) => { const it = cellItem(cell); const inside = it?.name === 'Rectangle' ? childElements(child(it, 'ReportItems') ?? el('x')).filter((e) => ITEMS.has(e.name)) : []; return inside.length === 1 ? inside[0] : it; };
-  const head = rows.findIndex((row, i) => {
+  const headingLike = (row: XmlElement) => {
     const items = cellsOf(row).map(shown).filter((t) => t && !isBlank(t));
-    return leaves[i]!.kind === 'heading' && items.length >= 3 && items.every((t) => t!.name === 'Textbox' && fixedText(t!) !== undefined);
-  });
-  if (head < 0) return;
+    return items.length >= 3 && items.every((t) => t!.name === 'Textbox' && fixedText(t!) !== undefined);
+  };
+  const valueRow = rows.findIndex((row) => cellsOf(row).map(shown).filter((t) => t?.name === 'Textbox' && /Fields!/.test(valueOf(t)) && !TOTALLED.test(valueOf(t))).length >= 3);
+  const head = aligned
+    ? rows.findIndex((row, i) => leaves[i]!.kind === 'heading' && headingLike(row))
+    : Math.max(-1, ...rows.map((row, i) => (i < (valueRow < 0 ? rows.length : valueRow) && headingLike(row) ? i : -1)));
+  if (head < 0) {
+    if (!aligned) review.push({ item: tablix.attributes.Name ?? 'Table', message: 'its first column could not be checked for a heading: no row of column headings found' });
+    return;
+  }
   const hc = cellsOf(rows[head]!);
   if (hc.length !== n || !empty(hc[0]!) || empty(hc[1]!)) return;
   const fits = rows.every((row) => {
