@@ -1010,6 +1010,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     foldMargins(tablix);
     restack(tablix, tablix === tablixes[0]);
     foldMargins(tablix);
+    if (tablix === tablixes[0]) foldLead(tablix);
     if (headerTitle && tablix === tablixes[0] && container) takeBlock(tablix, container);
     summarize(tablix);
     if (tablix === tablixes[0]) closeGap(tablix);
@@ -1319,7 +1320,11 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           if (!r) return el('TablixCell', el('CellContents', newTextbox(`__rule_${c}`, '', '0pt')));
           const st = childElements(r.t, 'Style')[0]!;
           const border = child(st, 'TopBorder');
+          const hidden = textOf(child(r.t, 'Visibility/Hidden')).replace(/^=/, '').trim();
+          const shownValue = valueOf(r.t).replace(/^=/, '').trim();
+          const off = [hidden && hidden !== 'false' ? `(${hidden})` : '', shownValue ? `IsNothing(${shownValue})` : ''].filter(Boolean).join(' OrElse ');
           const line = el('Line', { Name: `__ruleLine_${c}` }, el('Top', inch(height - 0.01)), el('Left', inch(len(r.t, 'Left'))), el('Height', '0in'), el('Width', inch(len(r.t, 'Width'))),
+            off ? el('Visibility', el('Hidden', `=${off}`)) : null,
             el('Style', el('Border', ...childElements(border ?? el('Border', el('Style', 'Solid'))).map((e) => structuredClone(e)))));
           removeChildren(st, ['TopBorder']);
           setChild(st, 'VerticalAlign', 'Top');
@@ -1704,7 +1709,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           if ((kind === 'subtotal' || kind === 'total') && stackedRows.has(row) && !/Fields!/.test(valueOf(tb)) && !rowTexts.some((e) => fieldOf(e)) && !rowTexts.some((e) => TOTALLED.test(valueOf(e)))) return rename(tb, 'text', { T });
           switch (kind) {
             case 'heading': return across >= columns && columns > 1 ? rename(tb, 'text', { T }) : rename(tb, 'heading', { T, col: colNames[c] ?? col });
-            case 'detail': return !/Fields!/.test(valueOf(tb)) && !rowTexts.some((e) => fieldOf(e) || /Fields!/.test(valueOf(e))) ? rename(tb, 'text', { T }) : rename(tb, 'value', { T, col });
+            case 'detail': return !/Fields!/.test(valueOf(tb)) && !rowTexts.some((e) => fieldOf(e) || /Fields!/.test(valueOf(e))) ? rename(tb, 'text', { T }) : across >= columns && columns > 1 ? rename(tb, 'groupText', { T, col }) : rename(tb, 'value', { T, col });
             case 'groupHeading': return headingsHere ? rename(tb, 'heading', { T, col: colNames[c] ?? col }) : rename(tb, 'groupText', { T, col });
             case 'subtotal': return rename(tb, totalled ? 'subtotal' : 'subtotalText', { T, col });
             default:
@@ -1977,6 +1982,33 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
 
   // ----- Looks from the style dataset.
   if (conv.style) applyStyleRoles(report, conv.style, roles, tableCells, unbanded, bandRows, review, dataSources[0]?.attributes.Name ?? conv.dataSource?.name ?? '');
+  const grownRows = new Set<XmlElement>();
+  for (const [tb, role] of roles) {
+    if (role !== 'title') continue;
+    const st = childElements(tb, 'Style')[0];
+    if (!st || !/solid/i.test(textOf(child(st, 'BottomBorder/Style')))) continue;
+    const now = (inches(textOf(child(st, 'PaddingBottom')) || '0pt') ?? 0) * 72;
+    if (textOf(child(st, 'PaddingBottom')).startsWith('=') || now >= 4) continue;
+    setChild(st, 'PaddingBottom', '4pt');
+    const row = descendants(report).find((e) => e.name === 'TablixRow' && descendants(e).includes(tb));
+    if (!row || grownRows.has(row)) continue;
+    grownRows.add(row);
+    const grow = (4 - now) / 72;
+    setChild(row, 'Height', inch(len(row, 'Height') + grow));
+    let item = descendants(report).find((e) => e.name === 'Tablix' && descendants(e).includes(row));
+    const up = (x: XmlElement) => descendants(report).find((e) => childElements(e).includes(x));
+    while (item) {
+      const holder = up(item);
+      const oldBottom = len(item, 'Top') + len(item, 'Height');
+      setChild(item, 'Height', inch(len(item, 'Height') + grow));
+      if (holder?.name === 'ReportItems') {
+        for (const sib of childElements(holder).filter((e) => e !== item && ITEMS.has(e.name) && len(e, 'Top') >= oldBottom - 0.001)) setChild(sib, 'Top', inch(len(sib, 'Top') + grow));
+      }
+      const owner = holder ? up(holder) : undefined;
+      if (owner?.name === 'Body') { setChild(owner, 'Height', inch(len(owner, 'Height') + grow)); break; }
+      item = owner?.name === 'Rectangle' ? owner : undefined;
+    }
+  }
   if (conv.style) {
     for (const t of descendants(report).filter((e) => e.name === 'Tablix')) {
       const heads = descendants(t).filter((e) => e.name === 'Textbox' && roles.get(e) === 'heading');
@@ -2521,7 +2553,6 @@ function summarize(tablix: XmlElement): void {
     return k;
   };
   const headerCols = new Map<number, string>();
-  const usedVals = new Set<string>();
   let blanks = 0;
   const rules = new Map<number, { k: number; left: number; width: number; border: XmlElement; word: string }[]>();
   const built = lines.map((line, li) => {
@@ -2569,8 +2600,7 @@ function summarize(tablix: XmlElement): void {
         const word = snake(text);
         headerCols.set(k, word);
         summaryNames.set(it.t, `${word}_HdrTxt`);
-      } else if (headerCols.has(k) && !usedVals.has(headerCols.get(k)!)) {
-        usedVals.add(headerCols.get(k)!);
+      } else if (headerCols.has(k)) {
         summaryNames.set(it.t, `${headerCols.get(k)}_HdrVal`);
       } else if (isField(it.t)) {
         summaryNames.set(it.t, `${fieldOf(it.t) ?? 'value'}_HdrVal`);
@@ -2729,6 +2759,61 @@ function takeBlock(tablix: XmlElement, container: XmlElement): void {
   child(tablix, 'TablixRowHierarchy/TablixMembers')!.children.unshift(el('TablixMember', el('KeepWithGroup', 'After'), repeat ? el('RepeatOnNewPage', 'true') : null));
   setChild(tablix, 'Top', inch(top));
   setChild(tablix, 'Height', inch(len(tablix, 'Height') + height));
+}
+
+function foldLead(tablix: XmlElement): void {
+  const columnsEl = child(tablix, 'TablixBody/TablixColumns');
+  const members = child(tablix, 'TablixColumnHierarchy/TablixMembers');
+  if (!columnsEl || !members || descendants(child(tablix, 'TablixColumnHierarchy')!).some((e) => e.name === 'Group')) return;
+  const widths = widthsOf(tablix);
+  const n = widths.length;
+  const rows = rowsOf(tablix);
+  const leaves = rowLeaves(tablix);
+  if (n < 3 || leaves.length !== rows.length || childElements(members, 'TablixMember').length !== n) return;
+  const spanOf = (cell: XmlElement) => Number(textOf(child(child(cell, 'CellContents') ?? el('x'), 'ColSpan')) || 1);
+  const setSpan = (cell: XmlElement, k: number) => {
+    const contents = child(cell, 'CellContents')!;
+    removeChildren(contents, ['ColSpan']);
+    if (k > 1) contents.children.push(el('ColSpan', String(k)));
+  };
+  const empty = (cell: XmlElement) => descendants(cell).every((e) => (e.name === 'Value' ? !textOf(e).trim() : !/^(Line|Image|Chart|Subreport|Tablix|Map|GaugePanel)$/.test(e.name)));
+  const shown = (cell: XmlElement) => { const it = cellItem(cell); const inside = it?.name === 'Rectangle' ? childElements(child(it, 'ReportItems') ?? el('x')).filter((e) => ITEMS.has(e.name)) : []; return inside.length === 1 ? inside[0] : it; };
+  const head = rows.findIndex((row, i) => {
+    const items = cellsOf(row).map(shown).filter((t) => t && !isBlank(t));
+    return leaves[i]!.kind === 'heading' && items.length >= 3 && items.every((t) => t!.name === 'Textbox' && fixedText(t!) !== undefined);
+  });
+  if (head < 0) return;
+  const hc = cellsOf(rows[head]!);
+  if (hc.length !== n || !empty(hc[0]!) || empty(hc[1]!)) return;
+  const fits = rows.every((row) => {
+    const cells = cellsOf(row);
+    if (!cells.length) return true;
+    return spanOf(cells[0]!) > 1 || empty(cells[0]!) || (cells[1] !== undefined && empty(cells[1]!));
+  });
+  if (!fits) return;
+  const w = widths[0]!;
+  for (const row of rows) {
+    const cells = cellsOf(row);
+    if (!cells.length) continue;
+    const holder = child(row, 'TablixCells')!;
+    if (spanOf(cells[0]!) > 1) {
+      setSpan(cells[0]!, spanOf(cells[0]!) - 1);
+      holder.children = holder.children.filter((c) => c !== cells[1]);
+    } else if (empty(cells[0]!)) {
+      holder.children = holder.children.filter((c) => c !== cells[0]);
+      const item = cellItem(cells[1]!);
+      if (item?.name === 'Textbox') pad(item, { left: w });
+      else if (item?.name === 'Rectangle') for (const e of childElements(child(item, 'ReportItems') ?? el('x')).filter((x) => child(x, 'Left'))) setChild(e, 'Left', inch(len(e, 'Left') + w));
+    } else {
+      setSpan(cells[0]!, spanOf(cells[1]!));
+      holder.children = holder.children.filter((c) => c !== cells[1]);
+    }
+  }
+  const columnList = childElements(columnsEl, 'TablixColumn');
+  setChild(columnList[1]!, 'Width', inch(widths[1]! + w));
+  columnsEl.children = columnsEl.children.filter((c) => c !== columnList[0]);
+  const memberList = childElements(members, 'TablixMember');
+  members.children = members.children.filter((c) => c !== memberList[0]);
 }
 
 function foldMargins(tablix: XmlElement): void {
