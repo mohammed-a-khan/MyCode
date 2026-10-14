@@ -756,6 +756,7 @@ const summaryNames = new WeakMap<XmlElement, string>();
 const underRule = new WeakSet<XmlElement>();
 const boxedHeads = new WeakSet<XmlElement>();
 const summaryHeights = new WeakMap<XmlElement, number>();
+const totalBoxes = new WeakMap<XmlElement, { left: number; right: number }>();
 const summaryPads = new WeakMap<XmlElement, [string, string]>();
 
 function parentOf(root: XmlElement, target: XmlElement): XmlElement {
@@ -1010,6 +1011,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     const T = rename(tablix, 'table');
     const container = parents.get(tablix);
     foldOverlays(tablix);
+    noteTotals(tablix);
     foldMargins(tablix);
     restack(tablix, tablix === tablixes[0]);
     foldMargins(tablix);
@@ -1315,7 +1317,11 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           const tst = t ? childElements(t, 'Style')[0] : undefined;
           if (!t || !TOTALLED.test(valueOf(t)) || !/solid|dashed|dotted|double/i.test(textOf(child(tst, 'TopBorder/Style'))) || /solid|dashed|dotted|double/i.test(textOf(child(tst, 'Border/Style')))) return undefined;
           const room = colWidths.slice(c, c + Number(textOf(child(child(cell, 'CellContents'), 'ColSpan')) || 1)).reduce((x, y) => x + y, 0);
-          return { c, t, short: len(t, 'Left') > 0.02 || room - len(t, 'Left') - len(t, 'Width') > 0.02 };
+          const was = totalBoxes.get(t);
+          const at = colWidths.slice(0, c).reduce((x, y) => x + y, 0);
+          const right = was ? Math.min(room, Math.max(0.02, was.right - at)) : len(t, 'Left') + len(t, 'Width');
+          const left = was ? Math.min(right - 0.02, Math.max(0, was.left - at)) : len(t, 'Left');
+          return { c, t, left, width: right - left, short: left > 0.02 || room - right > 0.02 };
         });
         if (!ruled.some((r) => r?.short)) continue;
         const height = 0.04;
@@ -1327,7 +1333,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           const hidden = textOf(child(r.t, 'Visibility/Hidden')).replace(/^=/, '').trim();
           const shownValue = valueOf(r.t).replace(/^=/, '').trim();
           const off = [hidden && hidden !== 'false' ? `(${hidden})` : '', shownValue ? `IsNothing(${shownValue})` : ''].filter(Boolean).join(' OrElse ');
-          const line = el('Line', { Name: `__ruleLine_${c}` }, el('Top', inch(height - 0.01)), el('Left', inch(len(r.t, 'Left'))), el('Height', '0in'), el('Width', inch(len(r.t, 'Width'))),
+          const line = el('Line', { Name: `__ruleLine_${c}` }, el('Top', inch(height - 0.01)), el('Left', inch(r.left)), el('Height', '0in'), el('Width', inch(r.width)),
             off ? el('Visibility', el('Hidden', `=${off}`)) : null,
             el('Style', el('Border', ...childElements(border ?? el('Border', el('Style', 'Solid'))).map((e) => structuredClone(e)))));
           removeChildren(st, ['TopBorder']);
@@ -2132,6 +2138,12 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     files['.sql'] = procedures.text;
   }
   // Notes the conversion made that no longer apply (the shared data source replaces the connection).
+  for (const tb of descendants(report).filter((e) => e.name === 'Textbox' && /_ColTxt$/i.test(e.attributes.Name ?? ''))) {
+    const st = childElements(tb, 'Style')[0];
+    if (!st) continue;
+    for (const side of ['PaddingTop', 'PaddingBottom']) if (!textOf(child(st, side)).startsWith('=')) setChild(st, side, '0pt');
+    setChild(st, 'VerticalAlign', 'Middle');
+  }
   const lead = tablixes[0];
   if (lead && foldLead(lead, review)) {
     for (const row of rowsOf(lead)) {
@@ -2815,6 +2827,28 @@ function takeBlock(tablix: XmlElement, container: XmlElement): void {
   child(tablix, 'TablixRowHierarchy/TablixMembers')!.children.unshift(el('TablixMember', el('KeepWithGroup', 'After'), repeat ? el('RepeatOnNewPage', 'true') : null));
   setChild(tablix, 'Top', inch(top));
   setChild(tablix, 'Height', inch(len(tablix, 'Height') + height));
+}
+
+function noteTotals(tablix: XmlElement): void {
+  const widths = widthsOf(tablix);
+  const starts = widths.map((_, k) => widths.slice(0, k).reduce((x, y) => x + y, 0));
+  const spanOf = (cell: XmlElement) => Number(textOf(child(child(cell, 'CellContents') ?? el('x'), 'ColSpan')) || 1);
+  for (const row of rowsOf(tablix)) {
+    for (let k = 0, c = 0, cells = cellsOf(row); k < cells.length; k++) {
+      const cell = cells[k]!;
+      if (!child(cell, 'CellContents')) continue;
+      const span = spanOf(cell);
+      const it = cellItem(cell);
+      const inside = it?.name === 'Rectangle' ? childElements(child(it, 'ReportItems') ?? el('x')).filter((e) => e.name === 'Textbox') : it?.name === 'Textbox' ? [it] : [];
+      for (const t of inside) {
+        if (!TOTALLED.test(valueOf(t)) || !/solid|dashed|dotted|double/i.test(textOf(child(childElements(t, 'Style')[0] ?? el('x'), 'TopBorder/Style')))) continue;
+        const left = starts[c]! + (t === it ? 0 : len(t, 'Left'));
+        const width = t === it ? widths.slice(c, c + span).reduce((x, y) => x + y, 0) : len(t, 'Width');
+        totalBoxes.set(t, { left, right: left + width });
+      }
+      c += span;
+    }
+  }
 }
 
 function foldLead(tablix: XmlElement, review: ReviewNote[]): boolean {
