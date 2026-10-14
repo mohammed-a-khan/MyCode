@@ -1367,6 +1367,8 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           const line = el('Line', { Name: `__ruleLine_${c}` }, el('Top', inch(height - 0.01)), el('Left', inch(r.left)), el('Height', '0in'), el('Width', inch(r.width)),
             off ? el('Visibility', el('Hidden', `=${off}`)) : null,
             el('Style', el('Border', ...childElements(border ?? el('Border', el('Style', 'Solid'))).map((e) => structuredClone(e)))));
+          const drawn = child(child(line, 'Style')!, 'Border')!;
+          setChild(drawn, 'Width', `${Math.max(1.5, (inches(textOf(child(drawn, 'Width'))) ?? 0) * 72).toFixed(2)}pt`);
           removeChildren(st, ['TopBorder']);
           setChild(st, 'VerticalAlign', 'Top');
           setChild(st, 'PaddingTop', '0pt');
@@ -2200,7 +2202,14 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     for (const row of rowsOf(tablix)) {
       const height = summaryHeights.get(row);
       const label = cellItem(cellsOf(row)[0] ?? el('x'));
-      const wraps = !!label && summaryPads.has(label) && fixedText(label) !== undefined && (wrapLines(label, first, DESIGN_FONT) ?? 1) > 1;
+      const widths = widthsOf(tablix);
+      const wraps = !!label && summaryPads.has(label) && fixedText(label) !== undefined && (wrapLines(label, first, DESIGN_FONT) ?? 1) > 1
+        || cellsOf(row).some((cell, k) => {
+          const t = cellItem(cell);
+          const name = t?.name === 'Textbox' ? summaryNames.get(t) ?? '' : '';
+          const paired = /_HdrTxt$/.test(name) && cellsOf(row).some((c) => { const v = cellItem(c); return !!v && summaryNames.get(v) === name.replace(/_HdrTxt$/, '_HdrVal'); });
+          return k > 0 && paired && fixedText(t!) !== undefined && (wrapLines(t!, widths[k]!, DESIGN_FONT) ?? 1) > 1;
+        });
       if (height !== undefined && (folded && tablix === lead || (wraps && len(row, 'Height') > height + 0.1))) { setChild(row, 'Height', inch(height)); planned = true; }
     }
     if (planned) setChild(tablix, 'Height', inch(rowsOf(tablix).reduce((sum, row) => sum + len(row, 'Height'), 0)));
