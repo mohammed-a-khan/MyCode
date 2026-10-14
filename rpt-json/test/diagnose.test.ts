@@ -458,6 +458,7 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
       formulas: [{ name: 'Group #1 Order', index: 1, kind: 'internal', text: '', referencedFields: ['T.Code'] }],
       layout: [
         { name: 'PageHeaderArea1', sections: [{ name: 'PH', height: 1600, objects: [t('Title', 'Items in Detail', 300, 300, 8000, { align: 'center' }),
+          { kind: 'box', name: 'Frame', ...box(250, 1150, 6400, 2000), border: { sides: [1, 1, 1, 1], width: 20 } },
           t('CodeHeading', 'Code', 300, 1200, 800, { align: 'center' }), t('NameHeading', 'Name', 1300, 1200, 2000, { align: 'center' }),
           t('AmountHeading', 'Amount', 3500, 1200, 1400, { align: 'center' }), t('RunningHeading', 'Running', 5100, 1200, 1400, { align: 'center' })] }] },
         ...['PageFooterArea1', 'ReportHeaderArea1', 'ReportFooterArea1'].map((name) => ({ name, sections: [{ name, height: 0, objects: [] }] })),
@@ -476,5 +477,8 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     const amount = descendants(tablix).find((e) => e.attributes.Name === 'Items_Tab_1_Amount_ColVal')!;
     assert.ok(child(childElements(amount, 'Style')[0]!, 'LeftBorder'), 'the line beside the value');
     assert.ok(!child(childElements(amount, 'Style')[0]!, 'TopBorder'), 'an upright line is no rule along the row');
+    assert.ok(child(childElements(amount, 'Style')[0]!, 'RightBorder'), 'the next column\'s line also on this side, so it moves with the column');
+    const running = descendants(tablix).find((e) => e.name === 'Textbox' && /Running_(Sub)?(TotVal|total)$/i.test(e.attributes.Name ?? ''))!;
+    assert.ok(child(childElements(running, 'Style')[0]!, 'RightBorder'), 'the frame closes the last column');
   });
 });
