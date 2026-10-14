@@ -757,7 +757,7 @@ const summaryNames = new WeakMap<XmlElement, string>();
 const underRule = new WeakSet<XmlElement>();
 const boxedHeads = new WeakSet<XmlElement>();
 const summaryHeights = new WeakMap<XmlElement, number>();
-const totalBoxes = new WeakMap<XmlElement, { left: number; right: number }>();
+const totalBoxes = new WeakMap<XmlElement, { left: number; right: number; top: number }>();
 const summaryPads = new WeakMap<XmlElement, [string, string]>();
 
 function parentOf(root: XmlElement, target: XmlElement): XmlElement {
@@ -1322,10 +1322,10 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           const at = colWidths.slice(0, c).reduce((x, y) => x + y, 0);
           const right = was ? Math.min(room, Math.max(0.02, was.right - at)) : len(t, 'Left') + len(t, 'Width');
           const left = was ? Math.min(right - 0.02, Math.max(0, was.left - at)) : len(t, 'Left');
-          return { c, t, left, width: right - left, short: left > 0.02 || room - right > 0.02 };
+          return { c, t, left, width: right - left, short: left > 0.02 || room - right > 0.02, top: was?.top ?? 0 };
         });
         if (!ruled.some((r) => r?.short)) continue;
-        const height = 0.04;
+        const height = Math.max(0.04, Math.min(0.12, Math.min(...ruled.filter((r) => r).map((r) => r!.top)) + 0.03));
         const cells = cellsOf(row).map((cell, c) => {
           const r = ruled[c];
           if (!r) return el('TablixCell', el('CellContents', newTextbox(`__rule_${c}`, '', '0pt')));
@@ -2858,7 +2858,7 @@ function noteTotals(tablix: XmlElement): void {
         if (!TOTALLED.test(valueOf(t)) || !/solid|dashed|dotted|double/i.test(textOf(child(childElements(t, 'Style')[0] ?? el('x'), 'TopBorder/Style')))) continue;
         const left = starts[c]! + (t === it ? 0 : len(t, 'Left'));
         const width = t === it ? widths.slice(c, c + span).reduce((x, y) => x + y, 0) : len(t, 'Width');
-        totalBoxes.set(t, { left, right: left + width });
+        totalBoxes.set(t, { left, right: left + width, top: t === it ? 0 : len(t, 'Top') });
       }
       c += span;
     }
