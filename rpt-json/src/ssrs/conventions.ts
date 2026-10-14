@@ -1539,6 +1539,14 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       }
       colNames.push(name);
     }
+    const summaryKeys = new Map<string, string>();
+    const clash = (key: string) => colNames.some((c) => !!c && key.toLowerCase().endsWith(c.toLowerCase()));
+    for (const tb of descendants(tablix).filter((e) => e.name === 'Textbox' && /_HdrTxt$/.test(summaryNames.get(e) ?? ''))) {
+      const key = summaryNames.get(tb)!.replace(/_HdrTxt$/, '');
+      const own = /^=Fields!(\w+)\.Value$/.exec(valueOf(tb).trim())?.[1];
+      if (own && clash(key) && !clash(own)) summaryKeys.set(key, own);
+      else if (clash(key)) review.push({ item: `Table ${T}`, message: `the summary label for ${key} ends with a column's name: where reports are combined it is counted with that column's label` });
+    }
     if (tablix === tablixes[0]) {
       const total = widthsOf(tablix).length;
       for (const row of rowsOf(tablix)) {
@@ -1739,7 +1747,8 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
         const cellName = (tb: XmlElement) => {
           if (named.has(tb)) return tb.attributes.Name;
           if (summaryNames.has(tb)) {
-            const name = names.make(`${T}_${summaryNames.get(tb)}`);
+            const word = summaryNames.get(tb)!.replace(/^(.*)_(HdrTxt|HdrVal)$/, (all, key: string, kind: string) => (summaryKeys.has(key) ? `${summaryKeys.get(key)}_${kind}` : all));
+            const name = names.make(`${T}_${word}`);
             if (tb.attributes.Name && tb.attributes.Name !== name) { itemRenames.set(tb.attributes.Name, name); scopeRenames.set(tb.attributes.Name, name); }
             tb.attributes.Name = name;
             named.add(tb);
