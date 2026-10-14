@@ -385,7 +385,9 @@ function restack(tablix: XmlElement, whole = false): void {
           const alone = (within < 0 || within >= span) && single && !isBlank(single) && !/Fields!|Parameters!|\b(Sum|Count|First)\(/i.test(valueOf(single)) ? single : undefined;
           if (tb) {
             rules.children = rules.children.filter((x) => x !== tb);
+            const inset = Math.min(Math.max(0, len(tb, 'Left') - starts[within]!), widths[k]! / 2);
             unplace(tb);
+            if (inset > 0.02 && !/center|right/i.test(textAlignOf(tb))) pad(tb, { left: inset });
             content = tb;
           } else if (alone) {
             const holder = cells.find((x) => cellItem(x) === above)!;
@@ -2652,6 +2654,7 @@ function summarize(tablix: XmlElement): void {
     if (after) headerCols.clear();
     const value = line.find((it) => isField(it.t) && it !== line[0]);
     const label = value && line[0]!.x < value.x && !headerCols.has(colOf(line[0]!)) ? line[0] : undefined;
+    let labelAside = false;
     const place = (it: Item, want: number) => {
       let k = want;
       for (let d = 0; d < n && slots[k] !== undefined; d++) k = want + d < n && slots[want + d] === undefined ? want + d : want - d >= 0 && slots[want - d] === undefined ? want - d : k;
@@ -2687,7 +2690,7 @@ function summarize(tablix: XmlElement): void {
       else if (k > 0 && st && textOf(child(st, 'VerticalAlign')) !== 'Bottom') {
         const room = Math.max(0, widths[k]! - it.w);
         const left = Math.min(Math.max(0, it.x - starts[k]!), room);
-        const right = Math.min(Math.max(0, starts[k]! + widths[k]! - it.x - it.w), it.right ? Math.max(room, widths[k]! - 1.3) : room);
+        const right = Math.min(Math.max(0, starts[k]! + widths[k]! - it.x - it.w), it.right ? Math.max(room, widths[k]! - (labelAside ? 0.9 : 1.3)) : room);
         const at = (v: number) => `${Math.max(2, Math.round(v * 720) / 10)}pt`;
         const align = it.right ? 'right' : /center/i.test(textAlignOf(it.t)) ? 'center' : 'left';
         if (align !== 'right') setChild(st, 'PaddingLeft', at(left));
@@ -2722,8 +2725,19 @@ function summarize(tablix: XmlElement): void {
       const need = text !== undefined ? arialWidth(text, 8, true) * 1.05 + 0.1 : Math.min(label.w, 2.5);
       const room = (k: number) => widths[k]! - (k === 0 ? Math.max(0, Math.min(label.x, widths[0]! / 2)) : 0);
       const open = Array.from({ length: valueCol }, (_, k) => k);
-      const labelCol = room(0) >= need ? 0 : open.find((k) => starts[k]! + widths[k]! > label.x && room(k) >= need) ?? open.reduce((a, k) => (widths[k]! > widths[a]! ? k : a), 0);
+      const at = open.filter((k) => starts[k]! <= label.x + 0.01).pop() ?? 0;
+      const inset = label.x - starts[at]!;
+      let across = 1;
+      while (at > 0 && room(0) < need && at + across < valueCol && widths.slice(at, at + across).reduce((x, y) => x + y, 0) - inset < need) across++;
+      const spans = at > 0 && room(0) < need && across > 1 && widths.slice(at, at + across).reduce((x, y) => x + y, 0) - inset >= need && slots.slice(at, at + across).every((x) => x === undefined);
+      const labelCol = spans ? at : room(0) >= need ? 0 : open.find((k) => starts[k]! + widths[k]! > label.x && room(k) >= need) ?? open.reduce((a, k) => (widths[k]! > widths[a]! ? k : a), 0);
       place(label, labelCol);
+      labelAside = labelCol > 0;
+      if (spans) {
+        for (let k = at + 1; k < at + across; k++) slots[k] = label.t;
+        const st = childElements(label.t, 'Style')[0];
+        if (st) setChild(st, 'PaddingLeft', `${Math.max(2, Math.round(inset * 720) / 10)}pt`);
+      }
       place(value, valueCol);
     }
     for (const it of line) {
@@ -2749,8 +2763,13 @@ function summarize(tablix: XmlElement): void {
       if (st && textOf(child(st, 'VerticalAlign')) !== 'Bottom') setChild(st, 'PaddingTop', `${Math.round((2 + lead * 72) * 10) / 10}pt`);
     }
     const height = Math.max(Math.max(...line.map((it) => it.h)), (before ? before.y : next) - top) + lead;
-    const cells = slots.map((t) => {
-      if (t) return el('TablixCell', el('CellContents', t));
+    const cells = slots.map((t, k) => {
+      if (t && k > 0 && slots[k - 1] === t) return el('TablixCell');
+      if (t) {
+        const width = slots.slice(k).findIndex((x) => x !== t);
+        const span = width < 0 ? slots.length - k : width;
+        return el('TablixCell', el('CellContents', t, span > 1 ? el('ColSpan', String(span)) : null));
+      }
       const blank = newTextbox(`__summary_${blanks}`, '', '0pt');
       summaryNames.set(blank, `Txt_${++blanks}`);
       return el('TablixCell', el('CellContents', blank));
