@@ -1014,6 +1014,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     if (headerTitle && tablix === tablixes[0] && container) takeBlock(tablix, container);
     summarize(tablix);
     if (tablix === tablixes[0]) closeGap(tablix);
+    if (tablix === tablixes[0]) foldLead(tablix, review);
     const widths = widthsOf(tablix);
     const columns = widths.length;
     const isNumber = (tb: XmlElement) => {
@@ -2568,6 +2569,10 @@ function summarize(tablix: XmlElement): void {
       unplace(it.t);
       const st = childElements(it.t, 'Style')[0];
       if (st) for (const side of ['PaddingLeft', 'PaddingRight', 'PaddingTop', 'PaddingBottom']) setChild(st, side, '2pt');
+      if (st) {
+        setChild(st, 'VerticalAlign', 'Top');
+        underRule.add(it.t);
+      }
       if (st && widths[k]! > it.w * 1.5 && fixedText(it.t) !== undefined && /solid/i.test(textOf(child(child(st, 'BottomBorder') ?? el('x'), 'Style') ?? el('x')))) {
         const border = structuredClone(child(st, 'BottomBorder')!);
         removeChildren(st, ['BottomBorder']);
@@ -2588,7 +2593,7 @@ function summarize(tablix: XmlElement): void {
         underRule.add(it.t);
       }
       if (k === 0 && !it.right && !/center/i.test(textAlignOf(it.t))) pad(it.t, { left: Math.max(0, Math.min(it.x - starts[k]!, widths[k]! / 2)) });
-      else if (k > 0 && st && !underRule.has(it.t)) {
+      else if (k > 0 && st && textOf(child(st, 'VerticalAlign')) !== 'Bottom') {
         const room = Math.max(0, widths[k]! - it.w);
         const left = Math.min(Math.max(0, it.x - starts[k]!), room);
         const right = Math.min(Math.max(0, starts[k]! + widths[k]! - it.x - it.w), room);
@@ -2610,6 +2615,8 @@ function summarize(tablix: XmlElement): void {
         const style = structuredClone(childElements(run, 'Style')[0] ?? el('Style'));
         removeChildren(style, ['Format']);
         para.children.push(el('TextRun', el('Value', `\u00a0\u00a0${(fixedText(mark.t) ?? '').trim()}`), style));
+        const paragraph = descendants(value.t).find((e) => e.name === 'Paragraph');
+        if (paragraph) setChild(ownStyle(paragraph), 'TextAlign', 'Right');
         value.w = mark.x + mark.w - value.x;
         value.right = true;
         line.splice(line.indexOf(mark), 1);
@@ -2663,9 +2670,8 @@ function summarize(tablix: XmlElement): void {
       const st = childElements(t, 'Style')[0];
       if (!st) continue;
       removeChildren(st, [side]);
-      if (underRule.has(t)) {
-        underRule.delete(t);
-        removeChildren(st, ['VerticalAlign']);
+      if (textOf(child(st, 'VerticalAlign')) === 'Bottom') {
+        setChild(st, 'VerticalAlign', 'Top');
         setChild(st, 'PaddingBottom', '2pt');
       }
     }
@@ -2835,14 +2841,14 @@ function foldLead(tablix: XmlElement, review: ReviewNote[]): void {
     if (spanOf(cells[0]!) > 1) {
       setSpan(cells[0]!, spanOf(cells[0]!) - 1);
       holder.children = holder.children.filter((c) => c !== cells[1]);
-    } else if (empty(cells[0]!)) {
+    } else if (cells[1] !== undefined && empty(cells[1]!)) {
+      setSpan(cells[0]!, spanOf(cells[1]!));
+      holder.children = holder.children.filter((c) => c !== cells[1]);
+    } else {
       holder.children = holder.children.filter((c) => c !== cells[0]);
       const item = cellItem(cells[1]!);
       if (item?.name === 'Textbox') pad(item, { left: w });
       else if (item?.name === 'Rectangle') for (const e of childElements(child(item, 'ReportItems') ?? el('x')).filter((x) => child(x, 'Left'))) setChild(e, 'Left', inch(len(e, 'Left') + w));
-    } else {
-      setSpan(cells[0]!, spanOf(cells[1]!));
-      holder.children = holder.children.filter((c) => c !== cells[1]);
     }
   }
   const columnList = childElements(columnsEl, 'TablixColumn');
