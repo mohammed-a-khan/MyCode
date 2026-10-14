@@ -2191,6 +2191,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     setChild(st, 'VerticalAlign', 'Middle');
   }
   for (const tablix of tablixes) { alignTotals(tablix); pairSides(tablix); }
+  for (const tablix of tablixes) repeatTogether(tablix);
   const lead = tablixes[0];
   const folded = !!lead && foldLead(lead, review);
   for (const tablix of tablixes) {
@@ -2908,6 +2909,24 @@ function foldOverlays(tablix: XmlElement): void {
       }
     }
   });
+}
+
+function repeatTogether(tablix: XmlElement): void {
+  const holder = child(tablix, 'TablixRowHierarchy/TablixMembers');
+  if (!holder) return;
+  const members = childElements(holder, 'TablixMember');
+  const at = members.findIndex((m) => descendants(m).some((e) => e.name === 'Group'));
+  if (at < 1) return;
+  const repeats = (m: XmlElement) => textOf(child(m, 'RepeatOnNewPage')) === 'true';
+  const before = members.slice(0, at);
+  if (before.every(repeats) || !before.some(repeats)) return;
+  let from = at;
+  while (from > 0 && repeats(members[from - 1]!)) from--;
+  if (before.slice(0, from).some(repeats)) for (const m of before.slice(0, from)) removeChildren(m, ['RepeatOnNewPage']);
+  for (const m of before.slice(0, from)) removeChildren(m, ['KeepWithGroup']);
+  const inner = members.slice(from);
+  holder.children = holder.children.filter((c) => typeof c !== 'object' || !inner.includes(c as XmlElement));
+  holder.children.push(el('TablixMember', el('TablixMembers', ...inner)));
 }
 
 function alignTotals(tablix: XmlElement): void {

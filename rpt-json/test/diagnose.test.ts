@@ -511,10 +511,18 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     assert.ok(names.includes('Items_Tab_1_Name_ColTxt') && names.includes('Items_Tab_1_Amount_ColTxt'), names.join(' '));
     assert.ok(names.some((n) => /Base_HdrTxt$/.test(n)) && names.some((n) => /Other_HdrTxt$/.test(n)) && names.some((n) => /Other_HdrVal$/.test(n)));
     assert.ok(!descendants(tablix).some((e) => e.name === 'Group' && /grp_[23]/.test(e.attributes.Name ?? '')), 'no groups of their own for the constant ones');
-    const members = childElements(child(tablix, 'TablixRowHierarchy/TablixMembers')!, 'TablixMember');
+    const leaves = (holder: XmlElement): XmlElement[] => childElements(holder, 'TablixMember').flatMap((m) => (child(m, 'TablixMembers') ? leaves(child(m, 'TablixMembers')!) : [m]));
+    const members = leaves(child(tablix, 'TablixRowHierarchy/TablixMembers')!);
     const rows = childElements(child(tablix, 'TablixBody/TablixRows')!, 'TablixRow');
     const repeats = (name: RegExp) => { const i = rows.findIndex((r) => descendants(r).some((e) => name.test(e.attributes.Name ?? ''))); return textOf(child(members[i]!, 'RepeatOnNewPage')) === 'true'; };
     assert.ok(!repeats(/Base_HdrTxt$/), 'the block above the headings prints once');
     assert.ok(repeats(/Name_ColTxt$/), 'the headings print on every page');
+    for (const holder of descendants(child(tablix, 'TablixRowHierarchy')!).filter((e) => e.name === 'TablixMembers')) {
+      const kids = childElements(holder, 'TablixMember');
+      const at = kids.findIndex((m) => child(m, 'Group'));
+      if (at < 0) continue;
+      const before = new Set(kids.slice(0, at).map((m) => textOf(child(m, 'RepeatOnNewPage')) === 'true'));
+      assert.ok(before.size <= 1, 'the rows beside a group repeat alike');
+    }
   });
 });
