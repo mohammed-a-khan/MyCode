@@ -658,7 +658,8 @@ function restack(tablix: XmlElement, whole = false): void {
     const cells = cellsOf(row);
     const placedIn = cells.map((cell) => { const item = cellItem(cell); return item?.name === 'Rectangle' ? inner(item) : []; });
     const ruled = placedIn.flat().filter((e) => e.name === 'Textbox' && ruledAbove(e));
-    const skip = ruled.length ? Math.max(0, Math.min(...ruled.map((e) => len(e, 'Top'))) - 0.028) : 0;
+    const topmost = Math.min(...placedIn.flat().filter((e) => child(e, 'Top')).map((e) => len(e, 'Top')));
+    const skip = ruled.length && Math.min(...ruled.map((e) => len(e, 'Top'))) <= topmost + 0.02 ? Math.max(0, topmost - 0.028) : 0;
     if (skip > 0.01) for (const e of placedIn.flat()) if (child(e, 'Top')) setChild(e, 'Top', inch(Math.max(0, len(e, 'Top') - skip)));
     const leaf = members[r]?.member;
     if (!leaf || child(leaf, 'Group') || members[r]!.kind === 'detail' || members[r]!.kind === 'noData') continue;
@@ -2145,11 +2146,19 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     setChild(st, 'VerticalAlign', 'Middle');
   }
   const lead = tablixes[0];
-  if (lead && foldLead(lead, review)) {
-    for (const row of rowsOf(lead)) {
-      const planned = summaryHeights.get(row);
-      if (planned !== undefined) setChild(row, 'Height', inch(planned));
+  const folded = !!lead && foldLead(lead, review);
+  for (const tablix of tablixes) {
+    let planned = false;
+    const first = widthsOf(tablix)[0] ?? 0;
+    for (const row of rowsOf(tablix)) {
+      const height = summaryHeights.get(row);
+      const label = cellItem(cellsOf(row)[0] ?? el('x'));
+      const wraps = !!label && summaryPads.has(label) && fixedText(label) !== undefined && (wrapLines(label, first, DESIGN_FONT) ?? 1) > 1;
+      if (height !== undefined && (folded && tablix === lead || (wraps && len(row, 'Height') > height + 0.1))) { setChild(row, 'Height', inch(height)); planned = true; }
     }
+    if (planned) setChild(tablix, 'Height', inch(rowsOf(tablix).reduce((sum, row) => sum + len(row, 'Height'), 0)));
+  }
+  if (lead && folded) {
     for (const tb of descendants(lead).filter((e) => e.name === 'Textbox' && summaryPads.has(e))) {
       const [padLeft, padRight] = summaryPads.get(tb)!;
       const st = childElements(tb, 'Style')[0];
@@ -2675,7 +2684,12 @@ function summarize(tablix: XmlElement): void {
     }
     const top = line[0]!.y;
     const next = lines[li + 1]?.[0]?.y ?? y0;
-    const height = Math.max(Math.max(...line.map((it) => it.h)), next - top);
+    const lead = li === 0 && top > 0.08 ? top : 0;
+    for (const t of lead ? slots : []) {
+      const st = t && childElements(t, 'Style')[0];
+      if (st && textOf(child(st, 'VerticalAlign')) !== 'Bottom') setChild(st, 'PaddingTop', `${Math.round((2 + lead * 72) * 10) / 10}pt`);
+    }
+    const height = Math.max(Math.max(...line.map((it) => it.h)), next - top) + lead;
     const cells = slots.map((t) => {
       if (t) return el('TablixCell', el('CellContents', t));
       const blank = newTextbox(`__summary_${blanks}`, '', '0pt');
