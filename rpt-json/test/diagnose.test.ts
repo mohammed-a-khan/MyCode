@@ -412,4 +412,39 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     assert.ok(names.includes('Orders_Tab_1_Name_ColTxt') && names.includes('Orders_Tab_1_Code_ColTxt'));
     assert.ok(!names.some((n) => /Empty_ColVal/.test(n)), 'the message is no item of its own');
   });
+  it('folds an unlabelled first column into the next, keeps a full-width message as text, and hides an empty total and its rule', () => {
+    const src = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Name', type: 'string' }, { name: 'Code', type: 'string' }, { name: 'Amount', type: 'currency' }, { name: 'Kind', type: 'string' }, { name: 'Flag', type: 'number' }] }] } as never;
+    const box = (x: number, y: number, width: number, height: number) => ({ position: { x, y }, size: { width, height } });
+    const t = (name: string, value: string, x: number, y: number, w: number, extra = {}) => ({ kind: 'text', name, text: value, style: { size: 8 }, ...box(x, y, w, 240), ...extra });
+    const f = (name: string, fld: string, x: number, y: number, w: number, extra = {}) => ({ kind: 'field', name, field: fld, style: { size: 8 }, ...box(x, y, w, 210), ...extra });
+    const line = (name: string, y: number) => ({ kind: 'line', name, ...box(0, y, 8640, 0), border: { sides: [0, 0, 1, 0], width: 60 } });
+    const definition = {
+      saveInfo: {}, selectionFormulas: {}, sqlExpressions: [], parameters: [], groups: ['@all', 'T.Kind'], sortFields: [], summarizedFields: [],
+      formulas: [{ name: 'all', index: 1, kind: 'formula', text: 'WhileReadingRecords; "All"', referencedFields: [] },
+        { name: 'Empty', index: 2, kind: 'formula', text: 'if {T.Flag} = 0 then "NONE THIS PERIOD"', referencedFields: ['T.Flag'] },
+        { name: 'Off', index: 3, kind: 'conditionalFormat', text: '{T.Flag}=0', referencedFields: ['T.Flag'] },
+        { name: 'Group #1 Order', index: 4, kind: 'internal', text: '', referencedFields: ['@all'] },
+        { name: 'Group #2 Order', index: 5, kind: 'internal', text: '', referencedFields: ['T.Kind'] }],
+      layout: [
+        ...['PageHeaderArea1', 'PageFooterArea1', 'ReportHeaderArea1', 'ReportFooterArea1'].map((name) => ({ name, sections: [{ name, height: 0, objects: [] }] })),
+        { name: 'GroupHeaderArea1', sections: [{ name: 'GH1', height: 900, objects: [t('Title', 'Orders in Detail', 0, 0, 8640, { align: 'center', style: { size: 11, bold: true } }), line('Rule', 300),
+          t('NameHeading', 'Name', 1200, 480, 3000, { align: 'center' }), t('CodeHeading', 'Code', 4320, 480, 1440, { align: 'center' }), t('AmountHeading', 'Amount', 5760, 480, 1440, { align: 'center' }), line('Under', 800)] }] },
+        { name: 'GroupFooterArea1', sections: [{ name: 'GF1', height: 0, objects: [] }] },
+        { name: 'GroupHeaderArea2', sections: [{ name: 'GH2', height: 240, objects: [f('Kind', 'Group #2', 0, 0, 4000)] }] },
+        { name: 'GroupFooterArea2', sections: [{ name: 'GF2', height: 240, objects: [t('Label', 'TOTALS:', 400, 20, 1200), f('Sum', 'Sum of T.Amount', 6200, 20, 1000, { align: 'right', border: { sides: [0, 0, 1, 0], width: 20 }, conditions: { suppress: { name: 'Off', index: 3 } } })] }] },
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 270, objects: [f('N', 'T.Name', 1200, 30, 3000), f('M', '@Empty', 300, 60, 5000), f('K', 'T.Code', 4320, 0, 1440), f('V', 'T.Amount', 5760, 0, 1440, { align: 'right' })] }] },
+      ],
+    } as unknown as ReportDefinition;
+    const root = parseXml(applyConventions(convertToRdl(definition, src, { reportName: 'Orders', formulasInQuery: true, rulesAsText: true }).rdl, 'Orders', conventions).rdl);
+    const tablix = descendants(root).find((e) => e.name === 'Tablix')!;
+    const names = descendants(tablix).filter((e) => e.name === 'Textbox').map((e) => e.attributes.Name ?? '');
+    const columns = childElements(child(tablix, 'TablixBody/TablixColumns')!, 'TablixColumn').length;
+    assert.equal(columns, names.filter((n) => /_ColTxt$/.test(n)).length, 'one column per heading');
+    assert.ok(names.includes('Orders_Tab_1_Name_ColTxt') && names.includes('Orders_Tab_1_Name_ColVal'));
+    assert.ok(!names.some((n) => /Empty_ColVal/.test(n)), 'a message across the table is no column value');
+    const rule = descendants(tablix).find((e) => e.name === 'Line' && /Amount/.test(e.attributes.Name ?? ''))!;
+    assert.match(textOf(child(rule, 'Visibility/Hidden')), /Flag.*OrElse IsNothing\(Sum\(Fields!Amount\.Value\)\)/);
+    const title = descendants(tablix).find((e) => e.attributes.Name === 'Orders_SchTitle_Txt')!;
+    assert.equal(textOf(child(childElements(title, 'Style')[0]!, 'PaddingBottom')), '4pt', 'room between the title and its rule');
+  });
 });
