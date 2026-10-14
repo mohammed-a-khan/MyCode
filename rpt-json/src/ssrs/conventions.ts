@@ -2189,7 +2189,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     for (const side of ['PaddingTop', 'PaddingBottom']) if (!textOf(child(st, side)).startsWith('=')) setChild(st, side, '0pt');
     setChild(st, 'VerticalAlign', 'Middle');
   }
-  for (const tablix of tablixes) pairSides(tablix);
+  for (const tablix of tablixes) { alignTotals(tablix); pairSides(tablix); }
   const lead = tablixes[0];
   const folded = !!lead && foldLead(lead, review);
   for (const tablix of tablixes) {
@@ -2690,7 +2690,9 @@ function summarize(tablix: XmlElement): void {
       else if (k > 0 && st && textOf(child(st, 'VerticalAlign')) !== 'Bottom') {
         const room = Math.max(0, widths[k]! - it.w);
         const left = Math.min(Math.max(0, it.x - starts[k]!), room);
-        const right = Math.min(Math.max(0, starts[k]! + widths[k]! - it.x - it.w), it.right ? Math.max(room, widths[k]! - (labelAside ? 0.9 : 1.3)) : room);
+        const runs = descendants(it.t).filter((e) => e.name === 'TextRun').slice(1).map((r) => textOf(child(r, 'Value'))).join('');
+        const keep = labelAside && it.right && isField(it.t) ? arialWidth(`000,000,000.00${runs}`, 8, true) * 1.05 + 0.1 : 0;
+        const right = Math.min(Math.max(0, starts[k]! + widths[k]! - it.x - it.w), it.right ? Math.max(room, widths[k]! - (labelAside ? Math.max(0.9, keep) : 1.3)) : room);
         const at = (v: number) => `${Math.max(2, Math.round(v * 720) / 10)}pt`;
         const align = it.right ? 'right' : /center/i.test(textAlignOf(it.t)) ? 'center' : 'left';
         if (align !== 'right') setChild(st, 'PaddingLeft', at(left));
@@ -2722,7 +2724,7 @@ function summarize(tablix: XmlElement): void {
       summaryNames.set(value.t, `${field}_HdrVal`);
       const valueCol = Math.max(1, colOf(value));
       const text = fixedText(label.t);
-      const need = text !== undefined ? arialWidth(text, 8, true) * 1.05 + 0.1 : Math.min(label.w, 2.5);
+      const need = text !== undefined ? arialWidth(text, 8, true) * 1.05 + 0.1 : Math.min(Math.max(label.w, 2), 2.5);
       const room = (k: number) => widths[k]! - (k === 0 ? Math.max(0, Math.min(label.x, widths[0]! / 2)) : 0);
       const open = Array.from({ length: valueCol }, (_, k) => k);
       const at = open.filter((k) => starts[k]! <= label.x + 0.01).pop() ?? 0;
@@ -2870,6 +2872,25 @@ function foldOverlays(tablix: XmlElement): void {
         v.children = [`=IIf(IsNothing(Fields!${f}.Value) OrElse CStr(Fields!${f}.Value) = "", Fields!${plain(under)}.Value, Fields!${f}.Value)`];
         holder.children = holder.children.filter((c) => c !== over);
       }
+    }
+  });
+}
+
+function alignTotals(tablix: XmlElement): void {
+  const leaves = rowLeaves(tablix);
+  rowsOf(tablix).forEach((row, i) => {
+    if (leaves[i]?.kind !== 'total' && leaves[i]?.kind !== 'subtotal') return;
+    const texts = cellsOf(row).map((c) => cellItem(c)).filter((t): t is XmlElement => t?.name === 'Textbox' && !isBlank(t));
+    const totals = texts.filter((t) => TOTALLED.test(valueOf(t)));
+    if (!totals.length || totals.length === texts.length) return;
+    const tops = totals.map((t) => textOf(child(childElements(t, 'Style')[0] ?? el('x'), 'PaddingTop')));
+    const top = tops.every((v) => v === tops[0]) ? tops[0] : undefined;
+    if (!top || top.startsWith('=') || totals.some((t) => textOf(child(childElements(t, 'Style')[0] ?? el('x'), 'VerticalAlign')) !== 'Top')) return;
+    for (const t of texts) {
+      const st = childElements(t, 'Style')[0];
+      if (!st || TOTALLED.test(valueOf(t))) continue;
+      setChild(st, 'VerticalAlign', 'Top');
+      setChild(st, 'PaddingTop', top);
     }
   });
 }
