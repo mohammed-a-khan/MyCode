@@ -1748,7 +1748,8 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           const col = fieldOf(tb) ?? colNames[c] ?? ownWord(tb) ?? `col${c + 1}`;
           if (kind === 'noData') return rename(tb, 'noData', { T });
           const across = Number(textOf(child(child(cell, 'CellContents') ?? el('x'), 'ColSpan')) || 1);
-          if (kind === 'total' && !footerInTable && !isBlank(tb) && across >= Math.max(2, columns - 1) && !/\b(Sum|Count|CountDistinct|Avg|RunningValue)\s*\(/i.test(valueOf(tb))) {
+          if (kind === 'total' && !isBlank(tb) && across >= Math.max(2, columns - 1) && !/\b(Sum|Count|CountDistinct|Avg|RunningValue)\s*\(/i.test(valueOf(tb))) {
+            if (footerInTable) return rename(tb, 'text', { T });
             footerInTable = true;
             roles.set(tb, 'footer');
             return rename(tb, 'footer');
@@ -2754,7 +2755,11 @@ function summarize(tablix: XmlElement): void {
         summaryNames.set(it.t, `${headerCols.get(k)}_HdrVal`);
       } else if (isField(it.t)) {
         summaryNames.set(it.t, `${fieldOf(it.t) ?? 'value'}_HdrVal`);
-      } else summaryNames.set(it.t, `${snake(text ?? 'text') || 'text'}_Txt`);
+      } else {
+        const after = line.filter((o) => o.x > it.x && o !== label && o !== value).sort((p, q) => p.x - q.x)[0];
+        const paired = text !== undefined && /[A-Za-z]{3}/.test(text) && after && isField(after.t) && !headerCols.has(colOf(after)) ? fieldOf(after.t) : undefined;
+        summaryNames.set(it.t, paired ? `${paired}_HdrTxt` : `${snake(text ?? 'text') || 'text'}_Txt`);
+      }
       place(it, k);
     }
     const top = line[0]!.y;
@@ -2811,6 +2816,14 @@ function summarize(tablix: XmlElement): void {
   for (const [row, side] of [[rows[block[0]!]!, 'TopBorder'], [rows[block[block.length - 1]!]!, 'BottomBorder']] as const) {
     const border = edge(row, side);
     const target = side === 'TopBorder' ? built[0]! : built[built.length - 1]!;
+    const above = side === 'TopBorder' && block[0]! > 0 ? cellsOf(rows[block[0]! - 1]!) : [];
+    const whole = above.length && Number(textOf(child(child(above[0]!, 'CellContents') ?? el('x'), 'ColSpan')) || 1) >= n ? cellItem(above[0]!) : undefined;
+    const inside = whole?.name === 'Rectangle' ? childElements(child(whole, 'ReportItems') ?? el('x')).filter((e) => ITEMS.has(e.name)) : [];
+    const title = whole?.name === 'Rectangle' ? (inside.length === 1 ? inside[0] : undefined) : whole;
+    if (border && title?.name === 'Textbox' && fixedText(title) !== undefined && !child(childElements(title, 'Style')[0] ?? el('x'), 'BottomBorder')) {
+      const st = childElements(title, 'Style')[0];
+      if (st) { st.children.push({ ...structuredClone(border), name: 'BottomBorder' }); continue; }
+    }
     if (border) for (const c of cellsOf(target)) { const st = childElements(cellItem(c)!, 'Style')[0]; if (st) { removeChildren(st, [side]); st.children.push(structuredClone(border)); } }
     if (border && side === 'BottomBorder' && built.length > lines.length) for (const c of cellsOf(built[lines.length - 1]!)) {
       const t = cellItem(c)!;
@@ -2850,7 +2863,7 @@ function summarize(tablix: XmlElement): void {
   const holder = descendants(child(tablix, 'TablixRowHierarchy')!).find((e) => e.name === 'TablixMembers' && e.children.includes(member))!;
   const where = holder.children.indexOf(member);
   holder.children = holder.children.filter((m) => !block.some((i) => leaves[i]!.member === m));
-  holder.children.splice(where, 0, ...built.map(() => structuredClone(member)));
+  holder.children.splice(where, 0, ...built.map(() => { const copy = structuredClone(member); removeChildren(copy, ['RepeatOnNewPage']); return copy; }));
   const columnEls = childElements(child(tablix, 'TablixBody/TablixColumns')!, 'TablixColumn');
   for (const r of built) {
     cellsOf(r).forEach((c, k) => {

@@ -481,4 +481,40 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     const running = descendants(tablix).find((e) => e.name === 'Textbox' && /Running_(Sub)?(TotVal|total)$/i.test(e.attributes.Name ?? ''))!;
     assert.ok(child(childElements(running, 'Style')[0]!, 'RightBorder'), 'the frame closes the last column');
   });
+  it('folds nested groups on a constant into the table: headings named and styled, the block above them printed once', () => {
+    const src = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Name', type: 'string' }, { name: 'Amount', type: 'currency' }, { name: 'Base', type: 'currency' }, { name: 'Other', type: 'currency' }] }] } as never;
+    const box = (x: number, y: number, width: number, height: number) => ({ position: { x, y }, size: { width, height } });
+    const t = (name: string, value: string, x: number, y: number, w: number, extra = {}) => ({ kind: 'text', name, text: value, style: { size: 8 }, ...box(x, y, w, 240), ...extra });
+    const f = (name: string, fld: string, x: number, y: number, w: number, extra = {}) => ({ kind: 'field', name, field: fld, style: { size: 8 }, ...box(x, y, w, 210), ...extra });
+    const all = (name: string, index: number) => ({ name, index, kind: 'formula', text: 'WhileReadingRecords; "All"', referencedFields: [] });
+    const order = (n: number, ref: string) => ({ name: `Group #${n} Order`, index: 10 + n, kind: 'internal', text: '', referencedFields: [ref] });
+    const definition = {
+      saveInfo: {}, selectionFormulas: {}, sqlExpressions: [], parameters: [], groups: ['@a', '@b', '@c'], sortFields: [], summarizedFields: [],
+      formulas: [all('a', 1), all('b', 2), all('c', 3), order(1, '@a'), order(2, '@b'), order(3, '@c')],
+      layout: [
+        ...['PageHeaderArea1', 'PageFooterArea1', 'ReportHeaderArea1', 'ReportFooterArea1'].map((name) => ({ name, sections: [{ name, height: 0, objects: [] }] })),
+        { name: 'GroupHeaderArea1', sections: [{ name: 'GH1', height: 288, objects: [t('Title', 'Items in Detail', 0, 0, 8640, { align: 'center' })] }] },
+        { name: 'GroupFooterArea1', sections: [{ name: 'GF1', height: 0, objects: [] }] },
+        { name: 'GroupHeaderArea2', sections: [{ name: 'GH2', height: 800, objects: [t('BaseLabel', 'Base Amount', 300, 100, 2400), f('BaseValue', 'T.Base', 3000, 100, 1440, { align: 'right' }),
+          t('OtherLabel', 'Other Amount', 5000, 100, 1600), f('OtherValue', 'T.Other', 6800, 100, 1440, { align: 'right' }), t('A', '(A)', 4500, 100, 400), t('Note', 'Part Amount', 300, 450, 2400), f('Part', 'T.Amount', 3000, 450, 1440, { align: 'right' })] }] },
+        { name: 'GroupFooterArea2', sections: [{ name: 'GF2', height: 0, objects: [] }] },
+        { name: 'GroupHeaderArea3', sections: [{ name: 'GH3', height: 400, objects: [t('NameHeading', 'Name', 300, 80, 2400), t('AmountHeading', 'Amount', 3000, 80, 1440),
+          t('BaseHeading', 'Base', 5000, 80, 1600), t('OtherHeading', 'Other', 6800, 80, 1440)] }] },
+        { name: 'GroupFooterArea3', sections: [{ name: 'GF3', height: 240, objects: [t('Label', 'TOTALS:', 300, 0, 1200), f('Sum', 'Sum of T.Amount', 3000, 0, 1440, { align: 'right' })] }] },
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [f('N', 'T.Name', 300, 0, 2400), f('V', 'T.Amount', 3000, 0, 1440, { align: 'right' }),
+          f('B', 'T.Base', 5000, 0, 1600, { align: 'right' }), f('O', 'T.Other', 6800, 0, 1440, { align: 'right' })] }] },
+      ],
+    } as unknown as ReportDefinition;
+    const root = parseXml(applyConventions(convertToRdl(definition, src, { reportName: 'Items', formulasInQuery: true, rulesAsText: true }).rdl, 'Items', conventions).rdl);
+    const tablix = descendants(root).find((e) => e.name === 'Tablix')!;
+    const names = descendants(tablix).filter((e) => e.name === 'Textbox').map((e) => e.attributes.Name ?? '');
+    assert.ok(names.includes('Items_Tab_1_Name_ColTxt') && names.includes('Items_Tab_1_Amount_ColTxt'), names.join(' '));
+    assert.ok(names.some((n) => /Base_HdrTxt$/.test(n)) && names.some((n) => /Other_HdrTxt$/.test(n)) && names.some((n) => /Other_HdrVal$/.test(n)));
+    assert.ok(!descendants(tablix).some((e) => e.name === 'Group' && /grp_[23]/.test(e.attributes.Name ?? '')), 'no groups of their own for the constant ones');
+    const members = childElements(child(tablix, 'TablixRowHierarchy/TablixMembers')!, 'TablixMember');
+    const rows = childElements(child(tablix, 'TablixBody/TablixRows')!, 'TablixRow');
+    const repeats = (name: RegExp) => { const i = rows.findIndex((r) => descendants(r).some((e) => name.test(e.attributes.Name ?? ''))); return textOf(child(members[i]!, 'RepeatOnNewPage')) === 'true'; };
+    assert.ok(!repeats(/Base_HdrTxt$/), 'the block above the headings prints once');
+    assert.ok(repeats(/Name_ColTxt$/), 'the headings print on every page');
+  });
 });
