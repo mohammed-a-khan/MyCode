@@ -530,4 +530,32 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
       assert.ok(before.size <= 1, 'the rows beside a group repeat alike');
     }
   });
+  it('puts totals printed at the report\'s end into the table when its one group is on a constant', () => {
+    const src = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Name', type: 'string' }, { name: 'Code', type: 'string' }, { name: 'Amount', type: 'currency' }, { name: 'Other', type: 'currency' }, { name: 'Rows', type: 'number' }] }] } as never;
+    const box = (x: number, y: number, width: number, height: number) => ({ position: { x, y }, size: { width, height } });
+    const t = (name: string, value: string, x: number, y: number, w: number, extra = {}) => ({ kind: 'text', name, text: value, style: { size: 8 }, ...box(x, y, w, 240), ...extra });
+    const f = (name: string, fld: string, x: number, y: number, w: number, extra = {}) => ({ kind: 'field', name, field: fld, style: { size: 8 }, ...box(x, y, w, 195), ...extra });
+    const off = { conditions: { suppress: { name: 'None', index: 3 } } };
+    const ruled = { align: 'right', border: { sides: [0, 0, 1, 0], width: 20 }, ...off };
+    const definition = {
+      saveInfo: {}, selectionFormulas: {}, sqlExpressions: [], parameters: [], groups: ['@all'], sortFields: [], summarizedFields: [],
+      formulas: [{ name: 'all', index: 1, kind: 'formula', text: 'WhileReadingRecords; "All"', referencedFields: [] }, { name: 'Group #1 Order', index: 2, kind: 'internal', text: '', referencedFields: ['@all'] },
+        { name: 'None', index: 3, kind: 'conditionalFormat', text: '{T.Rows} = 0', referencedFields: ['T.Rows'] }],
+      layout: [
+        ...['PageHeaderArea1', 'PageFooterArea1', 'ReportHeaderArea1'].map((name) => ({ name, sections: [{ name, height: 0, objects: [] }] })),
+        { name: 'ReportFooterArea1', sections: [{ name: 'RF', height: 315, objects: [t('Label', 'TOTALS:', 600, 60, 1080, off), f('SumA', 'Sum of T.Amount', 5760, 120, 1440, ruled), f('SumO', 'Sum of T.Other', 7200, 85, 1440, ruled)] }] },
+        { name: 'GroupHeaderArea1', sections: [{ name: 'GH1', height: 600, objects: [t('Title', 'Items in Detail', 0, 0, 8640, { align: 'center' }),
+          t('NameHeading', 'Name', 300, 300, 2400), t('CodeHeading', 'Code', 3000, 300, 1440), t('AmountHeading', 'Amount', 5760, 300, 1440), t('OtherHeading', 'Other', 7200, 300, 1440)] }] },
+        { name: 'GroupFooterArea1', sections: [{ name: 'GF1', height: 0, suppressed: true, objects: [] }] },
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [f('N', 'T.Name', 300, 0, 2400), f('C', 'T.Code', 3000, 0, 1440), f('V', 'T.Amount', 5760, 0, 1440, { align: 'right' }), f('O', 'T.Other', 7200, 0, 1440, { align: 'right' })] }] },
+      ],
+    } as unknown as ReportDefinition;
+    const root = parseXml(applyConventions(convertToRdl(definition, src, { reportName: 'Items', formulasInQuery: true, rulesAsText: true }).rdl, 'Items', conventions).rdl);
+    const body = descendants(root).find((e) => e.name === 'Body')!;
+    const tablix = descendants(body).find((e) => e.name === 'Tablix')!;
+    const names = descendants(tablix).filter((e) => e.name === 'Textbox').map((e) => e.attributes.Name ?? '');
+    assert.ok(names.includes('Items_Tab_1_TotTxt') && names.includes('Items_Tab_1_Amount_TotVal') && names.includes('Items_Tab_1_Other_TotVal'), names.join(' '));
+    const outside = descendants(body).filter((e) => ['Textbox', 'Rectangle', 'Line'].includes(e.name) && !descendants(tablix).includes(e) && !descendants(tablix).some((x) => descendants(x).includes(e)));
+    assert.ok(!outside.some((e) => /Txt_\d|Rect_[2-9]|Footer/.test(e.attributes.Name ?? '')), 'nothing of the totals left beside the table');
+  });
 });

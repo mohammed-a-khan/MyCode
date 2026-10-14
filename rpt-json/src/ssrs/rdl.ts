@@ -3768,13 +3768,26 @@ class RdlBuilder {
     // Table sections: an object shown only on a condition and laid across a row's other fields gets a row of its own.
     const tableShown = (sections: SectionInfo[]) => shown(sections).flatMap((s) => splitConditionalSpans(s, (o) => this.isBlankMessage(o)));
     const levels = (map: Map<number, SectionInfo[]>) => new Map([...map].map(([level, sections]) => [level, tableShown(sections)]));
-    return this.foldConstantGroups({
+    return this.totalsInGroup(this.foldConstantGroups({
       pageHeader: shown(areas.pageHeader), pageFooter: shown(areas.pageFooter),
       reportHeader: shown(areas.reportHeader), reportFooter: shown(areas.reportFooter),
       detail: tableShown(areas.detail),
       groupHeaders: levels(areas.groupHeaders), groupFooters: levels(areas.groupFooters),
       columnHeadings: [],
-    });
+    }));
+  }
+
+  private totalsInGroup(areas: Classified): Classified {
+    const outer = this.groupFields[0];
+    if (!outer || !this.isConstantGroup(outer) || !areas.groupHeaders.get(1)?.length) return areas;
+    const totals = (s: SectionInfo) => !s.newPageAfter && !s.newPageBefore && !s.conditions?.newPageAfter && !s.conditions?.newPageBefore
+      && s.objects.some((o) => o.kind === 'field' && SUMMARY_NAME.test(o.field ?? '')) && s.objects.every((o) => o.kind === 'field' || o.kind === 'text' || o.kind === 'line');
+    const lead = areas.reportFooter.findIndex((s) => !totals(s));
+    const moved = areas.reportFooter.slice(0, lead < 0 ? areas.reportFooter.length : lead);
+    if (!moved.length) return areas;
+    const groupFooters = new Map(areas.groupFooters);
+    groupFooters.set(1, [...(groupFooters.get(1) ?? []), ...moved.map((s) => splitConditionalSpans(s, (o) => this.isBlankMessage(o))).flat()]);
+    return { ...areas, groupFooters, reportFooter: areas.reportFooter.slice(moved.length) };
   }
 
   private readonly foldedGroups = new Set<string>();
