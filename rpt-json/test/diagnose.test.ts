@@ -447,4 +447,34 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     const title = descendants(tablix).find((e) => e.attributes.Name === 'Orders_SchTitle_Txt')!;
     assert.equal(textOf(child(childElements(title, 'Style')[0]!, 'PaddingBottom')), '4pt', 'room between the title and its rule');
   });
+  it('gives a column to totals beyond the last value, takes page-header headings over it, and draws upright lines as cell sides', () => {
+    const src = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Code', type: 'string' }, { name: 'Name', type: 'string' }, { name: 'Amount', type: 'currency' }, { name: 'Running', type: 'currency' }] }] } as never;
+    const box = (x: number, y: number, width: number, height: number) => ({ position: { x, y }, size: { width, height } });
+    const t = (name: string, value: string, x: number, y: number, w: number, extra = {}) => ({ kind: 'text', name, text: value, style: { size: 8 }, ...box(x, y, w, 240), ...extra });
+    const f = (name: string, fld: string, x: number, y: number, w: number, extra = {}) => ({ kind: 'field', name, field: fld, style: { size: 8 }, ...box(x, y, w, 200), ...extra });
+    const up = (name: string, x: number, h: number) => ({ kind: 'line', name, ...box(x, 0, 0, h), border: { sides: [1, 0, 0, 0], width: 20 } });
+    const definition = {
+      saveInfo: {}, selectionFormulas: {}, sqlExpressions: [], parameters: [], groups: ['T.Code'], sortFields: [], summarizedFields: [],
+      formulas: [{ name: 'Group #1 Order', index: 1, kind: 'internal', text: '', referencedFields: ['T.Code'] }],
+      layout: [
+        { name: 'PageHeaderArea1', sections: [{ name: 'PH', height: 1600, objects: [t('Title', 'Items in Detail', 300, 300, 8000, { align: 'center' }),
+          t('CodeHeading', 'Code', 300, 1200, 800, { align: 'center' }), t('NameHeading', 'Name', 1300, 1200, 2000, { align: 'center' }),
+          t('AmountHeading', 'Amount', 3500, 1200, 1400, { align: 'center' }), t('RunningHeading', 'Running', 5100, 1200, 1400, { align: 'center' })] }] },
+        ...['PageFooterArea1', 'ReportHeaderArea1', 'ReportFooterArea1'].map((name) => ({ name, sections: [{ name, height: 0, objects: [] }] })),
+        { name: 'GroupHeaderArea1', sections: [{ name: 'GH1', height: 240, objects: [f('CodeValue', 'T.Code', 300, 0, 900)] }] },
+        { name: 'GroupFooterArea1', sections: [{ name: 'GF1', height: 240, objects: [t('Label', 'Sub Totals:', 1300, 0, 1200), f('SumAmount', 'Sum of T.Amount', 3500, 0, 1400, { align: 'right' }),
+          f('SumRunning', 'Sum of T.Running', 5100, 0, 1400, { align: 'right' })] }] },
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [f('N', 'T.Name', 1300, 0, 2000), f('A', 'T.Amount', 3500, 0, 1400, { align: 'right' }),
+          f('R', 'T.Running', 5100, 0, 1400, { align: 'right', suppressed: true }), up('L1', 1250, 240), up('L2', 3450, 240), up('L3', 5050, 240)] }] },
+      ],
+    } as unknown as ReportDefinition;
+    const root = parseXml(applyConventions(convertToRdl(definition, src, { reportName: 'Items', formulasInQuery: true, rulesAsText: true }).rdl, 'Items', conventions).rdl);
+    const tablix = descendants(root).find((e) => e.name === 'Tablix')!;
+    const names = descendants(tablix).filter((e) => e.name === 'Textbox').map((e) => e.attributes.Name ?? '');
+    assert.equal(childElements(child(tablix, 'TablixBody/TablixColumns')!, 'TablixColumn').length, 4);
+    for (const col of ['Code', 'Name', 'Amount', 'Running']) assert.ok(names.includes(`Items_Tab_1_${col}_ColTxt`) && names.includes(`Items_Tab_1_${col}_ColVal`), col);
+    const amount = descendants(tablix).find((e) => e.attributes.Name === 'Items_Tab_1_Amount_ColVal')!;
+    assert.ok(child(childElements(amount, 'Style')[0]!, 'LeftBorder'), 'the line beside the value');
+    assert.ok(!child(childElements(amount, 'Style')[0]!, 'TopBorder'), 'an upright line is no rule along the row');
+  });
 });

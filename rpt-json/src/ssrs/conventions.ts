@@ -1411,6 +1411,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
         const lines = Math.ceil(textWidth(tb, true) / Math.max(0.01, widths[c]!) - 0.01);
         const sizes = descendants(tb).filter((e) => e.name === 'FontSize' && !textOf(e).startsWith('=')).map((e) => (inches(textOf(e)) ?? 0) * 72);
         const lineHeight = (Math.max(DESIGN_FONT, ...sizes) * DESIGN_LEADING) / 72;
+        if (lines > 1 && lines <= 3 && lines * lineHeight > len(row, 'Height') + 0.01) setChild(row, 'Height', inch(lines * lineHeight + 0.02));
         if (lines > 1 && lines * lineHeight > len(row, 'Height') + 0.01) {
           review.push({ item: `Table ${T}`, message: `the heading "${fixedText(tb)}" is over columns ${c + 1} to ${c + span} and too long for one: where reports are combined, those columns cannot be chosen apart` });
           continue;
@@ -1477,6 +1478,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       && descendants(row).some((e) => e.name === 'Textbox' && textOf(child(childElements(e, 'Style')[0] ?? el('x'), 'PaddingLeft')).startsWith('=')));
     const colNames: (string | undefined)[] = [];
     const fromField: boolean[] = [];
+    const fromDetail: boolean[] = [];
     const textboxIn = (cell: XmlElement | undefined) => {
       const item = cell ? cellItem(cell) : undefined;
       if (!item) return undefined;
@@ -1490,7 +1492,14 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
         if (!tb || isBlank(tb)) continue;
         name = fieldOf(tb) ?? ownWord(tb);
         if (fieldOf(tb)) fromField[c] = true;
+        if (name) fromDetail[c] = true;
         if (name) break;
+      }
+      for (const [i, row] of rows.entries()) {
+        if (name || !['subtotal', 'total', 'groupHeading'].includes(kinds[i]!)) continue;
+        const tb = textboxIn(cellsOf(row)[c]);
+        const f = tb && !isBlank(tb) ? /^=\s*(?:(?:Sum|Max|Min|Avg|First|Last)\()?Fields!(\w+)\.Value\)?\s*$/.exec(valueOf(tb))?.[1] : undefined;
+        if (f) { name = f; fromField[c] = true; }
       }
       if (!name) {
         for (const [i, row] of rows.entries()) {
@@ -1723,6 +1732,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
             headingCols.add(colNames[c]!);
             return rename(tb, 'heading', { T, col: colNames[c]! });
           }
+          if (isBlank(tb) && kind === 'detail' && across === 1 && fromField[c] && !fromDetail[c] && colNames[c]) return rename(tb, 'value', { T, col: colNames[c]! });
           if (isBlank(tb)) return rename(tb, 'blank', { T, col });
           const totalled = TOTALLED.test(valueOf(tb));
           if ((kind === 'subtotal' || kind === 'total') && stackedRows.has(row) && !/Fields!/.test(valueOf(tb)) && !rowTexts.some((e) => fieldOf(e)) && !rowTexts.some((e) => TOTALLED.test(valueOf(e)))) return rename(tb, 'text', { T });

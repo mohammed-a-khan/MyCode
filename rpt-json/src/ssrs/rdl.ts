@@ -2707,6 +2707,7 @@ class RdlBuilder {
         const lines = { top: false, bottom: false, width: 0 };
         const partLines: ReportObject[] = [];
         for (const line of rowLines) {
+          if ((line.size?.width ?? 0) <= 30 && (line.size?.height ?? 0) > 30) continue;
           const x = line.position?.x ?? 0;
           const right = x + (line.size?.width ?? 0);
           // A line of unknown (or no) width is taken as running along the whole row.
@@ -2716,6 +2717,7 @@ class RdlBuilder {
           const to = i === columns.length - 1 ? Math.max(columnEnd, right) : columnEnd;
           const overlap = whole ? columnEnd - columnLeft : Math.min(right, to) - Math.max(x, from);
           if (overlap <= 60) continue;
+          if (whole && line.size?.width && (right <= columnLeft + 60 || x >= columnEnd - 60)) continue;
           if (whole || overlap >= columnEnd - columnLeft - 60 || line.size?.height) {
             if (section.height && (line.position?.y ?? 0) > section.height / 2) lines.bottom = true;
             else lines.top = true;
@@ -2725,7 +2727,11 @@ class RdlBuilder {
         const { value, format } = obj ? this.objectValue(obj, 'row') : { value: '', format: undefined };
         const name = this.itemNames.make(obj?.name || `${rowName}_${i + 1}`);
         const cellObj = background ? { ...(obj ?? { kind: 'text', name }), border: { ...(obj?.border ?? { sides: [0, 0, 0, 0] as [number, number, number, number] }), background } } : obj;
-        const ruled = { ...lines, left: rules.left.has(i), right: rules.right.has(i) };
+        const down = (at: number) => rowLines.find((l) => !l.size?.width && (l.size?.height ?? 0) >= (section.height ?? 0) * 0.6 && (section.height ?? 0) > 0 && Math.abs((l.position?.x ?? 0) - at) <= 144);
+        const downLeft = down(columnLeft);
+        const downRight = i === columns.length - 1 ? down(columnEnd) : undefined;
+        for (const l of [downLeft, downRight]) if (l) lines.width = Math.max(lines.width, l.border?.width ?? 20);
+        const ruled = { ...lines, left: rules.left.has(i) || !!downLeft, right: rules.right.has(i) || !!downRight };
         // The object's place within its column, as padding (keeps text off the column lines, as in Crystal).
         const columnRight = columns[i].x + inchesToTwips(columns[i].width);
         // Left-aligned text may run on to the column's end (SSRS fonts are a little wider than Crystal's, and
@@ -3021,6 +3027,18 @@ class RdlBuilder {
       ? areas.detail
       : [...areas.groupHeaders.values()].flat();
     let columns = this.columnsFor(layoutSource);
+    if (columns.length && layoutSource === areas.detail) {
+      const totals = [...areas.groupFooters.values(), areas.reportFooter].flat().filter((s) => !s.suppressed).flatMap((s) => s.objects)
+        .filter((o) => o.kind === 'field' && !o.suppressed && (o.size?.width ?? 0) > 0).sort((a, b) => (a.position?.x ?? 0) - (b.position?.x ?? 0));
+      for (const o of totals) {
+        const x = o.position?.x ?? 0;
+        const last = columns[columns.length - 1];
+        const right = last.x + inchesToTwips(last.width);
+        if (x <= last.x + 144 || x < right - 144) continue;
+        columns[columns.length - 1] = { ...last, width: Math.min(last.width, twipsToInches(x - last.x)) };
+        columns.push({ x, width: twipsToInches(o.size!.width!) });
+      }
+    }
     const anyContent = [...areas.groupHeaders.values(), ...areas.groupFooters.values(), areas.detail].flat().some((s) => s.objects.length > 0);
     if (columns.length === 0 && anyContent) {
       // No tabular columns at all (a form-style report): one column spanning the content.
@@ -4328,6 +4346,9 @@ class RdlBuilder {
 
     const areas = this.classify(def.layout);
     const detailXs = new Set(this.columnsFor(areas.detail).map((c) => c.x));
+    for (const o of [...areas.groupHeaders.values(), ...areas.groupFooters.values()].flat().filter((s) => !s.suppressed).flatMap((s) => s.objects)) {
+      if (o.kind === 'field' && !o.suppressed && o.position) detailXs.add(o.position.x);
+    }
     // A page header with a section for page 1 only (a block of figures between the title and the column headings),
     // all else printed on every page: the sections before it stay the page header; it starts the body (printed once,
     // above the table) and those after it become the table's heading rows, whole (rules too), repeated on every page.
@@ -4358,10 +4379,15 @@ class RdlBuilder {
       const keep: ReportObject[] = [];
       for (const obj of section.objects) {
         const x = obj.position?.x;
-        const isHeading = obj.kind === 'text' && x !== undefined && [...detailXs].some((dx) => Math.abs(dx - x) <= 144);
+        const isHeading = obj.kind === 'text' && x !== undefined && [...detailXs].some((dx) => Math.abs(dx - x) <= 144)
+          && [...detailXs].filter((dx) => dx > x + 144 && dx < x + (obj.size?.width ?? 0) - 144).length < 2;
         (isHeading ? areas.columnHeadings : keep).push(obj);
       }
       section.objects = keep;
+    }
+    if (areas.columnHeadings.length) {
+      const top = Math.min(...areas.columnHeadings.map((o) => o.position?.y ?? 0));
+      areas.columnHeadings = areas.columnHeadings.map((o) => ({ ...o, position: { x: o.position?.x ?? 0, y: (o.position?.y ?? 0) - top } }));
     }
 
     const placeAll = (sections: SectionInfo[], label: string, scope: Scope = 'page') => sections.reduce((acc, s) => {
