@@ -543,7 +543,7 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
         { name: 'None', index: 3, kind: 'conditionalFormat', text: '{T.Rows} = 0', referencedFields: ['T.Rows'] }],
       layout: [
         ...['PageHeaderArea1', 'PageFooterArea1', 'ReportHeaderArea1'].map((name) => ({ name, sections: [{ name, height: 0, objects: [] }] })),
-        { name: 'ReportFooterArea1', sections: [{ name: 'RF', height: 315, objects: [t('Label', 'TOTALS:', 600, 60, 1080, off), f('SumA', 'Sum of T.Amount', 5760, 120, 1440, ruled), f('SumO', 'Sum of T.Other', 7200, 85, 1440, ruled)] }] },
+        { name: 'ReportFooterArea1', sections: [{ name: 'RF', height: 315, objects: [t('Label', 'TOTALS:', 600, 60, 1080, off), f('SumA', 'Sum of T.Amount', 5000, 120, 2200, ruled), f('SumO', 'Sum of T.Other', 7200, 85, 1440, ruled)] }] },
         { name: 'GroupHeaderArea1', sections: [{ name: 'GH1', height: 600, objects: [t('Title', 'Items in Detail', 0, 0, 8640, { align: 'center' }),
           t('NameHeading', 'Name', 300, 300, 2400), t('CodeHeading', 'Code', 3000, 300, 1440), t('AmountHeading', 'Amount', 5760, 300, 1440), t('OtherHeading', 'Other', 7200, 300, 1440)] }] },
         { name: 'GroupFooterArea1', sections: [{ name: 'GF1', height: 0, suppressed: true, objects: [] }] },
@@ -556,6 +556,9 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     const names = descendants(tablix).filter((e) => e.name === 'Textbox').map((e) => e.attributes.Name ?? '');
     assert.ok(names.includes('Items_Tab_1_TotTxt') && names.includes('Items_Tab_1_Amount_TotVal') && names.includes('Items_Tab_1_Other_TotVal'), names.join(' '));
     const outside = descendants(body).filter((e) => ['Textbox', 'Rectangle', 'Line'].includes(e.name) && !descendants(tablix).includes(e) && !descendants(tablix).some((x) => descendants(x).includes(e)));
+    const style = (name: string) => childElements(descendants(tablix).find((e) => e.attributes.Name === name)!, 'Style')[0]!;
+    assert.equal(textOf(child(style('Items_Tab_1_Amount_TotVal'), 'PaddingRight')), textOf(child(style('Items_Tab_1_Amount_ColVal'), 'PaddingRight')), 'a total ends where the values above it end');
+    assert.equal(textOf(child(style('Items_Tab_1_Name_ColVal'), 'VerticalAlign')), 'Top', 'values keep to the top of a row another value makes taller');
     assert.ok(!outside.some((e) => /Txt_\d|Rect_[2-9]|Footer/.test(e.attributes.Name ?? '')), 'nothing of the totals left beside the table');
   });
 });

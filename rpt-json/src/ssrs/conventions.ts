@@ -1317,8 +1317,10 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           if (j < 0) continue;
           const shift = colWidths.slice(c, j).reduce((a, w) => a + w, 0);
           if (t !== item) {
-            setChild(t!, 'Left', inch(Math.max(0, len(t!, 'Left') - shift)));
-            setChild(t!, 'Width', inch(Math.min(len(t!, 'Width'), colWidths[j]! - len(t!, 'Left'))));
+            const left = Math.max(0, len(t!, 'Left') - shift);
+            const right = Math.min(colWidths[j]!, len(t!, 'Left') + len(t!, 'Width') - shift);
+            setChild(t!, 'Left', inch(left));
+            setChild(t!, 'Width', inch(right - left > 0.05 ? right - left : colWidths[j]! - left));
             setChild(item, 'Width', inch(colWidths[j]!));
           }
           removeChildren(contents, ['ColSpan']);
@@ -1811,6 +1813,10 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
               : kind === 'groupHeading' ? 'group'
                 : kind === 'noData' ? 'body'
                   : totalled || numeric ? 'totalValue' : 'totalLabel');
+          if (kind === 'detail' && !summaryNames.has(tb) && !statement) {
+            underRule.add(tb);
+            setChild(ownStyle(tb), 'VerticalAlign', 'Top');
+          }
         }
         if (kind !== 'detail' && kind !== 'noData' && !isBlank(textboxes[0] ?? el('x'))) bandRows.push(row);
       });
