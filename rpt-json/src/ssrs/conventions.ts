@@ -1500,8 +1500,13 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     });
     // A table without column headings, or placing its lines by formula (a statement's indented labels), is lines of
     // text, not rows of data: its rows are not banded.
-    const statement = !rows.some((row, i) => (kinds[i] === 'heading' || headingRow(row, i)) && !descendants(row).some((e) => roles.get(e) === 'title')) || rows.some((row, i) => kinds[i] === 'detail'
-      && descendants(row).some((e) => e.name === 'Textbox' && textOf(child(childElements(e, 'Style')[0] ?? el('x'), 'PaddingLeft')).startsWith('=')));
+    const fieldHeaded = rows.some((row, i) => {
+      const texts = descendants(row).filter((e) => e.name === 'Textbox' && !isBlank(e));
+      return kinds[i] === 'groupHeading' && kinds.indexOf('groupHeading') === i && texts.length >= 3 && !rows.some((r, j) => j !== i && headingRow(r, j))
+        && texts.every((e) => /^=Fields!\w+\.Value$/.test(valueOf(e).trim()));
+    });
+    const statement = !fieldHeaded && (!rows.some((row, i) => (kinds[i] === 'heading' || headingRow(row, i)) && !descendants(row).some((e) => roles.get(e) === 'title')) || rows.some((row, i) => kinds[i] === 'detail'
+      && descendants(row).some((e) => e.name === 'Textbox' && textOf(child(childElements(e, 'Style')[0] ?? el('x'), 'PaddingLeft')).startsWith('='))));
     const colNames: (string | undefined)[] = [];
     const fromField: boolean[] = [];
     const fromDetail: boolean[] = [];
@@ -2955,6 +2960,44 @@ function trimToHeadings(tablix: XmlElement): void {
     return f ? `IsNothing(Fields!${f}.Value) OrElse Trim(CStr(Fields!${f}.Value)) = ""` : undefined;
   });
   if (cellsOf(rows[at]!).some((cell) => Number(textOf(child(child(cell, 'CellContents') ?? el('x'), 'ColSpan')) || 1) > 1)) return;
+  const styleOf = (cell: XmlElement) => { const t = cellItem(cell); return t?.name === 'Textbox' ? childElements(t, 'Style')[0] : undefined; };
+  const drawn = (border: XmlElement | undefined) => !!border && !/^none$/i.test(textOf(child(border, 'Style')) || 'None');
+  const headCells = cellsOf(rows[at]!);
+  const next = rows[at + 1];
+  if (next && leaves[at + 1]!.kind === leaves[at]!.kind && cellsOf(next).length === headCells.length
+    && cellsOf(next).every((cell) => { const t = cellItem(cell); return t?.name === 'Textbox' && isBlank(t) && drawn(child(styleOf(cell) ?? el('x'), 'BottomBorder')); })) {
+    cellsOf(next).forEach((cell, c) => {
+      const st = styleOf(headCells[c]!);
+      if (!st) return;
+      removeChildren(st, ['BottomBorder']);
+      st.children.push(structuredClone(child(styleOf(cell)!, 'BottomBorder')!));
+    });
+    const body = child(tablix, 'TablixBody/TablixRows')!;
+    body.children = body.children.filter((r) => r !== next);
+    const member = leaves[at + 1]!.member;
+    const holder = descendants(child(tablix, 'TablixRowHierarchy')!).find((e) => e.name === 'TablixMembers' && e.children.includes(member));
+    if (holder) holder.children = holder.children.filter((m) => m !== member);
+    rows.splice(at + 1, 1);
+    leaves.splice(at + 1, 1);
+  }
+  const titleRow = rows.slice(0, at).find((row) => descendants(row).some((e) => e.name === 'Textbox' && /_SchTitle_Txt$/.test(e.attributes.Name ?? '')));
+  const title = titleRow && descendants(titleRow).find((e) => e.name === 'Textbox' && /_SchTitle_Txt$/.test(e.attributes.Name ?? ''));
+  const titleStyle = title && childElements(title, 'Style')[0];
+  const tops = headCells.map((cell) => child(styleOf(cell) ?? el('x'), 'TopBorder'));
+  if (titleStyle && !drawn(child(titleStyle, 'BottomBorder')) && tops.every(drawn)) {
+    titleStyle.children.push({ ...structuredClone(tops[0]!), name: 'BottomBorder' });
+    for (const cell of headCells) { const st = styleOf(cell); if (st) removeChildren(st, ['TopBorder']); }
+  }
+  const top = child(tablix, 'TablixRowHierarchy/TablixMembers');
+  const breaking = descendants(tablix).some((e) => e.name === 'Group' && child(e, 'PageBreak'));
+  if (top && breaking && titleRow) {
+    const members = childElements(top, 'TablixMember');
+    const first = members.findIndex((m) => !!child(m, 'Group'));
+    for (const m of members.slice(0, first < 0 ? 0 : first)) {
+      setChild(m, 'RepeatOnNewPage', 'true');
+      if (!child(m, 'KeepWithGroup')) setChild(m, 'KeepWithGroup', 'After');
+    }
+  }
   let end = at + 1;
   while (end < rows.length && leaves[end]!.kind === leaves[at]!.kind && leaves[end]!.kind !== 'detail') end++;
   const wrap = (value: string, off: string, cond: string) => `=IIf(${cond}, "${off}", ${value.startsWith('=') ? value.slice(1) : `"${value}"`})`;

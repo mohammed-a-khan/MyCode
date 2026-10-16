@@ -113,8 +113,12 @@ export function diagnoseRdl(xml: string, template = false, standardParameters: s
   }
 
   // Headings: the merge and the designer read them as text; an expression shows as «Expr».
+  const shown = new Set(descendants(report).filter((e) => e.name === 'Textbox' && /_ColVal$/i.test(e.attributes.Name ?? ''))
+    .flatMap((e) => [...valueOf(e).matchAll(/Fields!(\w+)\.Value/g)].map((m) => m[1]!.toLowerCase())));
   for (const box of descendants(report).filter((e) => e.name === 'Textbox' && /_ColTxt$/i.test(e.attributes.Name ?? ''))) {
     const v = valueOf(box).trim();
+    const named = /^=Fields!(\w+)\.Value$/.exec(v)?.[1];
+    if (named && !shown.has(named.toLowerCase())) continue;
     if (v.startsWith('=') && !/^="[^"]*"$/.test(v)) out.push({ kind: 'expression', item: box.attributes.Name!, message: `heading is an expression (the designer shows «Expr»): ${v.slice(0, 80)}` });
   }
   for (const item of descendants(report).filter((e) => ITEMS.has(e.name) && DEFAULT_NAME.test(e.attributes.Name ?? ''))) {

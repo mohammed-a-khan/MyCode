@@ -89,6 +89,17 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     assert.deepEqual(kinds.sort(), ['code: B', 'code: Report', 'cut off: B', 'expression: A_ColTxt', 'name: Rectangle3', 'overlap: A_ColTxt / B'].sort());
   });
 
+  it('takes a heading naming its column from the data as meant, and still lists one showing the column\'s own value', () => {
+    const box = (name: string, value: string) => `<Textbox Name="${name}"><Paragraphs><Paragraph><TextRuns><TextRun><Value>${value}</Value></TextRun></TextRuns></Paragraph></Paragraphs></Textbox>`;
+    const rdl = `<Report><ReportSections><ReportSection><Body><ReportItems><Tablix Name="T"><TablixBody><TablixRows><TablixRow><TablixCells>
+<TablixCell><CellContents>${box('T_a_ColTxt', '=Fields!head_a.Value')}</CellContents></TablixCell><TablixCell><CellContents>${box('T_b_ColTxt', '=Fields!b.Value')}</CellContents></TablixCell>
+</TablixCells></TablixRow><TablixRow><TablixCells>
+<TablixCell><CellContents>${box('T_a_ColVal', '=Fields!a.Value')}</CellContents></TablixCell><TablixCell><CellContents>${box('T_b_ColVal', '=Fields!b.Value')}</CellContents></TablixCell>
+</TablixCells></TablixRow></TablixRows></TablixBody></Tablix></ReportItems></Body></ReportSection></ReportSections></Report>`;
+    const listed = diagnoseRdl(rdl, true).filter((f) => f.kind === 'expression').map((f) => f.item);
+    assert.deepEqual(listed, ['T_b_ColTxt']);
+  });
+
   it('lists parameters the base report does not have, which the merge does not copy', () => {
     const rdl = `<Report><DataSets><DataSet Name="A"><Query><QueryParameters><QueryParameter Name="@extra"><Value>=Parameters!extra.Value</Value></QueryParameter></QueryParameters></Query></DataSet></DataSets>
 <ReportParameters><ReportParameter Name="one"/><ReportParameter Name="extra"/><ReportParameter Name="unread"/></ReportParameters></Report>`;
@@ -587,7 +598,8 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     const main = (shift: number) => ({
       saveInfo: {}, selectionFormulas: {}, sqlExpressions: [], parameters: params, groups: [], sortFields: [], summarizedFields: [], formulas: [],
       layout: [
-        ...['PageHeaderArea1', 'PageFooterArea1', 'ReportHeaderArea1'].map((name) => ({ name, sections: [{ name, height: 0, objects: [] }] })),
+        { name: 'PageHeaderArea1', sections: [{ name: 'PH', height: 300, objects: [{ kind: 'text', name: 'Title', text: 'Blocks Title', align: 'center', style: { size: 12, bold: true }, ...box(0, 0, 8000, 300) }] }] },
+        ...['PageFooterArea1', 'ReportHeaderArea1'].map((name) => ({ name, sections: [{ name, height: 0, objects: [] }] })),
         { name: 'ReportFooterArea1', sections: [1, 2, 3].map((k) => ({ name: `RF${k}`, height: 300, newPageBefore: k > 1, objects: [{ kind: 'subreport', name: `S${k}`, subreport: { index: k + 1, onDemand: false }, ...box(0, 0, 8000, 300) }] })) },
         { name: 'DetailArea1', sections: [{ name: 'D', height: 0, suppressed: true, objects: [] }] },
       ],
@@ -612,6 +624,10 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     const heading = descendants(tables[0]!).find((e) => e.attributes.Name === 'Blocks_Tab_1_amount_2_ColTxt')!;
     const sides = descendants(childElements(heading, 'Style')[0]!).filter((e) => /Border$/.test(e.name)).map((e) => textOf(child(e, 'Style'))).filter((v) => v && v !== 'None');
     assert.ok(sides.length && sides.every((v) => /head_2/.test(v)), 'the heading rules stop where the block has no heading');
+    const holder = child(tables[0]!, 'TablixRowHierarchy/TablixMembers')!;
+    const before = childElements(holder, 'TablixMember').filter((m) => !child(m, 'Group'));
+    assert.ok(before.length && before.every((m) => textOf(child(m, 'RepeatOnNewPage')) === 'true'), 'the title prints on every block\'s page');
+    assert.ok(child(childElements(heading, 'Style')[0]!, 'BottomBorder'), 'the rule under the headings is drawn on them, with no row of its own');
     assert.ok(converted.review.some((r) => r.item === 'Subreports'));
     const apart = build(200).root;
     assert.equal(descendants(apart).filter((e) => e.name === 'Tablix').length, 3, 'layouts that differ stay apart');
