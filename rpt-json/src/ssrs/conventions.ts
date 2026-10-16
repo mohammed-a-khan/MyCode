@@ -3001,17 +3001,24 @@ function trimToHeadings(tablix: XmlElement): void {
   let end = at + 1;
   while (end < rows.length && leaves[end]!.kind === leaves[at]!.kind && leaves[end]!.kind !== 'detail') end++;
   const wrap = (value: string, off: string, cond: string) => `=IIf(${cond}, "${off}", ${value.startsWith('=') ? value.slice(1) : `"${value}"`})`;
-  for (const row of rows.slice(at, end)) {
+  const columns = childElements(child(tablix, 'TablixColumnHierarchy/TablixMembers') ?? el('x'), 'TablixMember');
+  if (columns.length === conds.length) {
+    columns.forEach((m, c) => {
+      if (conds[c] && !child(m, 'Visibility') && !child(m, 'TablixMembers')) m.children.push(el('Visibility', el('Hidden', `=Max(IIf(${conds[c]}, 0, 1)) = 0`)));
+    });
+  }
+  rows.slice(at).forEach((row, n) => {
     const cells = cellsOf(row);
-    if (cells.length !== conds.length) continue;
+    if (cells.length !== conds.length) return;
     cells.forEach((cell, c) => {
       const cond = conds[c];
       if (!cond) return;
-      for (const t of descendants(cell).filter((e) => e.name === 'Textbox')) {
+      for (const t of descendants(cell).filter((e) => e.name === 'Textbox' || e.name === 'Rectangle')) {
         const st = childElements(t, 'Style')[0];
         if (!st) continue;
         const fill = child(st, 'BackgroundColor');
         if (fill && textOf(fill) && !/^transparent$/i.test(textOf(fill))) setChild(st, 'BackgroundColor', wrap(textOf(fill), 'Transparent', cond));
+        if (at + n >= end || t.name !== 'Textbox') continue;
         for (const side of ['Border', 'TopBorder', 'BottomBorder', 'LeftBorder', 'RightBorder']) {
           const border = child(st, side);
           const style = border && child(border, 'Style');
@@ -3019,7 +3026,7 @@ function trimToHeadings(tablix: XmlElement): void {
         }
       }
     });
-  }
+  });
 }
 
 function liftWrapper(outer: XmlElement): void {

@@ -628,6 +628,8 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     const before = childElements(holder, 'TablixMember').filter((m) => !child(m, 'Group'));
     assert.ok(before.length && before.every((m) => textOf(child(m, 'RepeatOnNewPage')) === 'true'), 'the title prints on every block\'s page');
     assert.ok(child(childElements(heading, 'Style')[0]!, 'BottomBorder'), 'the rule under the headings is drawn on them, with no row of its own');
+    const columns = childElements(child(tables[0]!, 'TablixColumnHierarchy/TablixMembers')!, 'TablixMember').map((m) => textOf(child(m, 'Visibility/Hidden')));
+    assert.ok(!columns[0] && columns.slice(1).every((v) => /^=Max\(IIf\(.*head_\d/.test(v)), `a column no block has a heading for is left out: ${columns.join(' | ')}`);
     assert.ok(converted.review.some((r) => r.item === 'Subreports'));
     const apart = build(200).root;
     assert.equal(descendants(apart).filter((e) => e.name === 'Tablix').length, 3, 'layouts that differ stay apart');
