@@ -561,4 +561,57 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     assert.equal(textOf(child(style('Items_Tab_1_Name_ColVal'), 'VerticalAlign')), 'Top', 'values keep to the top of a row another value makes taller');
     assert.ok(!outside.some((e) => /Txt_\d|Rect_[2-9]|Footer/.test(e.attributes.Name ?? '')), 'nothing of the totals left beside the table');
   });
+  it('makes one table of subreports that repeat one layout over tables of the same columns, one block each', () => {
+    const cols = ['row_order', 'row_text', 'bold_value', 'head_1', 'amount_1', 'head_2', 'amount_2', 'head_3', 'amount_3', 'owner_key'];
+    const params = [{ name: 'owner_key', type: 'number' }];
+    const box = (x: number, y: number, width: number, height: number) => ({ position: { x, y }, size: { width, height } });
+    const sub = (k: number, shift = 0) => {
+      const T = `block_${k}`;
+      const f = (name: string, col: string, x: number, y: number, w: number, extra = {}) => ({ kind: 'field', name, field: `${T}.${col}`, style: { size: 8 }, ...box(x + shift, y, w, 200), ...extra });
+      const definition = {
+        saveInfo: {}, sqlExpressions: [], parameters: params, groups: ['@all'], sortFields: [`${T}.row_order`], summarizedFields: [],
+        selectionFormulas: { record: `{${T}.owner_key} = {?owner_key}` },
+        formulas: [{ name: 'all', index: 0, kind: 'formula', text: 'WhileReadingRecords; "All"', referencedFields: [] }, { name: 'Group #1 Order', index: 1, kind: 'internal', text: '', referencedFields: ['@all'] },
+          { name: 'Top_Line', index: 2, kind: 'conditionalFormat', text: `IF {${T}.bold_value} = "T" THEN crSingleLine ELSE crNoLine`, referencedFields: [`${T}.bold_value`] }],
+        layout: [
+          ...['ReportHeaderArea1', 'ReportFooterArea1'].map((name) => ({ name, sections: [{ name, height: 0, suppressed: true, objects: [] }] })),
+          { name: 'GroupHeaderArea1', sections: [{ name: 'GH1', height: 300, objects: [...[1, 2, 3].map((i) => f(`H${i}`, `head_${i}`, 1440 + i * 1440, 60, 1300)), { kind: 'line', name: 'Top', ...box(0, 0, 7200, 0), border: { sides: [0, 0, 1, 0], width: 30 } }] },
+            { name: 'GH2', height: 90, objects: [{ kind: 'line', name: 'Under', ...box(0, 60, 7200, 0), border: { sides: [0, 0, 1, 0], width: 30 } }] }] },
+          { name: 'GroupFooterArea1', sections: [{ name: 'GF1', height: 0, suppressed: true, objects: [] }] },
+          { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [f('L', 'row_text', 60, 20, 2600), ...[1, 2, 3].map((i) => f(`V${i}`, `amount_${i}`, 1440 + i * 1440, 20, 1300, { align: 'right', conditions: { topLine: { name: 'Top_Line', index: 2 } } }))] }] },
+        ],
+      } as unknown as ReportDefinition;
+      const dataSource = { connections: [], links: [], tables: [{ alias: T, name: T, schema: 'dbo', kind: 'table', fields: cols.map((name) => ({ name, type: /amount|order|entity/.test(name) ? 'number' : 'string' })) }] };
+      return { name: `Sub${k}`, links: [], parameters: ['owner_key'], definition, dataSource } as never;
+    };
+    const main = (shift: number) => ({
+      saveInfo: {}, selectionFormulas: {}, sqlExpressions: [], parameters: params, groups: [], sortFields: [], summarizedFields: [], formulas: [],
+      layout: [
+        ...['PageHeaderArea1', 'PageFooterArea1', 'ReportHeaderArea1'].map((name) => ({ name, sections: [{ name, height: 0, objects: [] }] })),
+        { name: 'ReportFooterArea1', sections: [1, 2, 3].map((k) => ({ name: `RF${k}`, height: 300, newPageBefore: k > 1, objects: [{ kind: 'subreport', name: `S${k}`, subreport: { index: k + 1, onDemand: false }, ...box(0, 0, 8000, 300) }] })) },
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 0, suppressed: true, objects: [] }] },
+      ],
+    } as unknown as ReportDefinition);
+    const build = (shift: number) => {
+      const subreports = new Map([1, 2, 3].map((k) => [k + 1, sub(k, k === 3 ? shift : 0)] as [number, never]));
+      const converted = convertToRdl(main(shift), { connections: [], links: [], tables: [] } as never, { reportName: 'Blocks', subreports, formulasInQuery: true, rulesAsText: true } as never);
+      return { converted, root: parseXml(applyConventions(converted.rdl, 'Blocks', conventions).rdl) };
+    };
+    const { converted, root } = build(0);
+    const tables = descendants(root).filter((e) => e.name === 'Tablix');
+    assert.equal(tables.length, 1, 'one table for every block');
+    const names = descendants(tables[0]!).filter((e) => e.name === 'Textbox').map((e) => e.attributes.Name ?? '');
+    for (const col of ['row_text', 'amount_1', 'amount_2', 'amount_3']) assert.ok(names.includes(`Blocks_Tab_1_${col}_ColTxt`) && names.includes(`Blocks_Tab_1_${col}_ColVal`), `${col} heading and value: ${names.join(' ')}`);
+    const query = descendants(root).filter((e) => e.name === 'CommandText').map((e) => textOf(e)).join('\n');
+    assert.equal(query.match(/UNION ALL/g)?.length, 2, 'one query reads the three tables');
+    assert.match(query, /SELECT 3 AS \[block_no\][\s\S]*\[block_3\]\.\[owner_key\] = @owner_key/);
+    const group = descendants(tables[0]!).find((e) => e.name === 'Group' && /block_no/.test(textOf(child(e, 'GroupExpressions/GroupExpression'))))!;
+    assert.equal(textOf(child(group, 'PageBreak/BreakLocation')), 'Between', 'each block on a page of its own, as each printed');
+    const rule = descendants(tables[0]!).find((e) => e.name === 'Line' && /amount_2/.test(e.attributes.Name ?? ''))!;
+    assert.match(textOf(child(rule, 'Style/Border/Style')), /head_2/, 'no rule over a column the block has no heading for');
+    assert.ok(converted.review.some((r) => r.item === 'Subreports'));
+    const apart = build(200).root;
+    assert.equal(descendants(apart).filter((e) => e.name === 'Tablix').length, 3, 'layouts that differ stay apart');
+  });
 });
+

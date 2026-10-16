@@ -1602,7 +1602,10 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       // Column headings Crystal printed in a group's header (fixed text only, over two columns or more): named as
       // headings, which is how reports are combined finds and relabels columns.
       const rowTexts = descendants(row).filter((e) => e.name === 'Textbox' && !isBlank(e));
-      const headingsHere = kind === 'groupHeading' && rowTexts.length > 1 && rowTexts.every((e) => fixedText(e) !== undefined);
+      const fieldHeadings = kind === 'groupHeading' && rowTexts.length >= 3 && kinds.indexOf('groupHeading') === i && !rows.some((r, j) => j !== i && headingRow(r, j))
+        && rowTexts.every((e) => /^=Fields!\w+\.Value$/.test(valueOf(e).trim()) && !TOTALLED.test(valueOf(e)))
+        && cellsOf(row).every((cell, c) => { const tb = textboxIn(cell); return !tb || isBlank(tb) || (fromField[c] && fieldOf(tb) !== colNames[c]); });
+      const headingsHere = kind === 'groupHeading' && rowTexts.length > 1 && (rowTexts.every((e) => fixedText(e) !== undefined) || fieldHeadings);
       const headingsRow = headingRow(row, i);
       // (Columns whose heading has text: an empty one is not named after them too.)
       for (const [c, cell] of cellsOf(row).entries()) {
@@ -1768,7 +1771,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
             return rename(tb, 'footer');
           }
           // (An empty heading over a column of a field's values: the heading of that column, to be given a label.)
-          if (isBlank(tb) && headingsRow && fromField[c] && !headingCols.has(colNames[c]!)) {
+          if (isBlank(tb) && (headingsRow || fieldHeadings) && fromField[c] && !headingCols.has(colNames[c]!)) {
             headingCols.add(colNames[c]!);
             return rename(tb, 'heading', { T, col: colNames[c]! });
           }
@@ -2209,6 +2212,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
   }
   for (const tablix of tablixes) { alignTotals(tablix); pairSides(tablix); }
   for (const tablix of tablixes) repeatTogether(tablix);
+  for (const outer of childElements(descendants(report).find((e) => e.name === 'Body') ?? el('x'), 'ReportItems').flatMap((r) => childElements(r, 'Rectangle'))) liftWrapper(outer);
   const lead = tablixes[0];
   const folded = !!lead && foldLead(lead, review);
   for (const tablix of tablixes) {
@@ -2933,6 +2937,24 @@ function foldOverlays(tablix: XmlElement): void {
       }
     }
   });
+}
+
+function liftWrapper(outer: XmlElement): void {
+  const holder = child(outer, 'ReportItems');
+  const items = holder ? childElements(holder).filter((e) => ITEMS.has(e.name)) : [];
+  const inner = items.length === 1 && items[0]!.name === 'Rectangle' ? items[0]! : undefined;
+  const innerItems = inner && child(inner, 'ReportItems');
+  if (!inner || !innerItems || ['Visibility', 'PageBreak', 'DocumentMapLabel', 'Bookmark'].some((n) => child(inner, n))) return;
+  const style = childElements(inner, 'Style')[0];
+  if (style && childElements(style).some((e) => e.name !== 'Border' || !/^none$/i.test(textOf(child(e, 'Style'))))) return;
+  const dx = len(inner, 'Left');
+  const dy = len(inner, 'Top');
+  const lifted = childElements(innerItems).filter((e) => ITEMS.has(e.name));
+  for (const e of lifted) {
+    setChild(e, 'Left', inch(len(e, 'Left') + dx));
+    setChild(e, 'Top', inch(len(e, 'Top') + dy));
+  }
+  holder!.children = holder!.children.flatMap((c) => (c === inner ? lifted : [c]));
 }
 
 function repeatTogether(tablix: XmlElement): void {
