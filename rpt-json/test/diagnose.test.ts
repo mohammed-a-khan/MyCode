@@ -619,6 +619,9 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     const grows = textOf(child(members.at(-1)!, 'Group/Filters/Filter/FilterValues/FilterValue'));
     assert.ok(/head_2/.test(grows) && grows.includes(`"${textOf(child(tables[0]!, 'DataSetName'))}"`), grows);
     assert.equal(textOf(child(tables[0]!, 'Left')), textOf(child(pad, 'Width')), 'the table starts where the one beside it ends');
+    const paged = child(pad, 'TablixRowHierarchy/TablixMembers/TablixMember/Group')!;
+    assert.match(textOf(child(paged, 'GroupExpressions/GroupExpression')), /block_no/);
+    assert.equal(textOf(child(paged, 'PageBreak/BreakLocation')), 'Between', 'a row beside every block\'s page, so each page is moved');
     assert.ok(descendants(root).find((e) => e.name === 'ReportItems' && e.children.includes(tables[0]!))!.children.indexOf(pad) > 0, 'the table stays first for the merges');
     const names = descendants(tables[0]!).filter((e) => e.name === 'Textbox').map((e) => e.attributes.Name ?? '');
     for (const col of ['row_text', 'amount_1', 'amount_2', 'amount_3']) assert.ok(names.includes(`Blocks_Tab_1_${col}_ColTxt`) && names.includes(`Blocks_Tab_1_${col}_ColVal`), `${col} heading and value: ${names.join(' ')}`);

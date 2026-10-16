@@ -3067,6 +3067,9 @@ function centreBlock(root: XmlElement, tablix: XmlElement, conds: (string | unde
   const key = `=${fields.map((f) => `CStr(Fields!${f}.Value)`).join(' & "|" & ')}`;
   const half = conds.map((c, i) => (c ? `IIf(Max(IIf(${c}, 0, 1), "${dataSet}") = 0, ${Math.round(widths[i]! / 2 * 100000) / 100000}, 0)` : '')).filter(Boolean);
   const count = `=1 + CInt(Math.Round((${half.join(' + ')}) / ${Math.round(unit * 100000) / 100000}))`;
+  const breaking = descendants(child(tablix, 'TablixRowHierarchy') ?? el('x')).find((e) => e.name === 'TablixMember' && !!child(e, 'Group/PageBreak') && !!child(e, 'Group/GroupExpressions'));
+  const paging = breaking && child(breaking, 'Group');
+  const sorted = breaking && child(breaking, 'SortExpressions');
   const box = (i: number) => el('TablixCell', el('CellContents', el('Textbox', { Name: `${pad}_blnk${i}_txt` }, el('CanGrow', 'false'), el('KeepTogether', 'true'),
     el('Paragraphs', el('Paragraph', el('TextRuns', el('TextRun', el('Value', ''), el('Style'))), el('Style'))), el('Style', el('Border', el('Style', 'None'))))));
   const spacer = el('Tablix', { Name: pad },
@@ -3076,7 +3079,9 @@ function centreBlock(root: XmlElement, tablix: XmlElement, conds: (string | unde
     el('TablixColumnHierarchy', el('TablixMembers', ...Array.from({ length: spare }, () => el('TablixMember')),
       el('TablixMember', el('Group', { Name: group }, el('GroupExpressions', el('GroupExpression', key)),
         el('Filters', el('Filter', el('FilterExpression', key), el('Operator', 'TopN'), el('FilterValues', el('FilterValue', count)))))))),
-    el('TablixRowHierarchy', el('TablixMembers', el('TablixMember'))),
+    el('TablixRowHierarchy', el('TablixMembers', paging ? el('TablixMember',
+      el('Group', { Name: `${base}_grp_${next(new RegExp(`^${base}_grp_(\\d+)$`)) + 1}` }, structuredClone(child(paging, 'GroupExpressions')!), structuredClone(child(paging, 'PageBreak')!)),
+      ...(sorted ? [structuredClone(sorted)] : [])) : el('TablixMember'))),
     el('DataSetName', dataSet),
     el('Top', inch(top)), el('Left', '0in'), el('Height', inch(Math.min(0.125, bottom - top))), el('Width', inch(spare * filler + unit)),
     el('Style', el('Border', el('Style', 'None'))));
