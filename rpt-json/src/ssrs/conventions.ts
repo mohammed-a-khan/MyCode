@@ -2218,7 +2218,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
   for (const tablix of tablixes) { alignTotals(tablix); pairSides(tablix); }
   for (const tablix of tablixes) repeatTogether(tablix);
   for (const outer of childElements(descendants(report).find((e) => e.name === 'Body') ?? el('x'), 'ReportItems').flatMap((r) => childElements(r, 'Rectangle'))) liftWrapper(outer);
-  for (const tablix of tablixes) trimToHeadings(tablix);
+  const headed = new Map(tablixes.map((tablix) => [tablix, trimToHeadings(tablix)] as const));
   const lead = tablixes[0];
   const folded = !!lead && foldLead(lead, review);
   for (const tablix of tablixes) {
@@ -2248,6 +2248,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     }
     setChild(lead, 'Height', inch(rowsOf(lead).reduce((sum, row) => sum + len(row, 'Height'), 0)));
   }
+  for (const [tablix, conds] of headed) if (conds) centreBlock(root, tablix, conds);
   return { rdl: toXml(withFunctions(root, extra.sqlFunctions ?? [])), review, settled: conv.dataSource ? ['Data source'] : [], ...(Object.keys(files).length ? { files } : {}) };
 }
 
@@ -2945,7 +2946,7 @@ function foldOverlays(tablix: XmlElement): void {
   });
 }
 
-function trimToHeadings(tablix: XmlElement): void {
+function trimToHeadings(tablix: XmlElement): (string | undefined)[] | undefined {
   const rows = rowsOf(tablix);
   const leaves = rowLeaves(tablix);
   if (leaves.length !== rows.length) return;
@@ -3027,6 +3028,51 @@ function trimToHeadings(tablix: XmlElement): void {
       }
     });
   });
+  return conds;
+}
+
+function centreBlock(root: XmlElement, tablix: XmlElement, conds: (string | undefined)[]): void {
+  const holder = descendants(root).find((e) => e.name === 'ReportItems' && e.children.includes(tablix));
+  const frame = holder && descendants(root).find((e) => e.name === 'Rectangle' && e.children.includes(holder));
+  const dataSet = textOf(child(tablix, 'DataSetName'));
+  const widths = widthsOf(tablix);
+  if (!holder || !frame || !dataSet || widths.length < 2 || widths.length !== conds.length || !conds.some(Boolean)) return;
+  const top = len(tablix, 'Top');
+  const bottom = top + len(tablix, 'Height');
+  const others = childElements(holder).filter((e) => ITEMS.has(e.name) && e !== tablix);
+  if (others.some((e) => len(e, 'Top') < bottom && len(e, 'Top') + len(e, 'Height') > top)) return;
+  const filler = 0.01;
+  const spare = widths.length - 1;
+  const unit = Math.min(0.135, len(frame, 'Width') - widths.reduce((a, b) => a + b, 0) - spare * filler - 0.002);
+  if (unit < 0.03) return;
+  const name = tablix.attributes.Name ?? '';
+  const base = name.replace(/_Tab_\d+$/, '');
+  const used = descendants(root).map((e) => e.attributes.Name ?? '');
+  const next = (re: RegExp) => Math.max(0, ...used.map((n) => Number(re.exec(n)?.[1] ?? 0))) + 1;
+  const pad = `${base}_Tab_${next(new RegExp(`^${base}_Tab_(\\d+)$`))}`;
+  const group = `${base}_grp_${next(new RegExp(`^${base}_grp_(\\d+)$`))}`;
+  const own = descendants(root).find((e) => e.name === 'DataSet' && e.attributes.Name === dataSet);
+  const declared = new Set(descendants(child(own ?? el('x'), 'Fields') ?? el('x')).filter((e) => e.name === 'Field').map((e) => e.attributes.Name ?? ''));
+  const fields = [...new Set([...toXml(tablix).matchAll(/Fields!(\w+)\.Value/g)].map((m) => m[1]!))].filter((f) => declared.has(f));
+  if (!fields.length) return;
+  const key = `=${fields.map((f) => `CStr(Fields!${f}.Value)`).join(' & "|" & ')}`;
+  const half = conds.map((c, i) => (c ? `IIf(Max(IIf(${c}, 0, 1), "${dataSet}") = 0, ${Math.round(widths[i]! / 2 * 100000) / 100000}, 0)` : '')).filter(Boolean);
+  const count = `=1 + CInt(Math.Round((${half.join(' + ')}) / ${Math.round(unit * 100000) / 100000}))`;
+  const box = (i: number) => el('TablixCell', el('CellContents', el('Textbox', { Name: `${pad}_blnk${i}_txt` }, el('CanGrow', 'false'), el('KeepTogether', 'true'),
+    el('Paragraphs', el('Paragraph', el('TextRuns', el('TextRun', el('Value', ''), el('Style'))), el('Style'))), el('Style', el('Border', el('Style', 'None'))))));
+  const spacer = el('Tablix', { Name: pad },
+    el('TablixBody',
+      el('TablixColumns', ...Array.from({ length: spare }, () => el('TablixColumn', el('Width', inch(filler)))), el('TablixColumn', el('Width', inch(unit)))),
+      el('TablixRows', el('TablixRow', el('Height', inch(Math.min(0.125, bottom - top))), el('TablixCells', ...Array.from({ length: spare + 1 }, (_, i) => box(i + 1)))))),
+    el('TablixColumnHierarchy', el('TablixMembers', ...Array.from({ length: spare }, () => el('TablixMember')),
+      el('TablixMember', el('Group', { Name: group }, el('GroupExpressions', el('GroupExpression', key)),
+        el('Filters', el('Filter', el('FilterExpression', key), el('Operator', 'TopN'), el('FilterValues', el('FilterValue', count)))))))),
+    el('TablixRowHierarchy', el('TablixMembers', el('TablixMember'))),
+    el('DataSetName', dataSet),
+    el('Top', inch(top)), el('Left', '0in'), el('Height', inch(Math.min(0.125, bottom - top))), el('Width', inch(spare * filler + unit)),
+    el('Style', el('Border', el('Style', 'None'))));
+  setChild(tablix, 'Left', inch(spare * filler + unit));
+  holder.children.splice(holder.children.indexOf(tablix) + 1, 0, spacer);
 }
 
 function liftWrapper(outer: XmlElement): void {

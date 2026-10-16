@@ -611,7 +611,15 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     };
     const { converted, root } = build(0);
     const tables = descendants(root).filter((e) => e.name === 'Tablix');
-    assert.equal(tables.length, 1, 'one table for every block');
+    assert.equal(tables.length, 2, 'one table for every block, and the one beside it that moves it');
+    const pad = tables[1]!;
+    const members = childElements(child(pad, 'TablixColumnHierarchy/TablixMembers')!, 'TablixMember');
+    assert.equal(members.length, childElements(child(tables[0]!, 'TablixColumnHierarchy/TablixMembers')!, 'TablixMember').length, 'as many columns as the table, so trimming either keeps both whole');
+    assert.ok(members.slice(0, -1).every((m) => !child(m, 'Group')) && textOf(child(members.at(-1)!, 'Group/Filters/Filter/Operator')) === 'TopN', 'only its last column grows, so a merge dropping any column drops the growth');
+    const grows = textOf(child(members.at(-1)!, 'Group/Filters/Filter/FilterValues/FilterValue'));
+    assert.ok(/head_2/.test(grows) && grows.includes(`"${textOf(child(tables[0]!, 'DataSetName'))}"`), grows);
+    assert.equal(textOf(child(tables[0]!, 'Left')), textOf(child(pad, 'Width')), 'the table starts where the one beside it ends');
+    assert.ok(descendants(root).find((e) => e.name === 'ReportItems' && e.children.includes(tables[0]!))!.children.indexOf(pad) > 0, 'the table stays first for the merges');
     const names = descendants(tables[0]!).filter((e) => e.name === 'Textbox').map((e) => e.attributes.Name ?? '');
     for (const col of ['row_text', 'amount_1', 'amount_2', 'amount_3']) assert.ok(names.includes(`Blocks_Tab_1_${col}_ColTxt`) && names.includes(`Blocks_Tab_1_${col}_ColVal`), `${col} heading and value: ${names.join(' ')}`);
     const query = descendants(root).filter((e) => e.name === 'CommandText').map((e) => textOf(e)).join('\n');
