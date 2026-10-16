@@ -13,6 +13,7 @@
  * Everything that cannot be converted faithfully is listed in the review notes.
  */
 
+import { foldRepeatedSubreports } from './fold.ts';
 import type {
   AreaInfo,
   BorderInfo,
@@ -415,7 +416,12 @@ export function spreadFormulaColumns(definition: ReportDefinition): { definition
 export function convertToRdl(definition: ReportDefinition, dataSource: DataSourceInfo | undefined, options: RdlOptions): RdlResult {
   designedWide.clear();
   wideItems.clear();
-  return new RdlBuilder(definition, dataSource ?? { connections: [], tables: [], links: [] }, options).build();
+  const folded = options.rulesAsText && !options.subreport && options.subreports ? foldRepeatedSubreports(definition, options.subreports) : undefined;
+  const result = new RdlBuilder(folded?.definition ?? definition, dataSource ?? { connections: [], tables: [], links: [] }, folded ? { ...options, subreports: folded.subreports } : options).build();
+  for (const run of folded?.folded ?? []) {
+    result.review.push({ item: 'Subreports', message: `Subdocuments ${run.join(', ')} have one layout over tables of the same columns: they are one table, grouped by block (${run.length} blocks, in their order), reading one query that joins their rows` });
+  }
+  return result;
 }
 
 class RdlBuilder {
