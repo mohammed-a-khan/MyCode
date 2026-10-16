@@ -81,31 +81,34 @@ function fold(run: SectionInfo[], subreports: Map<number, SubreportInfo>): Subre
     formulas: lead.formulas.map((f) => (/^Group #1 Order$/i.test(f.name) ? { ...f, referencedFields: [field] } : f)),
     layout,
   };
-  emptyColumnsUnruled(definition, alias);
+  emptyColumnsUnruled(definition);
   const table: TableInfo = { alias, name: alias, kind: 'command', sql, fields: [{ name: BLOCK, type: 'number' }, ...tables[0]!.fields] };
   const dataSource: DataSourceInfo = { ...infos[0]!.dataSource!, tables: [table], links: [] };
   return { ...infos[0]!, definition, dataSource };
 }
 
-function emptyColumnsUnruled(definition: ReportDefinition, alias: string): void {
-  const heads = definition.layout.filter((a) => /^GroupHeader/i.test(a.name)).flatMap((a) => a.sections[0]?.objects ?? [])
-    .filter((o) => o.kind === 'field' && o.field?.startsWith(`${alias}.`));
+function emptyColumnsUnruled(definition: ReportDefinition): void {
+  const heads = definition.layout.filter((a) => /^GroupHeader/i.test(a.name)).flatMap((a) => a.sections.flatMap((s) => s.objects))
+    .filter((o) => o.kind === 'field' && o.field && !o.field.startsWith('@') && o.position && o.size);
   const texts = [...(definition.formulaTexts ?? [])];
   let next = Math.max(texts.length, ...definition.formulas.map((f) => (f.index ?? 0) + 1));
   const formulas = [...definition.formulas];
+  const overlap = (a: { position?: { x: number }; size?: { width: number } }, b: typeof a) => {
+    const [a0, a1, b0, b1] = [a.position!.x, a.position!.x + a.size!.width, b.position!.x, b.position!.x + b.size!.width];
+    return Math.min(a1, b1) - Math.max(a0, b0) > Math.min(a1 - a0, b1 - b0) / 2;
+  };
   definition.layout = definition.layout.map((area) => !/^Detail/i.test(area.name) ? area : {
     ...area,
     sections: area.sections.map((section) => ({
       ...section,
       objects: section.objects.map((o) => {
         const ref = o.conditions?.topLine;
-        const head = heads.find((h) => h.position?.x === o.position?.x && h.size?.width === o.size?.width);
+        const head = o.position && o.size ? heads.find((h) => overlap(h, o)) : undefined;
         const text = ref && (texts[ref.index] ?? formulas.find((f) => f.index === ref.index)?.text);
-        const m = text && /^\s*IF\s+(.+?)\s+THEN\s+(\S+)\s+ELSE\s+(\S+)\s*$/is.exec(text);
-        if (!ref || !head || !m) return o;
+        if (!ref || !head || !text?.trim()) return o;
         const index = next++;
         const field = `{${head.field}}`;
-        const own = `IF (${m[1]}) and not IsNull(${field}) and Trim(${field}) <> "" THEN ${m[2]} ELSE ${m[3]}`;
+        const own = `IF IsNull(${field}) or Trim(${field}) = "" THEN crNoLine ELSE (${text.trim().replace(/;\s*$/, '')})`;
         texts[index] = own;
         const lead = formulas.find((f) => f.index === ref.index);
         formulas.push({ ...(lead ?? { kind: 'conditionalFormat', name: ref.name }), index, text: own, referencedFields: [...(lead?.referencedFields ?? []), head.field!] } as typeof formulas[number]);

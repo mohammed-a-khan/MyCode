@@ -2213,6 +2213,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
   for (const tablix of tablixes) { alignTotals(tablix); pairSides(tablix); }
   for (const tablix of tablixes) repeatTogether(tablix);
   for (const outer of childElements(descendants(report).find((e) => e.name === 'Body') ?? el('x'), 'ReportItems').flatMap((r) => childElements(r, 'Rectangle'))) liftWrapper(outer);
+  for (const tablix of tablixes) trimToHeadings(tablix);
   const lead = tablixes[0];
   const folded = !!lead && foldLead(lead, review);
   for (const tablix of tablixes) {
@@ -2937,6 +2938,45 @@ function foldOverlays(tablix: XmlElement): void {
       }
     }
   });
+}
+
+function trimToHeadings(tablix: XmlElement): void {
+  const rows = rowsOf(tablix);
+  const leaves = rowLeaves(tablix);
+  if (leaves.length !== rows.length) return;
+  const fieldOfHeading = (cell: XmlElement) => {
+    const t = cellItem(cell);
+    return t?.name === 'Textbox' && /_ColTxt$/.test(t.attributes.Name ?? '') ? /^=Fields!(\w+)\.Value$/.exec(valueOf(t).trim())?.[1] : undefined;
+  };
+  const at = rows.findIndex((row) => cellsOf(row).filter(fieldOfHeading).length >= 2);
+  if (at < 0 || leaves[at]!.kind !== 'groupHeading') return;
+  const conds = cellsOf(rows[at]!).map((cell) => {
+    const f = fieldOfHeading(cell);
+    return f ? `IsNothing(Fields!${f}.Value) OrElse Trim(CStr(Fields!${f}.Value)) = ""` : undefined;
+  });
+  if (cellsOf(rows[at]!).some((cell) => Number(textOf(child(child(cell, 'CellContents') ?? el('x'), 'ColSpan')) || 1) > 1)) return;
+  let end = at + 1;
+  while (end < rows.length && leaves[end]!.kind === leaves[at]!.kind && leaves[end]!.kind !== 'detail') end++;
+  const wrap = (value: string, off: string, cond: string) => `=IIf(${cond}, "${off}", ${value.startsWith('=') ? value.slice(1) : `"${value}"`})`;
+  for (const row of rows.slice(at, end)) {
+    const cells = cellsOf(row);
+    if (cells.length !== conds.length) continue;
+    cells.forEach((cell, c) => {
+      const cond = conds[c];
+      if (!cond) return;
+      for (const t of descendants(cell).filter((e) => e.name === 'Textbox')) {
+        const st = childElements(t, 'Style')[0];
+        if (!st) continue;
+        const fill = child(st, 'BackgroundColor');
+        if (fill && textOf(fill) && !/^transparent$/i.test(textOf(fill))) setChild(st, 'BackgroundColor', wrap(textOf(fill), 'Transparent', cond));
+        for (const side of ['Border', 'TopBorder', 'BottomBorder', 'LeftBorder', 'RightBorder']) {
+          const border = child(st, side);
+          const style = border && child(border, 'Style');
+          if (style && textOf(style) && !/^none$/i.test(textOf(style))) setChild(border!, 'Style', wrap(textOf(style), 'None', cond));
+        }
+      }
+    });
+  }
 }
 
 function liftWrapper(outer: XmlElement): void {

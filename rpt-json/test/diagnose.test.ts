@@ -609,6 +609,9 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     assert.equal(textOf(child(group, 'PageBreak/BreakLocation')), 'Between', 'each block on a page of its own, as each printed');
     const rule = descendants(tables[0]!).find((e) => e.name === 'Line' && /amount_2/.test(e.attributes.Name ?? ''))!;
     assert.match(textOf(child(rule, 'Style/Border/Style')), /head_2/, 'no rule over a column the block has no heading for');
+    const heading = descendants(tables[0]!).find((e) => e.attributes.Name === 'Blocks_Tab_1_amount_2_ColTxt')!;
+    const sides = descendants(childElements(heading, 'Style')[0]!).filter((e) => /Border$/.test(e.name)).map((e) => textOf(child(e, 'Style'))).filter((v) => v && v !== 'None');
+    assert.ok(sides.length && sides.every((v) => /head_2/.test(v)), 'the heading rules stop where the block has no heading');
     assert.ok(converted.review.some((r) => r.item === 'Subreports'));
     const apart = build(200).root;
     assert.equal(descendants(apart).filter((e) => e.name === 'Tablix').length, 3, 'layouts that differ stay apart');
