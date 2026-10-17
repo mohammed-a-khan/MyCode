@@ -909,6 +909,8 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       : [el('DataSourceReference', conv.dataSource.reference!), el('rd:SecurityType', 'None'), id ?? null];
     for (const e of descendants(report)) if (e.name === 'DataSourceName' && textOf(e) === old) e.children = [conv.dataSource.name];
   }
+  const sets = descendants(report).filter((e) => e.name === 'DataSet' && e.attributes.Name !== conv.style?.dataset);
+  if (dataSources[0] && sets.length > 1 && !child(dataSources[0], 'Transaction')) dataSources[0].children.unshift(el('Transaction', 'true'));
   const dataSets = descendants(report).filter((e) => e.name === 'DataSet');
   const firstTablix = descendants(report).find((e) => e.name === 'Tablix' && textOf(child(e, 'DataSetName')));
   const mainName = textOf(child(firstTablix, 'DataSetName')) || dataSets[0]?.attributes.Name || '';
@@ -1962,6 +1964,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       items.children = [wrapper];
     }
     roomForDates(body);
+    clearOfLines(body);
     plainLines(report);
     checkLayout(report, body, review);
   }
@@ -3604,6 +3607,59 @@ function literalLines(value: string): string[] | undefined {
     rest = rest.slice(m[0].length);
   }
   return !expectPart && lines.length > 1 ? lines : undefined;
+}
+
+function clearOfLines(body: XmlElement): void {
+  const near = 0.15;
+  const gap = 0.03;
+  for (const holder of descendants(body).filter((e) => e.name === 'ReportItems')) {
+    const lines = childElements(holder, 'Line').filter((l) => len(l, 'Width') <= 0.02 && len(l, 'Height') > 0.1);
+    if (!lines.length) continue;
+    const tables: { t: XmlElement; x: number; y: number }[] = [];
+    const walk = (items: XmlElement[], dx: number, dy: number) => {
+      for (const e of items) {
+        if (e.name === 'Tablix') tables.push({ t: e, x: dx + len(e, 'Left'), y: dy + len(e, 'Top') });
+        else if (e.name === 'Rectangle') walk(childElements(child(e, 'ReportItems') ?? el('x')), dx + len(e, 'Left'), dy + len(e, 'Top'));
+      }
+    };
+    walk(childElements(holder).filter((e) => e.name !== 'Line'), 0, 0);
+    for (const line of lines) {
+      const x = len(line, 'Left');
+      const top = len(line, 'Top');
+      const bottom = top + len(line, 'Height');
+      for (const { t, x: tx, y: ty } of tables) {
+        const widths = widthsOf(t);
+        let start = tx;
+        for (const [c, w] of widths.entries()) {
+          const d = x - start;
+          if (d >= 0 && d < Math.min(near, w / 2)) {
+            let rowTop = ty;
+            for (const row of rowsOf(t)) {
+              const h = len(row, 'Height');
+              const cell = cellsOf(row)[c];
+              const item = cell && cellItem(cell);
+              if (item && rowTop < bottom && rowTop + h > top) {
+                const clear = d + gap;
+                if (item.name === 'Textbox' && !isBlank(item) && !/right|center/i.test(textAlignOf(item)) && paddingOf(item, ['PaddingLeft']) < clear) {
+                  setChild(ownStyle(item), 'PaddingLeft', `${Math.round(clear * 720) / 10}pt`);
+                } else if (item.name === 'Rectangle') {
+                  for (const inner of childElements(child(item, 'ReportItems') ?? el('x')).filter((e) => e.name === 'Textbox' && !isBlank(e) && child(e, 'Left'))) {
+                    const left = len(inner, 'Left');
+                    const at = rowTop + len(inner, 'Top');
+                    if (left >= clear || at >= bottom || at + len(inner, 'Height') <= top || /right|center/i.test(textAlignOf(inner))) continue;
+                    setChild(inner, 'Left', inch(clear));
+                    setChild(inner, 'Width', inch(Math.max(0.1, len(inner, 'Width') - (clear - left))));
+                  }
+                }
+              }
+              rowTop += h;
+            }
+          }
+          start += w;
+        }
+      }
+    }
+  }
 }
 
 function roomForDates(body: XmlElement): void {
