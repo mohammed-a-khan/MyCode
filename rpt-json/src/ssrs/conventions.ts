@@ -3009,7 +3009,7 @@ function trimToHeadings(tablix: XmlElement): (string | undefined)[] | undefined 
   const columns = childElements(child(tablix, 'TablixColumnHierarchy/TablixMembers') ?? el('x'), 'TablixMember');
   if (columns.length === conds.length) {
     columns.forEach((m, c) => {
-      if (conds[c] && !child(m, 'Visibility') && !child(m, 'TablixMembers')) m.children.push(el('Visibility', el('Hidden', `=Max(IIf(${conds[c]}, 0, 1)) = 0`)));
+      if (conds[c] && !child(m, 'Visibility') && !child(m, 'TablixMembers')) m.children.push(el('Visibility', el('Hidden', `=CountRows() > 0 AndAlso Max(IIf(${conds[c]}, 0, 1)) = 0`)));
     });
   }
   rows.slice(at).forEach((row, n) => {
