@@ -60,6 +60,17 @@ export const alternates = (a: XmlElement, b: XmlElement): boolean => {
   const p = shown(x);
   const q = shown(y);
   if (p && q && p.on === q.on && p.value !== q.value && p.equal === q.equal) return true;
+  const compare = (r: string) => {
+    const m = /^(.+?)\s*(<>|>=|<=|=|>|<)\s*(-?\d+(?:\.\d+)?)$/.exec(unwrap(r));
+    return m ? { on: unwrap(m[1]!).replace(/^(?:CountRows\([^)]*\)|Count\(Fields!\w+\.Value(?:,\s*"[^"]*")?\))$/i, 'CountRows()'), op: m[2]!, n: Number(m[3]) } : undefined;
+  };
+  const cx = compare(x);
+  const cy = compare(y);
+  if (cx && cy && cx.on === cy.on && cx.n === cy.n) {
+    const pair = `${cx.op} ${cy.op}`;
+    if (['= <>', '<> =', '> <=', '<= >', '< >=', '>= <'].includes(pair)) return true;
+    if (cx.n === 0 && /^CountRows\(/i.test(cx.on) && ['= >', '> ='].includes(pair)) return true;
+  }
   const shape = (r: string) => r.replace(/<>\s*(-?\d+(?:\.\d+)?|"[^"]*")/g, '<> #');
   const first = (r: string) => /^\((.*)\) OrElse Not \((.*)\)$/.exec(r);
   const fx = first(x);
