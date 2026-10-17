@@ -1964,6 +1964,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     roomForDates(body);
     rulesAsLines(body);
     oneOfAlternates(body);
+    bandsInFrames(body);
     clearOfLines(body);
     plainLines(report);
     checkLayout(report, body, review);
@@ -2282,7 +2283,28 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     const kept = conds && centreBlock(root, tablix, conds);
     if (kept) review.push({ item: tablix.attributes.Name ?? 'Table', message: `stays at the left, not centred on the columns in use: ${kept}` });
   }
+  takeTurns(root, conv, S);
   return { rdl: toXml(withFunctions(root, extra.sqlFunctions ?? [])), review, settled: conv.dataSource ? ['Data source'] : [], ...(Object.keys(files).length ? { files } : {}) };
+}
+
+function takeTurns(root: XmlElement, conv: Conventions, name: string): void {
+  const sets = descendants(root).filter((e) => e.name === 'DataSet' && e.attributes.Name !== conv.style?.dataset && child(e, 'Query'));
+  if (sets.length < 2) return;
+  const resource = `N'${name.replace(/'/g, "''")}'`;
+  for (const set of sets) {
+    const query = child(set, 'Query')!;
+    if (!/^StoredProcedure$/i.test(textOf(child(query, 'CommandType')))) continue;
+    const called = textOf(child(query, 'CommandText')).trim();
+    if (!called || called.startsWith('=')) continue;
+    const params = childElements(child(query, 'QueryParameters') ?? el('x'), 'QueryParameter').map((q) => q.attributes.Name ?? '').filter((n) => /^@\w+$/.test(n));
+    child(query, 'CommandType')!.children = ['Text'];
+    child(query, 'CommandText')!.children = [[
+      `EXEC sp_getapplock @Resource = ${resource}, @LockMode = 'Exclusive', @LockOwner = 'Session', @LockTimeout = 600000;`,
+      `BEGIN TRY EXEC ${called}${params.length ? ` ${params.map((n) => `${n} = ${n}`).join(', ')}` : ''}; END TRY`,
+      `BEGIN CATCH EXEC sp_releaseapplock @Resource = ${resource}, @LockOwner = 'Session'; THROW; END CATCH;`,
+      `EXEC sp_releaseapplock @Resource = ${resource}, @LockOwner = 'Session';`,
+    ].join('\n')];
+  }
 }
 
 /** The functions (and the values they keep) of VB code that the names called reach, in their order. */
@@ -3633,6 +3655,32 @@ function literalLines(value: string): string[] | undefined {
     rest = rest.slice(m[0].length);
   }
   return !expectPart && lines.length > 1 ? lines : undefined;
+}
+
+function bandsInFrames(body: XmlElement): void {
+  const rule = (e: XmlElement) => textOf(child(e, 'Visibility/Hidden')).replace(/\s+/g, '');
+  for (const holder of descendants(body).filter((e) => e.name === 'ReportItems')) {
+    for (let moved = true; moved;) {
+      moved = false;
+      const list = childElements(holder).filter((e) => e.name === 'Rectangle' && child(e, 'Top'));
+      for (const band of list.filter((e) => !child(e, 'ReportItems') && rule(e) && drawnAs(e))) {
+        const b = { l: len(band, 'Left'), t: len(band, 'Top'), r: len(band, 'Left') + len(band, 'Width'), h: len(band, 'Height') };
+        const frame = list.find((f) => f !== band && child(f, 'ReportItems') && rule(f) === rule(band) && len(f, 'Height') > b.h + 0.1
+          && b.l >= len(f, 'Left') - 0.001 && b.r <= len(f, 'Left') + len(f, 'Width') + 0.001 && b.t >= len(f, 'Top') - 0.001 && b.t + b.h <= len(f, 'Top') + len(f, 'Height') + 0.001);
+        if (!frame) continue;
+        setChild(band, 'Top', inch(b.t - len(frame, 'Top')));
+        setChild(band, 'Left', inch(b.l - len(frame, 'Left')));
+        removeChildren(band, ['Visibility']);
+        bands.add(band);
+        holder.children = holder.children.filter((c) => c !== band);
+        const inner = child(frame, 'ReportItems')!;
+        inner.children.push(band);
+        separate(inner, []);
+        moved = true;
+        break;
+      }
+    }
+  }
 }
 
 function oneOfAlternates(body: XmlElement): void {

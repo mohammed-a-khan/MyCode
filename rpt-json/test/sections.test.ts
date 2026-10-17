@@ -104,6 +104,17 @@ describe('sections of a report made of many parts', () => {
     assert.ok(!descendants(tablix).some((e) => e.name === 'GroupExpression' && textOf(e) === '=1'), 'the heading rows repeat on each page with the band');
   });
 
+  it('reads the procedures of a report one after another, so one writing does not clash with another reading', () => {
+    const fields = ['name', 'owner_key'];
+    const rdl = build([sub(listing('first_rows'), table('first_rows_get', 'storedProcedure', fields), 1), sub(listing('second_rows'), table('second_rows_get', 'storedProcedure', fields), 2)], [[subreport(1)], [subreport(2)]]);
+    const queries = descendants(parseXml(rdl)).filter((e) => e.name === 'Query' && /_rows_get/.test(textOf(child(e, 'CommandText'))));
+    assert.equal(queries.length, 2);
+    for (const q of queries) {
+      assert.equal(textOf(child(q, 'CommandType')), 'Text');
+      assert.match(textOf(child(q, 'CommandText')), /^EXEC sp_getapplock @Resource = N'Parts'[\s\S]*BEGIN TRY EXEC [\w.]+_rows_get[\s\S]*THROW; END CATCH;\nEXEC sp_releaseapplock/);
+    }
+  });
+
   it('leaves out a hidden field that only sets a variable nothing reads', () => {
     const T = 'rows';
     const setter = { kind: 'formula', name: 'Counted', index: 3, text: `WhilePrintingRecords; shared numbervar counted; counted := 0; counted := {${T}.amount}; counted;`, referencedFields: [`${T}.amount`], valueType: 'number' };
