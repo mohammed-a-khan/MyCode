@@ -43,6 +43,7 @@
  */
 
 import { child, childElements, descendants, el, parseXml, textOf, toXml, type XmlElement } from './xml.ts';
+import { alternates } from './diagnose.ts';
 import { parametersLayout, type ReviewNote } from './rdl.ts';
 
 const NAME_KEYS = ['rect', 'table', 'title', 'heading', 'value', 'groupText', 'subtotalText', 'subtotal', 'totalText', 'total',
@@ -766,6 +767,7 @@ const groupLabels = new WeakSet<XmlElement>();
 const summaryNames = new WeakMap<XmlElement, string>();
 const underRule = new WeakSet<XmlElement>();
 const boxedHeads = new WeakSet<XmlElement>();
+const headingBlock = new WeakSet<XmlElement>();
 const summaryHeights = new WeakMap<XmlElement, number>();
 const totalBoxes = new WeakMap<XmlElement, { left: number; right: number; top: number }>();
 const summaryPads = new WeakMap<XmlElement, [string, string]>();
@@ -858,6 +860,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
   const S = snake(prefix ?? conv.prefixes[reportName.toLowerCase()] ?? reportName) || 'Report';
   designText = !!conv.style;
   sourceOf.clear();
+  dropNeverShown(report);
   for (const f of descendants(report).filter((e) => e.name === 'Field' && child(e, 'Value'))) {
     const read = [...new Set([...textOf(child(f, 'Value')).matchAll(/Fields!(\w+)\.Value/g)].map((x) => x[1]!))];
     if (read.length === 1 && f.attributes.Name) sourceOf.set(f.attributes.Name, read[0]!);
@@ -1049,6 +1052,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     if (tablix === tablixes[0]) foldLead(tablix, review);
     if (headerTitle && tablix === tablixes[0] && container) takeBlock(tablix, container);
     summarize(tablix);
+    widenNarrow(tablix);
     if (tablix === tablixes[0]) closeGap(tablix);
     if (tablix === tablixes[0]) foldLead(tablix, review);
     const widths = widthsOf(tablix);
@@ -1838,7 +1842,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           if (roles.has(tb) || isBlank(tb)) continue;
           const numeric = isNumber(tb);
           const totalled = TOTALLED.test(valueOf(tb));
-          roles.set(tb, summaryNames.has(tb) ? (/HdrVal$/.test(summaryNames.get(tb)!) ? 'totalValue' : 'totalLabel') : kind === 'heading' || headingsHere ? (c === 0 ? 'headingFirst' : 'heading')
+          roles.set(tb, headingBlock.has(tb) ? (c === 0 ? 'headingFirst' : 'heading') : summaryNames.has(tb) ? (/HdrVal$/.test(summaryNames.get(tb)!) ? 'totalValue' : 'totalLabel') : kind === 'heading' || headingsHere ? (c === 0 ? 'headingFirst' : 'heading')
             : kind === 'detail' ? (numeric ? 'number' : c === 0 ? 'bodyFirst' : 'body')
               : kind === 'groupHeading' ? 'group'
                 : kind === 'noData' ? 'body'
@@ -1957,6 +1961,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
         el('Style', el('Border', el('Style', 'None'))));
       items.children = [wrapper];
     }
+    roomForDates(body);
     plainLines(report);
     checkLayout(report, body, review);
   }
@@ -2438,6 +2443,8 @@ function fitTablix(tablix: XmlElement): number {
  * piled up. A box drawn round other items holds them; a text running on over its neighbour stops where the neighbour
  * starts (centred text equally at both ends, so it stays centred); what is left is listed for review.
  */
+const CHARTS = new Set(['Chart', 'GaugePanel', 'Map']);
+
 function separate(container: XmlElement, review: ReviewNote[]): void {
   const box = (e: XmlElement) => ({ l: len(e, 'Left'), t: len(e, 'Top'), r: len(e, 'Left') + len(e, 'Width'), b: len(e, 'Top') + len(e, 'Height') });
   const items = () => childElements(container).filter((e) => ITEMS.has(e.name) && e.name !== 'Line' && child(e, 'Top'));
@@ -2513,6 +2520,12 @@ function separate(container: XmlElement, review: ReviewNote[]): void {
           setChild(a, 'Left', inch(O.l));
           setChild(a, 'Width', inch(O.r - O.l));
           if (A.b > O.b) setChild(a, 'Height', inch(O.b - A.t));
+          changed = true;
+          break pairs;
+        }
+        if (CHARTS.has(o.name) && A.t <= O.t + 0.001 && A.b < O.b - 0.5 && ox > (A.r - A.l) / 2 && !isBlank(a)) {
+          setChild(o, 'Top', inch(A.b));
+          setChild(o, 'Height', inch(O.b - A.b));
           changed = true;
           break pairs;
         }
@@ -2641,6 +2654,35 @@ function withFunctions(root: XmlElement, functions: string[]): XmlElement {
   return copy;
 }
 
+function widenNarrow(tablix: XmlElement): void {
+  const columns = childElements(child(tablix, 'TablixBody/TablixColumns') ?? el('x'), 'TablixColumn');
+  const widths = columns.map((c) => len(c, 'Width'));
+  const rows = rowsOf(tablix);
+  const kinds = rowLeaves(tablix).map((l) => l.kind);
+  if (widths.length < 3 || kinds.length !== rows.length) return;
+  const sides = 4 / 72;
+  const need = widths.map(() => 0);
+  rows.forEach((row, i) => cellsOf(row).forEach((cell, k) => {
+    const contents = child(cell, 'CellContents');
+    const t = cellItem(cell);
+    if (!contents || Number(textOf(child(contents, 'ColSpan')) || 1) > 1 || t?.name !== 'Textbox' || child(t, 'Visibility') || isBlank(t)) return;
+    const text = fixedText(t);
+    if ((kinds[i] === 'heading' || headingBlock.has(t)) && text !== undefined) {
+      const sizes = descendants(t).filter((e) => e.name === 'FontSize' && !textOf(e).startsWith('=')).map((e) => (inches(textOf(e)) ?? 0) * 72);
+      const size = Math.max(Math.max(...sizes, 0) || 8, designText ? DESIGN_FONT : 0);
+      need[k] = Math.max(need[k]!, ...text.split(/\s+/).map((w) => arialWidth(w, size, true) * 1.05 + sides));
+    }
+  }));
+  const short = widths.map((w, k) => Math.max(0, need[k]! - w));
+  const wanted = short.reduce((a, b) => a + b, 0);
+  const slack = widths.map((w, k) => (short[k]! > 0 ? 0 : Math.max(0, w - Math.max(need[k]!, 1.5))));
+  const spare = slack.reduce((a, b) => a + b, 0);
+  if (wanted < 0.01 || spare < 0.01) return;
+  const give = Math.min(1, spare / wanted);
+  const take = Math.min(1, wanted / spare);
+  columns.forEach((c, k) => setChild(c, 'Width', inch(widths[k]! + short[k]! * give - slack[k]! * take)));
+}
+
 function summarize(tablix: XmlElement): void {
   const rows = rowsOf(tablix);
   const leaves = rowLeaves(tablix);
@@ -2707,6 +2749,7 @@ function summarize(tablix: XmlElement): void {
   const headerCols = new Map<number, string>();
   let blanks = 0;
   const rules = new Map<number, { k: number; left: number; width: number; border: XmlElement; word: string }[]>();
+  let paired = false;
   const built = lines.map((line, li) => {
     const slots: (XmlElement | undefined)[] = Array.from({ length: n }, () => undefined);
     line.sort((a, b) => a.x - b.x);
@@ -2715,7 +2758,7 @@ function summarize(tablix: XmlElement): void {
     const before = cuts.find((c) => c.y > lineTop + 0.001 && c.y <= Math.min(...(lines[li + 1] ?? [{ y: Infinity }]).map((it) => it.y)) + 0.001);
     if (after) headerCols.clear();
     const value = line.find((it) => isField(it.t) && it !== line[0]);
-    const label = value && line[0]!.x < value.x && !headerCols.has(colOf(line[0]!)) ? line[0] : undefined;
+    const label = value && line[0]!.x < value.x && !headerCols.has(colOf(line[0]!)) && !line.some((o) => o.x > line[0]!.x && o.x < value.x && !isField(o.t)) ? line[0] : undefined;
     let labelAside = false;
     const place = (it: Item, want: number) => {
       let k = want;
@@ -2781,6 +2824,7 @@ function summarize(tablix: XmlElement): void {
       }
     }
     if (label && value) {
+      paired = true;
       const field = valueField ?? 'value';
       summaryNames.set(label.t, `${field}_HdrTxt`);
       summaryNames.set(value.t, `${field}_HdrVal`);
@@ -2821,7 +2865,8 @@ function summarize(tablix: XmlElement): void {
         const paired = text !== undefined && /[A-Za-z]{3}/.test(text) && after && isField(after.t) && !headerCols.has(colOf(after)) ? fieldOf(after.t) : undefined;
         summaryNames.set(it.t, paired ? `${paired}_HdrTxt` : `${snake(text ?? 'text') || 'text'}_Txt`);
       }
-      place(it, k);
+      const covered = text !== undefined && /center/i.test(textAlignOf(it.t)) ? widths.map((w, j) => j).filter((j) => Math.min(it.x + it.w, starts[j]! + widths[j]!) - Math.max(it.x, starts[j]!) >= widths[j]! / 2) : [];
+      place(it, covered.length > 1 && covered.every((j, m) => m === 0 || j === covered[m - 1]! + 1) && slots[covered[0]!] === undefined && !line.some((o) => o !== it && colOf(o) === covered[0]) ? covered[0]! : k);
     }
     const top = line[0]!.y;
     const next = lines[li + 1]?.[0]?.y ?? y0;
@@ -2871,7 +2916,46 @@ function summarize(tablix: XmlElement): void {
   }
   const edge = (row: XmlElement, side: string) => cellsOf(row).map((c) => child(childElements(cellItem(c) ?? el('x'), 'Style')[0] ?? el('x'), side)).find((x) => x && /solid|dashed|dotted|double/i.test(textOf(child(x, 'Style'))));
   const gapAfter = rows[block[block.length - 1]! + 1];
-  if (gapAfter && headAt === block[block.length - 1]! + 1) {
+  const heads = !paired && headAt === block[block.length - 1]! + 1 && !rules.size;
+  if (heads && built.length > 1) {
+    const headCells = cellsOf(rows[headAt]!);
+    const lastCells = cellsOf(built[built.length - 1]!);
+    const spanless = (cells: XmlElement[]) => cells.length === n && cells.every((c) => child(c, 'CellContents') && spanOf(c) === 1);
+    const free = (c: XmlElement) => { const h = cellItem(c); return !!h && h.name === 'Textbox' && isBlank(h) && !child(h, 'Visibility'); };
+    const moving = lastCells.map((c, k) => { const t = cellItem(c); return t && !isBlank(t) ? k : -1; }).filter((k) => k >= 0);
+    if (spanless(headCells) && spanless(lastCells) && moving.length && moving.every((k) => free(headCells[k]!))) {
+      for (const k of moving) {
+        const contents = child(headCells[k]!, 'CellContents')!;
+        const blank = cellItem(headCells[k]!)!;
+        const t = cellItem(lastCells[k]!)!;
+        const st = ownStyle(t);
+        for (const side of ['Border', ...BORDER_SIDES, 'BackgroundColor']) {
+          const b = child(childElements(blank, 'Style')[0] ?? el('x'), side);
+          removeChildren(st, [side]);
+          if (b) st.children.push(structuredClone(b));
+        }
+        summaryNames.delete(t);
+        contents.children = contents.children.map((x) => (x === blank ? t : x));
+      }
+      built.pop();
+      setChild(rows[headAt]!, 'Height', inch(0.17));
+    }
+  }
+  if (heads) {
+    for (const r of built) {
+      for (const c of cellsOf(r)) {
+        const t = cellItem(c);
+        if (!t) continue;
+        headingBlock.add(t);
+        for (const v of descendants(t).filter((e) => e.name === 'Value' && /Fields!\w+\.Value/.test(textOf(e)) && !/\b(First|Last|Sum|Max|Min|Avg|Count|CountDistinct|RunningValue)\s*\(/i.test(textOf(e)))) {
+          v.children = [textOf(v).replace(/Fields!\w+\.Value/g, (f) => `First(${f})`)];
+        }
+      }
+      setChild(r, 'Height', inch(0.17));
+      summaryHeights.set(r, 0.17);
+    }
+  }
+  if (gapAfter && headAt === block[block.length - 1]! + 1 && !heads) {
     built.push(el('TablixRow', el('Height', '0.1in'), el('TablixCells', ...widths.map((_, k) => el('TablixCell', el('CellContents', newTextbox(`__summary_gap_${k}`, '', '0pt')))))));
   }
   for (const [row, side] of [[rows[block[0]!]!, 'TopBorder'], [rows[block[block.length - 1]!]!, 'BottomBorder']] as const) {
@@ -2924,7 +3008,7 @@ function summarize(tablix: XmlElement): void {
   const holder = descendants(child(tablix, 'TablixRowHierarchy')!).find((e) => e.name === 'TablixMembers' && e.children.includes(member))!;
   const where = holder.children.indexOf(member);
   holder.children = holder.children.filter((m) => !block.some((i) => leaves[i]!.member === m));
-  holder.children.splice(where, 0, ...built.map(() => { const copy = structuredClone(member); removeChildren(copy, ['RepeatOnNewPage']); return copy; }));
+  holder.children.splice(where, 0, ...built.map(() => { const copy = structuredClone(member); if (!heads) removeChildren(copy, ['RepeatOnNewPage']); return copy; }));
   const columnEls = childElements(child(tablix, 'TablixBody/TablixColumns')!, 'TablixColumn');
   for (const r of built) {
     cellsOf(r).forEach((c, k) => {
@@ -3128,6 +3212,24 @@ function centreBlock(root: XmlElement, tablix: XmlElement, conds: (string | unde
   setChild(tablix, 'Left', inch(spare * filler + unit));
   holder.children.splice(holder.children.indexOf(tablix) + 1, 0, spacer);
   return undefined;
+}
+
+function dropNeverShown(report: XmlElement): void {
+  const text = toXml(report);
+  for (const holder of descendants(report).filter((e) => e.name === 'ReportItems')) {
+    const boxes = childElements(holder).filter((e) => e.name === 'Textbox' && /^=?\s*true\s*$/i.test(textOf(child(e, 'Visibility/Hidden'))));
+    for (const box of boxes) {
+      const name = box.attributes.Name ?? '';
+      if (name && new RegExp(`ReportItems!${name}\\b`).test(text)) continue;
+      holder.children = holder.children.filter((c) => c !== box);
+    }
+  }
+  for (const contents of descendants(report).filter((e) => e.name === 'CellContents')) {
+    const box = childElements(contents).find((e) => e.name === 'Textbox' && /^=?\s*true\s*$/i.test(textOf(child(e, 'Visibility/Hidden'))));
+    if (!box || new RegExp(`ReportItems!${box.attributes.Name ?? ''}\\b`).test(text)) continue;
+    removeChildren(box, ['Visibility']);
+    for (const value of descendants(box).filter((e) => e.name === 'Value')) value.children = [];
+  }
 }
 
 function liftWrapper(outer: XmlElement): void {
@@ -3504,6 +3606,42 @@ function literalLines(value: string): string[] | undefined {
   return !expectPart && lines.length > 1 ? lines : undefined;
 }
 
+function roomForDates(body: XmlElement): void {
+  const sample = (format: string) => format.replace(/'[^']*'/g, (q) => q.slice(1, -1)).replace(/yyyy/g, '0000').replace(/tt/g, 'PM').replace(/[yMdHhms]{1,2}/g, '00');
+  for (const holder of descendants(body).filter((e) => e.name === 'ReportItems')) {
+    const owner = descendants(body).find((e) => child(e, 'ReportItems') === holder);
+    const room = owner && owner.name !== 'Body' ? len(owner, 'Width') : Math.max(0, ...childElements(holder).map((e) => len(e, 'Left') + len(e, 'Width')));
+    const list = childElements(holder).filter((e) => ITEMS.has(e.name) && child(e, 'Width'));
+    for (const box of list.filter((e) => e.name === 'Textbox')) {
+      const formats = descendants(box).filter((e) => e.name === 'Format').map(textOf);
+      if (formats.length !== 1 || !/y/.test(formats[0]!) || !/[dM]/.test(formats[0]!) || formats[0]!.startsWith('=')) continue;
+      const sizes = descendants(box).filter((e) => e.name === 'FontSize').map(textOf);
+      const size = Math.max(sizes.some((v) => v.startsWith('=')) || !sizes.length ? DESIGN_FONT : 0, ...sizes.filter((v) => !v.startsWith('=')).map((v) => (inches(v) ?? 0) * 72));
+      const text = arialWidth(sample(formats[0]!), size, false) * 1.05;
+      const sides = paddingOf(box, ['PaddingLeft', 'PaddingRight']);
+      const left = len(box, 'Left');
+      const width = len(box, 'Width');
+      if (width - sides >= text) continue;
+      const top = len(box, 'Top');
+      const bottom = top + len(box, 'Height');
+      const across = list.filter((o) => o !== box && len(o, 'Top') < bottom - 0.001 && len(o, 'Top') + len(o, 'Height') > top + 0.001
+        && !(len(o, 'Left') < left + width - 0.001 && len(o, 'Left') + len(o, 'Width') > left + 0.001));
+      const rightEdge = Math.min(room || Infinity, ...across.filter((o) => len(o, 'Left') >= left + width - 0.001).map((o) => len(o, 'Left')));
+      const leftEdge = Math.max(0, ...across.filter((o) => len(o, 'Left') + len(o, 'Width') <= left + 0.001).map((o) => len(o, 'Left') + len(o, 'Width')));
+      const want = text + sides - width;
+      const rightward = Math.max(0, Math.min(want, rightEdge - left - width));
+      const leftward = Math.max(0, Math.min(want - rightward, left - leftEdge));
+      setChild(box, 'Left', inch(left - leftward));
+      setChild(box, 'Width', inch(width + rightward + leftward));
+      if (width + rightward + leftward - sides < text) {
+        const st = ownStyle(box);
+        setChild(st, 'PaddingLeft', '0pt');
+        setChild(st, 'PaddingRight', '0pt');
+      }
+    }
+  }
+}
+
 function checkLayout(report: XmlElement, body: XmlElement, review: ReviewNote[]): void {
   const extent = (e: XmlElement) => ({ l: len(e, 'Left'), t: len(e, 'Top'), r: len(e, 'Left') + len(e, 'Width'), b: reach(e) });
   for (const holder of descendants(body).filter((e) => e.name === 'ReportItems')) {
@@ -3512,7 +3650,7 @@ function checkLayout(report: XmlElement, body: XmlElement, review: ReviewNote[])
       for (let j = i + 1; j < list.length; j++) {
         const a = extent(list[i]!);
         const o = extent(list[j]!);
-        if (Math.min(a.r, o.r) - Math.max(a.l, o.l) > 0.001 && Math.min(a.b, o.b) - Math.max(a.t, o.t) > 0.001) {
+        if (Math.min(a.r, o.r) - Math.max(a.l, o.l) > 0.001 && Math.min(a.b, o.b) - Math.max(a.t, o.t) > 0.001 && !alternates(list[i]!, list[j]!)) {
           review.push({ item: `${list[i]!.attributes.Name} / ${list[j]!.attributes.Name}`, message: 'drawn over each other, as in Crystal: a PDF or a print keeps them so, a preview, page, document or workbook moves one aside; place them apart' });
         }
       }

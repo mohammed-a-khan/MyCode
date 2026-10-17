@@ -89,6 +89,15 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     assert.deepEqual(kinds.sort(), ['code: B', 'code: Report', 'cut off: B', 'expression: A_ColTxt', 'name: Rectangle3', 'overlap: A_ColTxt / B'].sort());
   });
 
+  it('takes two items shown one at a time in the same place as alternates, not as drawn over each other', () => {
+    const box = (name: string, hidden: string) => `<Textbox Name="${name}"><Paragraphs><Paragraph><TextRuns><TextRun><Value>x</Value></TextRun></TextRuns></Paragraph></Paragraphs><Visibility><Hidden>${hidden}</Hidden></Visibility><Top>0in</Top><Left>0in</Left><Height>0.2in</Height><Width>1in</Width></Textbox>`;
+    const rdl = (a: string, b: string) => `<Report><ReportSections><ReportSection><Body><ReportItems>${box('Shown', a)}${box('Other', b)}</ReportItems><Height>1in</Height></Body><Width>1in</Width><Page><PageWidth>8.5in</PageWidth></Page></ReportSection></ReportSections></Report>`;
+    const overlaps = (a: string, b: string) => diagnoseRdl(rdl(a, b)).filter((f) => f.kind === 'overlap').length;
+    assert.equal(overlaps('=Parameters!k.Value = 1', '=Not (Parameters!k.Value = 1)'), 0);
+    assert.equal(overlaps('=(Not ((Parameters!k.Value = 1)))', '=Parameters!k.Value = 1'), 0);
+    assert.equal(overlaps('=Parameters!k.Value = 1', '=Parameters!k.Value = 2'), 1);
+  });
+
   it('takes a heading naming its column from the data as meant, and still lists one showing the column\'s own value', () => {
     const box = (name: string, value: string) => `<Textbox Name="${name}"><Paragraphs><Paragraph><TextRuns><TextRun><Value>${value}</Value></TextRun></TextRuns></Paragraph></Paragraphs></Textbox>`;
     const rdl = `<Report><ReportSections><ReportSection><Body><ReportItems><Tablix Name="T"><TablixBody><TablixRows><TablixRow><TablixCells>
