@@ -28,6 +28,32 @@ const EPS = 0.01;
 const rowsOf = (t: XmlElement) => childElements(child(t, 'TablixBody/TablixRows') ?? t, 'TablixRow');
 const cellsOf = (row: XmlElement) => childElements(child(row, 'TablixCells') ?? row, 'TablixCell');
 const widthsOf = (t: XmlElement) => childElements(child(t, 'TablixBody/TablixColumns') ?? t, 'TablixColumn').map((c) => len(c, 'Width'));
+const hideRule = (e: XmlElement) => textOf(child(e, 'Visibility/Hidden')).replace(/^\s*=\s*/, '').replace(/\s+/g, ' ').trim();
+const unwrap = (s: string): string => {
+  let t = s.trim();
+  while (t.startsWith('(') && t.endsWith(')')) {
+    let depth = 0;
+    let whole = true;
+    for (let k = 0; k < t.length - 1; k++) {
+      if (t[k] === '(') depth++;
+      else if (t[k] === ')') depth--;
+      if (depth === 0) { whole = false; break; }
+    }
+    if (!whole) break;
+    t = t.slice(1, -1).trim();
+  }
+  return t;
+};
+const negated = (s: string): string | undefined => {
+  const m = /^Not\b\s*(.*)$/i.exec(unwrap(s));
+  return m ? unwrap(m[1]!) : undefined;
+};
+export const alternates = (a: XmlElement, b: XmlElement): boolean => {
+  const x = hideRule(a);
+  const y = hideRule(b);
+  if (!x || !y) return false;
+  return negated(x) === unwrap(y) || negated(y) === unwrap(x) || (/^true$/i.test(unwrap(x)) !== /^true$/i.test(unwrap(y)) && /^(true|false)$/i.test(unwrap(x)) && /^(true|false)$/i.test(unwrap(y)));
+};
 const valueOf = (box: XmlElement) => descendants(box).filter((e) => e.name === 'Value' && !child(e, 'Value')).map(textOf).join('');
 
 /** The checks of one .rdl; `template` adds the team template's own (names, empty rows, the merge's headings). */
@@ -68,7 +94,7 @@ export function diagnoseRdl(xml: string, template = false, standardParameters: s
       for (let j = i + 1; j < list.length; j++) {
         const a = extent(list[i]!);
         const o = extent(list[j]!);
-        if (Math.min(a.r, o.r) - Math.max(a.l, o.l) > 0.001 && Math.min(a.b, o.b) - Math.max(a.t, o.t) > 0.001) {
+        if (Math.min(a.r, o.r) - Math.max(a.l, o.l) > 0.001 && Math.min(a.b, o.b) - Math.max(a.t, o.t) > 0.001 && !alternates(list[i]!, list[j]!)) {
           out.push({ kind: 'overlap', item: `${list[i]!.attributes.Name} / ${list[j]!.attributes.Name}`, message: 'drawn over each other' });
         }
       }

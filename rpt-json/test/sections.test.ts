@@ -66,6 +66,44 @@ describe('sections of a report made of many parts', () => {
     assert.match(rdl, /<TextWrapThreshold>20</);
   });
 
+  it('starts a chart under the title drawn over its top', () => {
+    const T = 'chart_rows';
+    const def = { ...empty, parameters: params, groups: [`${T}.label`], formulas: [{ kind: 'internal', name: 'Group #1 Order', index: 2, text: `if IsNull ({${T}.label}) then 2 else 2`, referencedFields: [`${T}.label`] }],
+      layout: [{ name: 'ReportHeaderArea1', sections: [{ name: 'RH1', height: 3200, objects: [
+        text('Heading', 'Spread by label', 0, 0, 4000, 280),
+        { kind: 'chart', name: 'Bars', ...box(0, 135, 4000, 3000), chart: { family: 0, graphType: 0, values: [`Sum of ${T}.amount`], onChangeOf: `${T}.label` } }] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 0, suppressed: true, objects: [] }] }] };
+    const rdl = build([sub(def, table('chart_rows_get', 'storedProcedure', ['label', 'amount']), 1)], [[subreport(1)]]);
+    assert.ok(!diagnoseRdl(rdl, true).some((f) => f.kind === 'overlap'), JSON.stringify(diagnoseRdl(rdl, true).filter((f) => f.kind === 'overlap')));
+  });
+
+  it('keeps headings over two lines in the heading band, each column under its own heading', () => {
+    const T = 'scores';
+    const centred = (name: string, value: string, x: number, y: number, w: number) => ({ ...text(name, value, x, y, w, 210), align: 'center' });
+    const heads = [
+      centred('L1', 'Name', 120, 480, 4000), centred('L2', 'Limit', 4200, 480, 800),
+      centred('L3', 'Latest', 5100, 375, 1100), centred('L4', 'Latest', 6300, 375, 1000), centred('L5', 'Latest Run', 7400, 390, 1500),
+      field('L6', `${T}.run_date`, 9000, 375, 1100, 210), centred('L7', 'Final', 10200, 375, 1100),
+      centred('L8', 'Low', 5100, 600, 1100), centred('L9', 'High', 6300, 600, 1000), centred('L10', 'Score', 7400, 600, 800), centred('L11', 'Grade', 8250, 600, 650),
+      centred('L12', 'Score', 9000, 600, 1100), centred('L13', 'Score', 10200, 600, 1100)];
+    const values = [field('V2', `${T}.limit_value`, 4200, 0, 800, 180), field('V3', `${T}.low_value`, 5100, 0, 1100, 180), field('V4', `${T}.high_value`, 6300, 0, 1000, 180),
+      field('V5', `${T}.score`, 7400, 0, 800, 180), field('V6', `${T}.grade`, 8250, 0, 650, 180), field('V7', `${T}.prior_score`, 9000, 0, 1100, 180), field('V8', `${T}.final_score`, 10200, 0, 1100, 180)];
+    const def = listing(T, [], [], values);
+    def.layout[2] = { name: 'GroupHeaderArea1', sections: [{ name: 'GH1', height: 900, objects: heads }] };
+    const rdl = build([sub(def, table(T, 'table', ['name', 'limit_value', 'low_value', 'high_value', 'score', 'grade', 'prior_score', 'final_score', 'run_date', 'owner_key']), 1)], [[subreport(1)]]);
+    const doc = parseXml(rdl);
+    const tablix = descendants(doc).find((e) => e.name === 'Tablix')!;
+    const rows = descendants(tablix).filter((e) => e.name === 'TablixRow');
+    const cells = (row: typeof rows[number]) => descendants(row).filter((e) => e.name === 'TablixCell').map((c) => descendants(c).filter((e) => e.name === 'Value').map(textOf).join(''));
+    const band = rows.find((r) => cells(r).includes('Name'))!;
+    assert.deepEqual(cells(band), ['Name', 'Limit', 'Low', 'High', 'Score', 'Grade', 'Score', 'Score']);
+    const above = rows[rows.indexOf(band) - 1]!;
+    assert.deepEqual(cells(above).slice(2, 5), ['Latest', 'Latest', 'Latest Run']);
+    const background = (row: typeof rows[number]) => textOf(descendants(row).find((e) => e.name === 'BackgroundColor')!);
+    assert.equal(background(above).replace(/_First/, ''), background(band).replace(/_First/, ''));
+    assert.ok(!descendants(tablix).some((e) => e.name === 'GroupExpression' && textOf(e) === '=1'), 'the heading rows repeat on each page with the band');
+  });
+
   it('leaves out a hidden field that only sets a variable nothing reads', () => {
     const T = 'rows';
     const setter = { kind: 'formula', name: 'Counted', index: 3, text: `WhilePrintingRecords; shared numbervar counted; counted := 0; counted := {${T}.amount}; counted;`, referencedFields: [`${T}.amount`], valueType: 'number' };
@@ -73,4 +111,23 @@ describe('sections of a report made of many parts', () => {
     const rdl = build([sub(def, table(T, 'table', ['name', 'amount', 'owner_key']), 1)], [[subreport(1)]]);
     assert.ok(!/<Code>/.test(rdl) && !/Counted/.test(rdl));
   });
+
+  it('gives a date too narrow for its box the room beside it', () => {
+    const box = (name: string, value: string, left: number, width: number, format = '') => `<Textbox Name="${name}"><CanGrow>true</CanGrow><Paragraphs><Paragraph><TextRuns><TextRun><Value>${value}</Value><Style><FontSize>8pt</FontSize>${format ? `<Format>${format}</Format>` : ''}</Style></TextRun></TextRuns></Paragraph></Paragraphs><Top>0.4in</Top><Left>${left}in</Left><Height>0.19in</Height><Width>${width}in</Width><Style><PaddingLeft>2pt</PaddingLeft><PaddingRight>2pt</PaddingRight></Style></Textbox>`;
+    const rdl = `<Report xmlns="http://schemas.microsoft.com/sqlserver/reporting/2016/01/reportdefinition"><ReportSections><ReportSection><Body><ReportItems><Rectangle Name="Head"><ReportItems>${box('Label', 'As at:', 9.3, 0.35)}${box('Stamp', '=Parameters!run_date.Value', 9.74, 0.578, "MM'/'dd'/'yyyy")}</ReportItems><Top>0in</Top><Left>0in</Left><Height>0.6in</Height><Width>10.5in</Width></Rectangle></ReportItems><Height>0.6in</Height></Body><Width>10.5in</Width><Page /></ReportSection></ReportSections></Report>`;
+    const out = parseXml(applyConventions(rdl, 'Parts', conventions).rdl);
+    const stamp = descendants(out).find((e) => e.name === 'Textbox' && /=Parameters!run_date/.test(descendants(e).filter((v) => v.name === 'Value').map(textOf).join('')))!;
+    const inch = (name: string) => parseFloat(textOf(child(stamp, name)));
+    assert.ok(inch('Width') > 0.6, `width ${inch('Width')}`);
+    assert.ok(inch('Left') >= 9.65 - 0.001 && inch('Left') + inch('Width') <= 10.5 + 0.001, `left ${inch('Left')}`);
+  });
+
+  it('drops a text box that is always hidden, and the code only it called', () => {
+    const box = (name: string, value: string, hidden?: string) => `<Textbox Name="${name}"><Paragraphs><Paragraph><TextRuns><TextRun><Value>${value}</Value></TextRun></TextRuns></Paragraph></Paragraphs>${hidden ? `<Visibility><Hidden>${hidden}</Hidden></Visibility>` : ''}<Top>0in</Top><Left>0in</Left><Height>0.2in</Height><Width>1in</Width></Textbox>`;
+    const rdl = `<Report xmlns="http://schemas.microsoft.com/sqlserver/reporting/2016/01/reportdefinition"><Code>Public Function Counted() As Object\nReturn 1\nEnd Function</Code><ReportSections><ReportSection><Body><ReportItems><Rectangle Name="Box"><ReportItems>${box('Shown', 'Total')}${box('Never', '=Code.Counted()', '=True')}</ReportItems><Top>0in</Top><Left>0in</Left><Height>0.2in</Height><Width>1in</Width></Rectangle></ReportItems><Height>0.2in</Height></Body><Width>1in</Width><Page /></ReportSection></ReportSections></Report>`;
+    const out = applyConventions(rdl, 'Parts', conventions).rdl;
+    assert.ok(!/Counted/.test(out), out);
+    assert.match(out, />Total</);
+  });
 });
+
