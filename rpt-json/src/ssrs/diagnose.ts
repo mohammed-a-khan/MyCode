@@ -121,6 +121,11 @@ export function diagnoseRdl(xml: string, template = false, standardParameters: s
     if (named && !shown.has(named.toLowerCase())) continue;
     if (v.startsWith('=') && !/^="[^"]*"$/.test(v)) out.push({ kind: 'expression', item: box.attributes.Name!, message: `heading is an expression (the designer shows «Expr»): ${v.slice(0, 80)}` });
   }
+  const scoped = descendants(report).filter((e) => ['DataSet', 'Tablix', 'Chart', 'GaugePanel', 'Map', 'Group', 'ChartMember'].includes(e.name) && e.attributes.Name && (e.name !== 'ChartMember' || !!child(e, 'Group')))
+    .map((e) => e.attributes.Name!);
+  for (const name of new Set(scoped.filter((n, i) => scoped.indexOf(n) !== i))) {
+    out.push({ kind: 'name', item: name, message: 'used by more than one data set, data region or group: the report will not run' });
+  }
   for (const item of descendants(report).filter((e) => ITEMS.has(e.name) && DEFAULT_NAME.test(e.attributes.Name ?? ''))) {
     out.push({ kind: 'name', item: item.attributes.Name!, message: 'keeps the designer\'s default name' });
   }
