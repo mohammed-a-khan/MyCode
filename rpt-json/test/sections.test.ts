@@ -39,6 +39,7 @@ describe('sections of a report made of many parts', () => {
     const groups = descendants(parseXml(rdl)).filter((e) => e.name === 'Group').map((e) => e.attributes.Name);
     assert.equal(new Set(groups).size, groups.length, groups.join(', '));
     assert.ok(!diagnoseRdl(rdl, true).some((f) => /more than one/.test(f.message)));
+    assert.equal(textOf(descendants(parseXml(rdl)).find((e) => e.name === 'Transaction')!), 'true', 'the parts are read one after another, as the original ran them');
   });
 
   it('makes one heading of a heading printed on two lines, so each column has one heading', () => {
@@ -120,6 +121,46 @@ describe('sections of a report made of many parts', () => {
     const inch = (name: string) => parseFloat(textOf(child(stamp, name)));
     assert.ok(inch('Width') > 0.6, `width ${inch('Width')}`);
     assert.ok(inch('Left') >= 9.65 - 0.001 && inch('Left') + inch('Width') <= 10.5 + 0.001, `left ${inch('Left')}`);
+  });
+
+  it('starts text in a cell clear of a rule drawn down over the cell', () => {
+    const T = 'facts';
+    const def = { ...listing(T), groups: [], formulas: [], layout: [
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 1000, objects: [
+        text('L1', 'Name:', 0, 120, 1825, 189), field('V1', `${T}.name`, 1870, 120, 2515, 180), text('L2', 'Kind:', 0, 295, 1825, 189), field('V2', `${T}.kind`, 1885, 295, 2515, 180),
+        text('R1', 'Opening Amount:', 4530, 120, 2110, 189), field('W1', `${T}.opening`, 6705, 120, 1835, 180),
+        text('R2', 'Closing Amount:', 4535, 477, 2110, 189), field('W2', `${T}.closing`, 7755, 477, 795, 180)] }] }] };
+    const main = { ...empty, parameters: params, page: { orientation: 'landscape', paperSize: 1 }, layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 0, suppressed: true, objects: [] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 0, suppressed: true, objects: [] }] },
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF1', height: 630, objects: [
+        { kind: 'line', name: 'Rule', ...box(4740, 375, 0, 390), border: { sides: [1, 0, 0, 0], width: 20 } },
+        { kind: 'subreport', name: 'Sub1', subreport: { index: 2, onDemand: false }, ...box(170, 425, 9040, 205) }] }] }] };
+    const converted = convertToRdl(main as never, { connections: [], links: [], tables: [] } as never, { reportName: 'Parts', subreports: new Map([[2, sub(def, table(T, 'table', ['name', 'kind', 'opening', 'closing', 'owner_key']), 1)] as [number, never]]), formulasInQuery: true, rulesAsText: true } as never);
+    const doc = parseXml(applyConventions(converted.rdl, 'Parts', conventions).rdl);
+    const inches = (e: ReturnType<typeof parseXml>, name: string) => parseFloat(textOf(child(e, name)) || '0');
+    let rule = 0;
+    const walk = (e: ReturnType<typeof parseXml>, x: number): void => {
+      for (const c of e.children) {
+        if (typeof c !== 'object' || c === null) continue;
+        const k = c as ReturnType<typeof parseXml>;
+        if (k.name === 'Line') rule = x + inches(k, 'Left');
+        walk(k, ['Rectangle', 'Tablix'].includes(k.name) ? x + inches(k, 'Left') : x);
+      }
+    };
+    walk(descendants(doc).find((e) => e.name === 'Body')!, 0);
+    const tablix = descendants(doc).find((e) => e.name === 'Tablix')!;
+    let left = 0;
+    let parent = descendants(doc).find((e) => e.name === 'ReportItems' && e.children.includes(tablix));
+    for (let p = parent && descendants(doc).find((e) => e.name === 'Rectangle' && child(e, 'ReportItems') === parent); p; p = descendants(doc).find((e) => e.name === 'Rectangle' && child(e, 'ReportItems') === parent)) {
+      left += inches(p, 'Left');
+      parent = descendants(doc).find((e) => e.name === 'ReportItems' && e.children.includes(p!));
+    }
+    const widths = descendants(tablix).filter((e) => e.name === 'TablixColumn').map((c) => inches(c, 'Width'));
+    const label = descendants(tablix).find((e) => e.name === 'Textbox' && descendants(e).some((v) => v.name === 'Value' && textOf(v) === 'Opening Amount:'))!;
+    const cell = descendants(tablix).filter((e) => e.name === 'TablixCell').findIndex((c) => descendants(c).includes(label));
+    const at = left + inches(tablix, 'Left') + widths.slice(0, cell).reduce((a, b) => a + b, 0) + inches(label, 'Left');
+    assert.ok(rule > 0 && at > rule, `text at ${at.toFixed(3)}in, rule at ${rule.toFixed(3)}in`);
   });
 
   it('drops a text box that is always hidden, and the code only it called', () => {
