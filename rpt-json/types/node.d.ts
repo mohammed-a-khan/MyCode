@@ -65,6 +65,7 @@ declare module 'node:fs/promises' {
   export function mkdir(path: string, options?: { recursive?: boolean }): Promise<string | undefined>;
   export function stat(path: string): Promise<{ isDirectory(): boolean; isFile(): boolean; size: number }>;
   export function lstat(path: string): Promise<{ isDirectory(): boolean; isFile(): boolean; isSymbolicLink(): boolean; size: number }>;
+  export function unlink(path: string): Promise<void>;
 }
 
 declare module 'node:path' {

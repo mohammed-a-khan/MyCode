@@ -189,7 +189,7 @@ describe('a team template over a stored procedure', () => {
 
   it('calls the procedure as it is, its formulas calculated fields and its selection a filter, without custom code', async () => {
     const { rdl } = await convert(definition(`{${A}.Name} <> "Skip"`));
-    assert.match(rdl, /<CommandType>StoredProcedure<\/CommandType>\s*<CommandText>\[dbo\]\.\[Orders_get\]<\/CommandText>/);
+    assert.match(rdl, /<CommandType>StoredProcedure<\/CommandType>\s*<CommandText>dbo\.Orders_get<\/CommandText>/);
     assert.match(rdl, /<QueryParameter Name="@region">/);
     assert.match(rdl, /<Field Name="F_Size">\s*<Value>=IIf\(\(Fields!Amount\.Value &gt; 100\), "big", "small"\)<\/Value>/);
     assert.match(rdl, /<FilterExpression>=\(RTrim\(Fields!Name\.Value\) &lt;&gt; "Skip"\)<\/FilterExpression>/);
@@ -223,7 +223,7 @@ describe('a team template whose values come from a subreport', () => {
     const r = convertToRdl(main as never, source as never, { reportName: 'Main', formulasInQuery: true, rulesAsText: true,
       subreports: new Map([[1, { name: 'Sub1', links: [], definition: header, dataSource: headSource }]]) as never });
     assert.ok(!r.rdl.includes('<Code>') && !/Code\.\w+/.test(r.rdl), 'no custom code');
-    assert.match(r.rdl, /<CommandType>StoredProcedure<\/CommandType>\s*<CommandText>\[dbo\]\.\[Head_get\]<\/CommandText>/);
+    assert.match(r.rdl, /<CommandType>StoredProcedure<\/CommandType>\s*<CommandText>dbo\.Head_get<\/CommandText>/);
     assert.ok(!r.rdl.includes('#rows') && !r.rdl.includes('<ReportParameter '), 'no table of its rows, no hidden parameter');
     const note = 'First(Fields!Note.Value, "DataSet_Sub1")';
     assert.ok(r.rdl.includes(`Join(Split(CStr(((${note}))), CStr("&lt;CR&gt;"), -1, CompareMethod.Binary), CStr(Chr(10))) &amp; CStr(Chr(10))`), r.rdl.match(/<Value>=\(IIf[^<]*/)?.[0]);

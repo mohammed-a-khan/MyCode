@@ -1962,6 +1962,8 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       items.children = [wrapper];
     }
     roomForDates(body);
+    rulesAsLines(body);
+    oneOfAlternates(body);
     clearOfLines(body);
     plainLines(report);
     checkLayout(report, body, review);
@@ -2445,6 +2447,7 @@ function fitTablix(tablix: XmlElement): number {
  * starts (centred text equally at both ends, so it stays centred); what is left is listed for review.
  */
 const CHARTS = new Set(['Chart', 'GaugePanel', 'Map']);
+const bands = new WeakSet<XmlElement>();
 
 function separate(container: XmlElement, review: ReviewNote[]): void {
   const box = (e: XmlElement) => ({ l: len(e, 'Left'), t: len(e, 'Top'), r: len(e, 'Left') + len(e, 'Width'), b: len(e, 'Top') + len(e, 'Height') });
@@ -2471,7 +2474,8 @@ function separate(container: XmlElement, review: ReviewNote[]): void {
           break pairs;
         }
         // A box round the item: the item goes into it.
-        if (a.name === 'Rectangle' && o.name !== 'Rectangle' && O.l >= A.l - 0.001 && O.r <= A.r + 0.001 && O.t >= A.t - 0.001 && O.b <= A.b + 0.001) {
+        const sameRule = textOf(child(o, 'Visibility/Hidden')).replace(/\s+/g, '') === textOf(child(a, 'Visibility/Hidden')).replace(/\s+/g, '');
+        if (a.name === 'Rectangle' && (o.name !== 'Rectangle' || (!child(o, 'ReportItems') && sameRule && !!child(o, 'Visibility') && (A.b - A.t) > (O.b - O.t) + 0.1)) && O.l >= A.l - 0.001 && O.r <= A.r + 0.001 && O.t >= A.t - 0.001 && O.b <= A.b + 0.001) {
           let holder = child(a, 'ReportItems');
           if (!holder) {
             holder = el('ReportItems');
@@ -2479,6 +2483,10 @@ function separate(container: XmlElement, review: ReviewNote[]): void {
           }
           setChild(o, 'Top', inch(Math.max(0, O.t - A.t)));
           setChild(o, 'Left', inch(Math.max(0, O.l - A.l)));
+          if (o.name === 'Rectangle' && sameRule && child(o, 'Visibility')) {
+            removeChildren(o, ['Visibility']);
+            bands.add(o);
+          }
           container.children = container.children.filter((c) => c !== o);
           holder.children.push(o);
           separate(holder, review);
@@ -2516,7 +2524,7 @@ function separate(container: XmlElement, review: ReviewNote[]): void {
         // An empty frame round a centred title (the same middle, the text starting within it): one bordered text box,
         // the title in the frame's place and with its border.
         if (align === 'Center' && o.name === 'Rectangle' && !child(o, 'ReportItems') && drawnAs(o) && !child(o, 'Visibility')
-          && Math.abs((A.l + A.r) / 2 - (O.l + O.r) / 2) < 0.1 && A.t >= O.t - 0.05 && A.t < O.b - 0.05) {
+          && (Math.abs((A.l + A.r) / 2 - (O.l + O.r) / 2) < 0.1 || (bands.has(o) && A.l >= O.l - 0.01 && A.r <= O.r + 0.01)) && A.t >= O.t - 0.05 && A.t < O.b - 0.05) {
           const frame = childElements(o, 'Style')[0];
           const own = ownStyle(a);
           for (const side of ['Border', ...BORDER_SIDES]) {
@@ -3625,6 +3633,57 @@ function literalLines(value: string): string[] | undefined {
     rest = rest.slice(m[0].length);
   }
   return !expectPart && lines.length > 1 ? lines : undefined;
+}
+
+function oneOfAlternates(body: XmlElement): void {
+  const rule = (e: XmlElement) => textOf(child(e, 'Visibility/Hidden')).replace(/^\s*=\s*/, '');
+  const shape = (r: string) => r.replace(/<>\s*(-?\d+(?:\.\d+)?|"[^"]*")/g, '<> #');
+  for (const holder of descendants(body).filter((e) => e.name === 'ReportItems')) {
+    const items = childElements(holder).filter((e) => ITEMS.has(e.name) && child(e, 'Top') && /<>\s*(-?\d|")/.test(rule(e)) && /CountRows|IsNothing/.test(rule(e)));
+    const done = new Set<XmlElement>();
+    for (const first of items) {
+      if (done.has(first)) continue;
+      const same = items.filter((e) => e !== first && !done.has(e) && shape(rule(e)) === shape(rule(first)) && rule(e) !== rule(first)
+        && Math.abs(len(e, 'Top') - len(first, 'Top')) < 0.02 && Math.abs(len(e, 'Left') - len(first, 'Left')) < 0.02);
+      for (const later of same) {
+        const hidden = child(later, 'Visibility/Hidden')!;
+        hidden.children = [`=(${rule(later)}) OrElse Not (${rule(first)})`];
+        done.add(later);
+      }
+      if (same.length) done.add(first);
+    }
+  }
+}
+
+function rulesAsLines(body: XmlElement): void {
+  for (const holder of descendants(body).filter((e) => e.name === 'ReportItems')) {
+    holder.children = holder.children.filter((c) => {
+      const box = c as XmlElement;
+      if (typeof c !== 'object' || box.name !== 'Rectangle' || child(box, 'ReportItems') || !child(box, 'Top') || drawnAs(box)) return true;
+      if (descendants(childElements(box, 'Style')[0] ?? el('x')).some((e) => textOf(e).startsWith('='))) return true;
+      return Math.min(len(box, 'Height'), len(box, 'Width')) > 0.02;
+    }).map((c) => {
+      const box = c as XmlElement;
+      if (typeof c !== 'object' || box.name !== 'Rectangle' || child(box, 'ReportItems') || !child(box, 'Top')) return c;
+      const h = len(box, 'Height');
+      const w = len(box, 'Width');
+      if (Math.min(h, w) > 0.02 || Math.max(h, w) < 0.1) return c;
+      const st = childElements(box, 'Style')[0];
+      if (st && child(st, 'BackgroundColor')) return c;
+      const across = w >= h;
+      const sides = across ? ['TopBorder', 'BottomBorder', 'Border'] : ['LeftBorder', 'RightBorder', 'Border'];
+      const drawn = sides.map((side) => ({ side, border: st && child(st, side) })).find(({ border }) => border && /solid|dashed|dotted|double|=/i.test(textOf(child(border, 'Style'))));
+      if (!drawn) return c;
+      const at = drawn.side === 'BottomBorder' ? len(box, 'Top') + h : len(box, 'Top');
+      const left = drawn.side === 'RightBorder' ? len(box, 'Left') + w : len(box, 'Left');
+      const line = el('Line', { Name: box.attributes.Name ?? 'Line' },
+        el('Top', inch(across ? at : len(box, 'Top'))), el('Left', inch(across ? len(box, 'Left') : left)),
+        el('Height', inch(across ? 0 : h)), el('Width', inch(across ? w : 0)),
+        child(box, 'Visibility') ?? null,
+        el('Style', el('Border', ...childElements(drawn.border!).map((e) => structuredClone(e)))));
+      return line;
+    });
+  }
 }
 
 function clearOfLines(body: XmlElement): void {

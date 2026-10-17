@@ -60,6 +60,13 @@ export const alternates = (a: XmlElement, b: XmlElement): boolean => {
   const p = shown(x);
   const q = shown(y);
   if (p && q && p.on === q.on && p.value !== q.value && p.equal === q.equal) return true;
+  const shape = (r: string) => r.replace(/<>\s*(-?\d+(?:\.\d+)?|"[^"]*")/g, '<> #');
+  const first = (r: string) => /^\((.*)\) OrElse Not \((.*)\)$/.exec(r);
+  const fx = first(x);
+  const fy = first(y);
+  if (fx && unwrap(fx[2]!) === unwrap(y) && shape(fx[1]!) === shape(y)) return true;
+  if (fy && unwrap(fy[2]!) === unwrap(x) && shape(fy[1]!) === shape(x)) return true;
+  if (fx && fy && unwrap(fx[2]!) === unwrap(fy[2]!) && shape(fx[1]!) === shape(fy[1]!)) return true;
   return negated(x) === unwrap(y) || negated(y) === unwrap(x) || (/^true$/i.test(unwrap(x)) !== /^true$/i.test(unwrap(y)) && /^(true|false)$/i.test(unwrap(x)) && /^(true|false)$/i.test(unwrap(y)));
 };
 const valueOf = (box: XmlElement) => descendants(box).filter((e) => e.name === 'Value' && !child(e, 'Value')).map(textOf).join('');
