@@ -76,6 +76,7 @@ export interface RdlOptions {
    * overline, shown by the same formula, as a team's templates draw them, instead of a line drawn in pieces.
    */
   rulesAsText?: boolean;
+  sharedReads?: Set<string>;
 }
 
 export interface InlineTarget {
@@ -483,8 +484,17 @@ class RdlBuilder {
 
   constructor(definition: ReportDefinition, source: DataSourceInfo, options: RdlOptions) {
     const formulaText = (ref: { index: number } | undefined) => (ref ? definition.formulaTexts?.[ref.index] ?? definition.formulas.find((f) => f.index === ref.index)?.text ?? '' : '');
+    const reads = options.sharedReads ?? sharedVariablesRead([definition, ...[...(options.subreports?.values() ?? [])].flatMap((s) => (s.definition ? [s.definition] : []))]);
+    if (!options.sharedReads) options = { ...options, sharedReads: reads };
+    const unreadSetter = (text: string) => {
+      const set = [...text.matchAll(/\bshared\s+\w+var\s+(\w+)/gi)].map((m) => m[1]!.toLowerCase());
+      return set.length > 0 && !/\b(global|local)\b/i.test(text) && set.every((v) => !reads.has(v));
+    };
     const quiet = (o: ReportObject) => o.kind === 'text' ? !o.embeddedFields?.length
-      : !!o.field && (!o.field.startsWith('@') || !/:=|\b(shared|global|local)\b/i.test(definition.formulas.find((f) => f.name.toLowerCase() === o.field!.slice(1).toLowerCase())?.text ?? ':='));
+      : !!o.field && (!o.field.startsWith('@') || (() => {
+        const text = definition.formulas.find((f) => f.name.toLowerCase() === o.field!.slice(1).toLowerCase())?.text ?? ':=';
+        return !/:=|\b(shared|global|local)\b/i.test(text) || unreadSetter(text);
+      })());
     const neverShown = (o: ReportObject) => (o.kind === 'field' || o.kind === 'text') && quiet(o)
       && (o.suppressed || /^\s*\(?\s*true\s*\)?\s*;?\s*$/i.test(formulaText(o.conditions?.suppress)) && !!o.conditions?.suppress);
     const shown = options.rulesAsText
@@ -1761,6 +1771,7 @@ class RdlBuilder {
       chartAxisFormat: this.options.chartAxisFormat,
       formulasInQuery: this.options.formulasInQuery,
       rulesAsText: this.options.rulesAsText,
+      sharedReads: this.options.sharedReads,
       inline: { dataset, itemNames: this.itemNames, imageNames: this.imageNames, codeNames: this.codeNames },
     });
     const result = mode === 'page' ? child.buildInline() : child.buildEmbedded();
@@ -2168,11 +2179,13 @@ class RdlBuilder {
     const inQuery = this.queryFromTables && hidden !== undefined && (!this.definition.selectionFormulas.record || !!this.whereClause());
     const rowSql = onePerPoint && inQuery ? allRows!.map((r) => this.columnSql(r)) : [];
     const scaleColumns = rowSql.length && rowSql.every(Boolean) ? this.scaleColumns(chartName, rowSql as string[]) : undefined;
-    if (onePerPoint && !scaleColumns && !this.codeFunctions.includes(AXIS_CODE)) this.codeFunctions.push(AXIS_CODE);
+    const noCode = !!this.options.formulasInQuery;
+    if (onePerPoint && !scaleColumns && noCode) this.review.push({ item: `chart object "${obj.name}"`, message: 'its value axis is scaled by SSRS (its data comes from a procedure, so the original scale is not worked out in the query); compare its steps with the original' });
+    if (onePerPoint && !scaleColumns && !noCode && !this.codeFunctions.includes(AXIS_CODE)) this.codeFunctions.push(AXIS_CODE);
     // Over all the chart's values (a price and its limit alike).
     const extreme = (fn: 'Min' | 'Max') => (allRows ?? []).map((r) => `CDbl(IIf(IsNothing(${fn}(${r})), 0, ${fn}(${r})))`)
       .reduce((acc, e) => (acc ? `Math.${fn}(${acc}, ${e})` : e), '');
-    const crystalScale = (part: number) => scaleColumns ? `First(Fields!${scaleColumns[part]}.Value)` : `Code.CrAxis(${extreme('Min')}, ${extreme('Max')}, ${part})`;
+    const crystalScale = (part: number) => scaleColumns ? `First(Fields!${scaleColumns[part]}.Value)` : noCode ? 'Double.NaN' : `Code.CrAxis(${extreme('Min')}, ${extreme('Max')}, ${part})`;
     // For the axis's minimum (0.4), maximum (1.6) and interval (0.2).
     const part = (factor: number) => ({ 0.4: 0, 1.6: 1 }[factor] ?? 2);
     const own = (factor: number) => !raw || style.type !== 'Column' ? 'Double.NaN' : factor === 0.4 ? `IIf(${lowest} = 0, 0, Double.NaN)` : 'Double.NaN';
@@ -2228,13 +2241,14 @@ class RdlBuilder {
     // In the query: each bar's place among the chart's categories, in the chart's order (it sorts by it), its colour
     // the palette's colour at that place.
     const pointColumn = barPerPoint && inQuery && chart.categoryOrder !== 2 ? this.pointColumn(chartName, categoryExpression!, chart.categoryOrder === 1) : undefined;
-    if (barPerPoint && !pointColumn) {
+    if (barPerPoint && !pointColumn && !noCode) {
       this.codeMembers.crPointColors = 'New System.Collections.Hashtable';
       if (!this.codeFunctions.includes(POINT_COLOR_CODE)) this.codeFunctions.push(POINT_COLOR_CODE);
     }
     const pointColor = pointColumn
       ? `=Choose((Fields!${pointColumn}.Value - 1) Mod ${CRYSTAL_PALETTE.length} + 1, ${CRYSTAL_PALETTE.map((c) => `"${c}"`).join(', ')})`
-      : `=Code.CrPointColor(${vbString(chartName)}, ${categoryExpression})`;
+      : noCode ? `=Choose((RunningValue(${categoryExpression}, CountDistinct, Nothing) - 1) Mod ${CRYSTAL_PALETTE.length} + 1, ${CRYSTAL_PALETTE.map((c) => `"${c}"`).join(', ')})`
+        : `=Code.CrPointColor(${vbString(chartName)}, ${categoryExpression})`;
 
     // Data labels as Crystal shows them: the category, the value (in the chart's number format), or both.
     // A bar chart of the angled look prints its percentages whole, inside the bars (otherwise as its format says, above).
@@ -2261,7 +2275,7 @@ class RdlBuilder {
         el('Visible', isPie ? `=CDbl(IIf(IsNothing(${expression}), 0, ${expression})) <> 0` : 'true'))
       : el('ChartDataLabel', el('Style'));
     const legendWrap = !isPie && !!seriesExpression && seriesExpression !== 'Nothing' && !(chart.legend && !chart.legend.visible);
-    if (legendWrap && !this.codeFunctions.includes(WRAP_CODE)) this.codeFunctions.push(WRAP_CODE);
+    if (legendWrap && !noCode && !this.codeFunctions.includes(WRAP_CODE)) this.codeFunctions.push(WRAP_CODE);
     const series = values.map((v, i) => {
       const value = this.fieldObjectValue(v, 'row', item);
       return el('ChartSeries', { Name: this.itemNames.make(`${chartName}_Series${i + 1}`) },
@@ -2294,7 +2308,7 @@ class RdlBuilder {
         isLine ? el('Style', el('Border', el('Width', '1.5pt'))) : el('Style'),
         el('ChartEmptyPoints', el('Style'), el('ChartMarker', el('Style')), el('ChartDataLabel', el('Style'))),
         // Crystal wraps each legend entry to lines of about 20 characters (a longer word on a line of its own).
-        legendWrap ? el('ChartItemInLegend', el('LegendText', `=Code.CrWrap(CStr(${seriesExpression}), 20)`)) : null,
+        legendWrap && !noCode ? el('ChartItemInLegend', el('LegendText', `=Code.CrWrap(CStr(${seriesExpression}), 20)`)) : null,
         el('ValueAxisName', 'Primary'),
         el('CategoryAxisName', 'Primary'),
         // Labels may sit outside the plot area (not cut short to fit beside a small pie); a bar's value label moves
@@ -2345,7 +2359,7 @@ class RdlBuilder {
         el('Position', LEGEND_POSITIONS[chart.legend?.position ?? 0] ?? 'RightCenter'),
         el('AutoFitTextDisabled', 'true'),
         // Each entry on one line, as Crystal prints it (SSRS leaves a wrapped entry's last line against the frame).
-        el('TextWrapThreshold', '0'))),
+        el('TextWrapThreshold', legendWrap && noCode ? '20' : '0'))),
       chart.title ? el('ChartTitles', el('ChartTitle', { Name: 'Default' }, el('Caption', chart.title), el('Style', el('FontWeight', 'Bold')))) : null,
       // Crystal's chart colours, in its order.
       el('Palette', 'Custom'),
@@ -5783,6 +5797,16 @@ function formulaStatements(text: string): string[] | undefined {
   statements.push(current);
   return statements.map((s) => s.trim())
     .filter((s) => s && !/^(WhilePrintingRecords|WhileReadingRecords|BeforeReadingRecords|EvaluateAfter\s*\(.*\))$/i.test(s));
+}
+
+function sharedVariablesRead(definitions: ReportDefinition[]): Set<string> {
+  const texts = definitions.flatMap((d) => [...d.formulas.map((f) => f.text), ...(d.formulaTexts ?? [])]).filter((t) => t && /\bshared\b/i.test(t));
+  const out = new Set<string>();
+  for (const text of texts) {
+    const declared = [...text.matchAll(/\bshared\s+\w+var\s+(\w+)/gi)].map((m) => m[1]!.toLowerCase());
+    for (const v of declared) if (!new RegExp(`\\b${v}\\s*:=`, 'i').test(text)) out.add(v);
+  }
+  return out;
 }
 
 /** "shared StringVar x; x := <value>" (or "shared StringVar x := <value>"): the variable and the value's source text. */

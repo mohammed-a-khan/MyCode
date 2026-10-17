@@ -1714,6 +1714,28 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
               }
             }
           }
+          if ((kind === 'heading' || headingsHere) && inner.length > 1 && inner.every((e) => e.name === 'Textbox' && !child(e, 'Visibility') && !isBlank(e))) {
+            const stack = [...inner].sort((a, b) => len(a, 'Top') - len(b, 'Top'));
+            const left = Math.min(...stack.map((e) => len(e, 'Left')));
+            const right = Math.max(...stack.map((e) => len(e, 'Left') + len(e, 'Width')));
+            const lined = stack.every((e, i) => i === 0 || len(e, 'Top') >= len(stack[i - 1]!, 'Top') + len(stack[i - 1]!, 'Height') * 0.6)
+              && stack.every((e) => Math.min(len(e, 'Left') + len(e, 'Width'), right) - Math.max(len(e, 'Left'), left) > len(e, 'Width') * 0.5);
+            if (lined) {
+              const [first, ...rest] = stack;
+              const value = descendants(first!).find((e) => e.name === 'Value')!;
+              const parts = stack.map((e) => valueOf(e).trim());
+              value.children = [parts.some((v) => v.startsWith('='))
+                ? `=${parts.map((v) => (v.startsWith('=') ? `(${v.slice(1)})` : `"${v.replace(/"/g, '""')}"`)).join(' & vbCrLf & ')}`
+                : parts.join('\n')];
+              const last = stack[stack.length - 1]!;
+              setChild(first!, 'Left', inch(left));
+              setChild(first!, 'Width', inch(right - left));
+              setChild(first!, 'Height', inch(len(last, 'Top') + len(last, 'Height') - len(first!, 'Top')));
+              const holder = child(item, 'ReportItems')!;
+              holder.children = holder.children.filter((x) => typeof x !== 'object' || !rest.includes(x as XmlElement));
+              inner = [first!];
+            }
+          }
           const rs = ownStyle(item);
           const plain = !/^(solid|dashed|dotted|double)/i.test(textOf(child(rs, 'Border/Style'))) && !BORDER_SIDES.some((s) => /^(solid|dashed|dotted|double)/i.test(textOf(child(rs, `${s}/Style`))))
             && (!textOf(child(rs, 'BackgroundColor')) || /^(transparent|#00ffffff)$/i.test(textOf(child(rs, 'BackgroundColor'))));
@@ -2216,7 +2238,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     setChild(st, 'VerticalAlign', 'Middle');
   }
   for (const tablix of tablixes) { alignTotals(tablix); pairSides(tablix); }
-  for (const tablix of tablixes) repeatTogether(tablix);
+  for (const tablix of tablixes) repeatTogether(tablix, root);
   for (const outer of childElements(descendants(report).find((e) => e.name === 'Body') ?? el('x'), 'ReportItems').flatMap((r) => childElements(r, 'Rectangle'))) liftWrapper(outer);
   const headed = new Map(tablixes.map((tablix) => [tablix, trimToHeadings(tablix)] as const));
   const lead = tablixes[0];
@@ -3126,7 +3148,7 @@ function liftWrapper(outer: XmlElement): void {
   holder!.children = holder!.children.flatMap((c) => (c === inner ? lifted : [c]));
 }
 
-function repeatTogether(tablix: XmlElement): void {
+function repeatTogether(tablix: XmlElement, root: XmlElement): void {
   const holder = child(tablix, 'TablixRowHierarchy/TablixMembers');
   if (!holder) return;
   const members = childElements(holder, 'TablixMember');
@@ -3143,13 +3165,13 @@ function repeatTogether(tablix: XmlElement): void {
   }
   const keep = repeats(runs[runs.length - 1]![0]!);
   const name = (descendants(tablix).find((e) => e.name === 'Group')?.attributes.Name ?? 'Table_grp_1').replace(/_?\d+$/, '');
-  const used = new Set(descendants(tablix).filter((e) => e.name === 'Group').map((e) => e.attributes.Name));
-  let n = 0;
+  const used = new Set(descendants(root).map((e) => e.attributes.Name ?? ''));
+  let n = Math.max(0, ...[...used].map((u) => Number(new RegExp(`^${name}_(\\d+)$`).exec(u)?.[1] ?? 0)));
   for (const run of runs.slice(0, -1)) {
     if (repeats(run[0]!) === keep) continue;
     for (const m of run) removeChildren(m, ['RepeatOnNewPage', 'KeepWithGroup']);
-    while (used.has(`${name}_once${n ? `_${n}` : ''}`)) n++;
-    const group = `${name}_once${n ? `_${n}` : ''}`;
+    do n++; while (used.has(`${name}_${n}`));
+    const group = `${name}_${n}`;
     used.add(group);
     const wrapped = el('TablixMember', el('Group', { Name: group }, el('GroupExpressions', el('GroupExpression', '=1'))), el('TablixMembers', ...run));
     const index = holder.children.indexOf(run[0]!);
