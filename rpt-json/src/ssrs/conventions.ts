@@ -2989,10 +2989,7 @@ function trimToHeadings(tablix: XmlElement): (string | undefined)[] | undefined 
   const title = titleRow && descendants(titleRow).find((e) => e.name === 'Textbox' && /_SchTitle_Txt$/.test(e.attributes.Name ?? ''));
   const titleStyle = title && childElements(title, 'Style')[0];
   const tops = headCells.map((cell) => child(styleOf(cell) ?? el('x'), 'TopBorder'));
-  if (titleStyle && !drawn(child(titleStyle, 'BottomBorder')) && tops.every(drawn)) {
-    titleStyle.children.push({ ...structuredClone(tops[0]!), name: 'BottomBorder' });
-    for (const cell of headCells) { const st = styleOf(cell); if (st) removeChildren(st, ['TopBorder']); }
-  }
+  const ruleAbove = !!titleStyle && !drawn(child(titleStyle, 'BottomBorder')) && tops.every(drawn);
   const top = child(tablix, 'TablixRowHierarchy/TablixMembers');
   const breaking = descendants(tablix).some((e) => e.name === 'Group' && child(e, 'PageBreak'));
   if (top && breaking && titleRow) {
@@ -3032,6 +3029,26 @@ function trimToHeadings(tablix: XmlElement): (string | undefined)[] | undefined 
       }
     });
   });
+  const headMember = leaves[at]!.member;
+  const memberHolder = descendants(child(tablix, 'TablixRowHierarchy')!).find((e) => e.name === 'TablixMembers' && e.children.includes(headMember));
+  const body = child(tablix, 'TablixBody/TablixRows');
+  if (ruleAbove && memberHolder && body) {
+    const name = tablix.attributes.Name ?? '';
+    const taken = new Set(descendants(tablix).map((e) => e.attributes.Name ?? ''));
+    let n = 0;
+    const blank = () => { do n++; while (taken.has(`${name}_blnk${n}_txt`)); taken.add(`${name}_blnk${n}_txt`); return `${name}_blnk${n}_txt`; };
+    const cells = headCells.map((cell) => {
+      const st = styleOf(cell)!;
+      const rule = { ...structuredClone(child(st, 'TopBorder')!), name: 'BottomBorder' };
+      removeChildren(st, ['TopBorder']);
+      return el('TablixCell', el('CellContents', el('Textbox', { Name: blank() }, el('CanGrow', 'false'), el('KeepTogether', 'true'),
+        el('Paragraphs', el('Paragraph', el('TextRuns', el('TextRun', el('Value', ''), el('Style'))), el('Style'))),
+        el('Style', el('Border', el('Style', 'None')), rule))));
+    });
+    body.children.splice(body.children.indexOf(rows[at]!), 0, el('TablixRow', el('Height', inch(0.04)), el('TablixCells', ...cells)));
+    memberHolder.children.splice(memberHolder.children.indexOf(headMember), 0, el('TablixMember', el('KeepWithGroup', 'After')));
+    setChild(tablix, 'Height', inch(len(tablix, 'Height') + 0.04));
+  }
   return conds;
 }
 
