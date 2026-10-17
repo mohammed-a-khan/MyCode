@@ -635,6 +635,7 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     const heading = descendants(tables[0]!).find((e) => e.attributes.Name === 'Blocks_Tab_1_amount_2_ColTxt')!;
     const sides = descendants(childElements(heading, 'Style')[0]!).filter((e) => /Border$/.test(e.name)).map((e) => textOf(child(e, 'Style'))).filter((v) => v && v !== 'None');
     assert.ok(sides.length && sides.every((v) => /head_2/.test(v)), 'the heading rules stop where the block has no heading');
+    assert.equal(textOf(child(heading, 'Style/VerticalAlign')), 'Top', 'a one-line heading sits at the top beside a two-line one');
     const holder = child(tables[0]!, 'TablixRowHierarchy/TablixMembers')!;
     const before = childElements(holder, 'TablixMember').filter((m) => !child(m, 'Group'));
     assert.ok(before.length && before.every((m) => textOf(child(m, 'RepeatOnNewPage')) === 'true'), 'the title prints on every block\'s page');
