@@ -2984,6 +2984,7 @@ function trimToHeadings(tablix: XmlElement): (string | undefined)[] | undefined 
     rows.splice(at + 1, 1);
     leaves.splice(at + 1, 1);
   }
+  for (const cell of headCells) { const st = styleOf(cell); if (st && fieldOfHeading(cell)) setChild(st, 'VerticalAlign', 'Top'); }
   const titleRow = rows.slice(0, at).find((row) => descendants(row).some((e) => e.name === 'Textbox' && /_SchTitle_Txt$/.test(e.attributes.Name ?? '')));
   const title = titleRow && descendants(titleRow).find((e) => e.name === 'Textbox' && /_SchTitle_Txt$/.test(e.attributes.Name ?? ''));
   const titleStyle = title && childElements(title, 'Style')[0];
