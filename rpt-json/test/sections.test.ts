@@ -111,7 +111,7 @@ describe('sections of a report made of many parts', () => {
     assert.equal(queries.length, 2);
     for (const q of queries) {
       assert.equal(textOf(child(q, 'CommandType')), 'Text');
-      assert.match(textOf(child(q, 'CommandText')), /^EXEC sp_getapplock N'Parts', 'Exclusive', 'Session', 600000;[\s\S]*BEGIN TRY EXEC [\w.]+_rows_get[\s\S]*THROW; END CATCH;\nEXEC sp_releaseapplock/);
+      assert.match(textOf(child(q, 'CommandText')), /^EXEC sp_getapplock N'Parts', 'Exclusive', 'Session', 600000;\nEXEC [\w.]+_rows_get;\nEXEC sp_releaseapplock N'Parts', 'Session';$/);
     }
   });
 
