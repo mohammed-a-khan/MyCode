@@ -636,6 +636,12 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     const sides = descendants(childElements(heading, 'Style')[0]!).filter((e) => /Border$/.test(e.name)).map((e) => textOf(child(e, 'Style'))).filter((v) => v && v !== 'None');
     assert.ok(sides.length && sides.every((v) => /head_2/.test(v)), 'the heading rules stop where the block has no heading');
     assert.equal(textOf(child(heading, 'Style/VerticalAlign')), 'Top', 'a one-line heading sits at the top beside a two-line one');
+    const headRow = descendants(tables[0]!).filter((e) => e.name === 'TablixRow').find((r) => descendants(r).includes(heading))!;
+    const allRows = descendants(tables[0]!).filter((e) => e.name === 'TablixRow');
+    const ruleRow = allRows[allRows.indexOf(headRow) - 1]!;
+    const ruled = descendants(ruleRow).filter((e) => e.name === 'BottomBorder').map((e) => textOf(child(e, 'Style')));
+    assert.ok(ruled.length > 2 && ruled[0] === 'Solid' && /head_2/.test(ruled[2]!), `the rule over the headings stops where the block ends: ${ruled.join(' | ')}`);
+    assert.ok(!child(heading, 'Style/TopBorder'), 'the rule is not drawn twice');
     const holder = child(tables[0]!, 'TablixRowHierarchy/TablixMembers')!;
     const before = childElements(holder, 'TablixMember').filter((m) => !child(m, 'Group'));
     assert.ok(before.length && before.every((m) => textOf(child(m, 'RepeatOnNewPage')) === 'true'), 'the title prints on every block\'s page');
