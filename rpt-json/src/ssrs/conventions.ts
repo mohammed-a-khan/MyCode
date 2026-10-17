@@ -2304,19 +2304,19 @@ function takeTurns(root: XmlElement, conv: Conventions, name: string): void {
     if (!/^StoredProcedure$/i.test(textOf(child(query, 'CommandType')))) {
       if (!child(query, 'CommandType')) query.children.splice(query.children.indexOf(child(query, 'CommandText')!), 0, el('CommandType', 'Text'));
       child(query, 'CommandText')!.children = [[
-        `EXEC sp_getapplock @Resource = ${resource}, @LockMode = 'Exclusive', @LockOwner = 'Session', @LockTimeout = 600000;`,
+        `EXEC sp_getapplock ${resource}, 'Exclusive', 'Session', 600000;`,
         called.replace(/;?\s*$/, ';'),
-        `EXEC sp_releaseapplock @Resource = ${resource}, @LockOwner = 'Session';`,
+        `EXEC sp_releaseapplock ${resource}, 'Session';`,
       ].join('\n')];
       continue;
     }
     const params = childElements(child(query, 'QueryParameters') ?? el('x'), 'QueryParameter').map((q) => q.attributes.Name ?? '').filter((n) => /^@\w+$/.test(n));
     child(query, 'CommandType')!.children = ['Text'];
     child(query, 'CommandText')!.children = [[
-      `EXEC sp_getapplock @Resource = ${resource}, @LockMode = 'Exclusive', @LockOwner = 'Session', @LockTimeout = 600000;`,
+      `EXEC sp_getapplock ${resource}, 'Exclusive', 'Session', 600000;`,
       `BEGIN TRY EXEC ${called}${params.length ? ` ${params.map((n) => `${n} = ${n}`).join(', ')}` : ''}; END TRY`,
-      `BEGIN CATCH EXEC sp_releaseapplock @Resource = ${resource}, @LockOwner = 'Session'; THROW; END CATCH;`,
-      `EXEC sp_releaseapplock @Resource = ${resource}, @LockOwner = 'Session';`,
+      `BEGIN CATCH EXEC sp_releaseapplock ${resource}, 'Session'; THROW; END CATCH;`,
+      `EXEC sp_releaseapplock ${resource}, 'Session';`,
     ].join('\n')];
   }
 }
