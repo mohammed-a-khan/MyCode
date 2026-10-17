@@ -2314,8 +2314,7 @@ function takeTurns(root: XmlElement, conv: Conventions, name: string): void {
     child(query, 'CommandType')!.children = ['Text'];
     child(query, 'CommandText')!.children = [[
       `EXEC sp_getapplock ${resource}, 'Exclusive', 'Session', 600000;`,
-      `BEGIN TRY EXEC ${called}${params.length ? ` ${params.map((n) => `${n} = ${n}`).join(', ')}` : ''}; END TRY`,
-      `BEGIN CATCH EXEC sp_releaseapplock ${resource}, 'Session'; THROW; END CATCH;`,
+      `EXEC ${called}${params.length ? ` ${params.map((n) => `${n} = ${n}`).join(', ')}` : ''};`,
       `EXEC sp_releaseapplock ${resource}, 'Session';`,
     ].join('\n')];
   }
