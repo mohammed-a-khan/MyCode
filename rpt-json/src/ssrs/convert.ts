@@ -96,7 +96,8 @@ export function convertDocumentToSsrs(doc: CfbDocument, baseName: string, option
       out = shaped.rdl;
       files = shaped.files;
       const settled = new Set(shaped.settled ?? []);
-      review.splice(0, review.length, ...review.filter((n) => !settled.has(n.item)), ...shaped.review);
+      const gone = (n: ReviewNote) => [...n.message.matchAll(/\bCode\.(\w+)/g)].some((m) => !new RegExp(`\\bCode\\.(\\w+_)?${m[1]}\\b`).test(out ?? ''));
+      review.splice(0, review.length, ...review.filter((n) => !settled.has(n.item) && !gone(n)), ...shaped.review);
     }
     return { fileName: `${reportName}.rdl`, storage: model.storage, rdl: out, review, referenced, files };
   });

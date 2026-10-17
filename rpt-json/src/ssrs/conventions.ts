@@ -909,8 +909,6 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       : [el('DataSourceReference', conv.dataSource.reference!), el('rd:SecurityType', 'None'), id ?? null];
     for (const e of descendants(report)) if (e.name === 'DataSourceName' && textOf(e) === old) e.children = [conv.dataSource.name];
   }
-  const sets = descendants(report).filter((e) => e.name === 'DataSet' && e.attributes.Name !== conv.style?.dataset);
-  if (dataSources[0] && sets.length > 1 && !child(dataSources[0], 'Transaction')) dataSources[0].children.unshift(el('Transaction', 'true'));
   const dataSets = descendants(report).filter((e) => e.name === 'DataSet');
   const firstTablix = descendants(report).find((e) => e.name === 'Tablix' && textOf(child(e, 'DataSetName')));
   const mainName = textOf(child(firstTablix, 'DataSetName')) || dataSets[0]?.attributes.Name || '';
@@ -2484,6 +2482,26 @@ function separate(container: XmlElement, review: ReviewNote[]): void {
           container.children = container.children.filter((c) => c !== o);
           holder.children.push(o);
           separate(holder, review);
+          changed = true;
+          break pairs;
+        }
+        if (a.name === 'Rectangle' && ox <= 0.02 && A.l < O.l && A.r > O.l && oy > 0.02 && !alternates(a, o)
+          && childElements(child(a, 'ReportItems') ?? el('x')).every((e) => len(e, 'Left') + len(e, 'Width') <= O.l - A.l + 0.001)) {
+          setChild(a, 'Width', inch(O.l - A.l));
+          changed = true;
+          break pairs;
+        }
+        if (a.name === 'Rectangle' && ox <= 0.02 && A.l > O.l && A.l < O.r && A.r > O.r && oy > 0.02 && !alternates(a, o)
+          && childElements(child(a, 'ReportItems') ?? el('x')).every((e) => len(e, 'Left') >= O.r - A.l - 0.001)) {
+          const d = O.r - A.l;
+          for (const e of childElements(child(a, 'ReportItems') ?? el('x')).filter((x) => child(x, 'Left'))) setChild(e, 'Left', inch(Math.max(0, len(e, 'Left') - d)));
+          setChild(a, 'Left', inch(O.r));
+          setChild(a, 'Width', inch(A.r - O.r));
+          changed = true;
+          break pairs;
+        }
+        if (a.name === 'Rectangle' && !child(a, 'ReportItems') && A.b - A.t <= 0.02 && o.name === 'Textbox' && Math.abs(A.t - O.t) < 0.02 && O.t >= A.b - A.t && !alternates(a, o)) {
+          setChild(a, 'Top', inch(O.t - (A.b - A.t)));
           changed = true;
           break pairs;
         }

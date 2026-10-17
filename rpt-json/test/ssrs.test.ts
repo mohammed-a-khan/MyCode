@@ -1265,9 +1265,9 @@ describe('chart types, margins, subreports and Basic syntax', () => {
     assert.ok(!isBasicSyntax('if {Orders.Amount} > 0 then "a" else "b"'));
     const t = translateFormula(source, ctx, { codeName: 'F_Last' });
     assert.equal(t.expression, '=Code.F_Last(Fields!Name.Value, Parameters!Title.Value)');
-    assert.deepEqual(t.helpers, ['CrSplit', 'CrToText'], 'CStr of a value whose type is decided at run time');
+    assert.deepEqual(t.helpers, ['CrSplit'], 'CStr of a value whose type is decided at run time, without a helper');
     assert.match(t.code!, /Public Function F_Last\(ByVal a1 As Object, ByVal a2 As Object\) As Object\n {4}Dim result As Object = Nothing\n {4}Dim v_parts\(\) As Object\n {4}Dim v_n As Double/);
-    assert.match(t.code!, /v_parts = CrSplit\(a1, "\\\\"\)\n {4}v_n = UBound\(v_parts\)\n {4}If v_n > 1 Then\n {8}result = v_parts\(v_n\) & " of " & CrToText\(v_n\)\n {4}Else\n {8}result = System\.Uri\.UnescapeDataString/);
+    assert.match(t.code!, /v_parts = CrSplit\(a1, "\\\\"\)\n {4}v_n = UBound\(v_parts\)\n {4}If v_n > 1 Then\n {8}result = v_parts\(v_n\) & " of " & IIf\(IsNumeric\(v_n\), FormatNumber\(Val\(Replace\(CStr\(v_n\), ",", ""\)\), 2\), CStr\(v_n\)\)\n {4}Else\n {8}result = System\.Uri\.UnescapeDataString/);
     assert.match(t.code!, /End If\n {4}Return result\nEnd Function$/);
   });
 
