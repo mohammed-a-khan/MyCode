@@ -1569,8 +1569,7 @@ export class Emitter {
           if (this.isNumberNode(args[0])) return `FormatNumber(${value}, 2)`;
           if (this.isTextNode(args[0])) return `CStr(${value})`;
           // The type is not known here: decided when the report runs.
-          this.helpers.add('CrToText');
-          return `${this.inCode ? "" : "Code."}CrToText(${value})`;
+          return `IIf(IsNumeric(${value}), FormatNumber(Val(Replace(CStr(${value}), ",", "")), 2), CStr(${value}))`;
         }
         if (/^-?\d+$/.test(second)) {
           if (third === undefined) return `FormatNumber(${value}, ${second})`;

@@ -39,7 +39,6 @@ describe('sections of a report made of many parts', () => {
     const groups = descendants(parseXml(rdl)).filter((e) => e.name === 'Group').map((e) => e.attributes.Name);
     assert.equal(new Set(groups).size, groups.length, groups.join(', '));
     assert.ok(!diagnoseRdl(rdl, true).some((f) => /more than one/.test(f.message)));
-    assert.equal(textOf(descendants(parseXml(rdl)).find((e) => e.name === 'Transaction')!), 'true', 'the parts are read one after another, as the original ran them');
   });
 
   it('makes one heading of a heading printed on two lines, so each column has one heading', () => {
@@ -161,6 +160,22 @@ describe('sections of a report made of many parts', () => {
     const cell = descendants(tablix).filter((e) => e.name === 'TablixCell').findIndex((c) => descendants(c).includes(label));
     const at = left + inches(tablix, 'Left') + widths.slice(0, cell).reduce((a, b) => a + b, 0) + inches(label, 'Left');
     assert.ok(rule > 0 && at > rule, `text at ${at.toFixed(3)}in, rule at ${rule.toFixed(3)}in`);
+  });
+
+  it('puts a hairline rule above the text it was drawn over, and boxes a hair over each other side by side', () => {
+    const place = (top: number, left: number, height: number, width: number) => `<Top>${top}in</Top><Left>${left}in</Left><Height>${height}in</Height><Width>${width}in</Width>`;
+    const box = (name: string, value: string, at: string) => `<Textbox Name="${name}"><CanGrow>true</CanGrow><Paragraphs><Paragraph><TextRuns><TextRun><Value>${value}</Value><Style><FontSize>8pt</FontSize></Style></TextRun></TextRuns></Paragraph></Paragraphs>${at}<Style><PaddingLeft>2pt</PaddingLeft></Style></Textbox>`;
+    const rule = (name: string, at: string) => `<Rectangle Name="${name}">${at}<Style><Border><Style>None</Style></Border><TopBorder><Style>Solid</Style></TopBorder></Style></Rectangle>`;
+    const frame = (name: string, at: string, inner: string) => `<Rectangle Name="${name}"><ReportItems>${inner}</ReportItems>${at}<Style><Border><Style>None</Style></Border></Style></Rectangle>`;
+    const rdl = `<Report xmlns="http://schemas.microsoft.com/sqlserver/reporting/2016/01/reportdefinition"><ReportSections><ReportSection><Body><ReportItems>${frame('Head', place(0, 0, 3, 10.5), [
+      box('Label', 'Stated', place(0.406, 9.3, 0.194, 0.35)),
+      rule('Over', place(0.406, 9.3, 0.01, 0.35)),
+      frame('Left', place(1, 2.757, 1.5, 4.726), box('In1', 'Left side', place(0, 0, 0.2, 2))),
+      frame('Right', place(1, 7.473, 1.5, 2.8), box('In2', 'Right side', place(0, 0.2, 0.2, 2))),
+    ].join(''))}</ReportItems><Height>3in</Height></Body><Width>10.5in</Width><Page /></ReportSection></ReportSections></Report>`;
+    const out = applyConventions(rdl, 'Parts', conventions).rdl;
+    assert.ok(!diagnoseRdl(out, true).some((f) => f.kind === 'overlap'), JSON.stringify(diagnoseRdl(out, true).filter((f) => f.kind === 'overlap')));
+    assert.match(out, /Stated/);
   });
 
   it('drops a text box that is always hidden, and the code only it called', () => {

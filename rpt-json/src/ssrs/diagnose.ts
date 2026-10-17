@@ -52,6 +52,14 @@ export const alternates = (a: XmlElement, b: XmlElement): boolean => {
   const x = hideRule(a);
   const y = hideRule(b);
   if (!x || !y) return false;
+  const shown = (rule: string) => {
+    const inner = negated(rule);
+    const m = /^(.+?)\s*=\s*([^=<>]+)$/.exec(inner ?? unwrap(rule));
+    return m ? { on: unwrap(m[1]!), value: unwrap(m[2]!), equal: inner !== undefined } : undefined;
+  };
+  const p = shown(x);
+  const q = shown(y);
+  if (p && q && p.on === q.on && p.value !== q.value && p.equal === q.equal) return true;
   return negated(x) === unwrap(y) || negated(y) === unwrap(x) || (/^true$/i.test(unwrap(x)) !== /^true$/i.test(unwrap(y)) && /^(true|false)$/i.test(unwrap(x)) && /^(true|false)$/i.test(unwrap(y)));
 };
 const valueOf = (box: XmlElement) => descendants(box).filter((e) => e.name === 'Value' && !child(e, 'Value')).map(textOf).join('');

@@ -95,7 +95,10 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     const overlaps = (a: string, b: string) => diagnoseRdl(rdl(a, b)).filter((f) => f.kind === 'overlap').length;
     assert.equal(overlaps('=Parameters!k.Value = 1', '=Not (Parameters!k.Value = 1)'), 0);
     assert.equal(overlaps('=(Not ((Parameters!k.Value = 1)))', '=Parameters!k.Value = 1'), 0);
-    assert.equal(overlaps('=Parameters!k.Value = 1', '=Parameters!k.Value = 2'), 1);
+    assert.equal(overlaps('=Parameters!k.Value = 1', '=Parameters!k.Value = 2'), 0);
+    assert.equal(overlaps('=Not ((Parameters!k.Value = 1))', '=Not ((Parameters!k.Value = 2))'), 0);
+    assert.equal(overlaps('=Parameters!k.Value = 1', '=Parameters!j.Value = 1'), 1);
+    assert.equal(overlaps('=Not ((Parameters!k.Value = 1))', '=Parameters!k.Value = 2'), 1);
   });
 
   it('takes a heading naming its column from the data as meant, and still lists one showing the column\'s own value', () => {
