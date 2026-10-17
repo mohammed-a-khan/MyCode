@@ -1939,7 +1939,13 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
             roles.set(d, 'footer');
           } else {
             rename(d, 'text');
-            if (!isBlank(d)) roles.set(d, 'text');
+            const holder = descendants(e).concat(e).find((x) => x.name === 'ReportItems' && x.children.includes(d));
+            const owner = holder && descendants(e).concat(e).find((x) => child(x, 'ReportItems') === holder);
+            const siblings = holder ? childElements(holder).filter((x) => ITEMS.has(x.name) && x !== d) : [];
+            const heads = !!owner && owner.name === 'Rectangle' && fixedText(d) !== undefined && /center/i.test(textAlignOf(d)) && len(d, 'Top') < 0.1
+              && len(d, 'Width') >= len(owner, 'Width') * 0.7 && siblings.some((x) => x.name === 'Tablix' || x.name === 'Rectangle')
+              && !/\n/.test(fixedText(d)!) && fixedText(d)!.trim().length > 3;
+            if (!isBlank(d)) roles.set(d, heads ? 'title' : 'text');
           }
         } else if (d.name === 'Rectangle') rename(d, 'rect');
         else if (d.name === 'Line') rename(d, 'line');
@@ -2289,13 +2295,21 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
 
 function takeTurns(root: XmlElement, conv: Conventions, name: string): void {
   const sets = descendants(root).filter((e) => e.name === 'DataSet' && e.attributes.Name !== conv.style?.dataset && child(e, 'Query'));
-  if (sets.length < 2) return;
+  if (sets.length < 2 || !sets.some((e) => /^StoredProcedure$/i.test(textOf(child(e, 'Query/CommandType'))))) return;
   const resource = `N'${name.replace(/'/g, "''")}'`;
   for (const set of sets) {
     const query = child(set, 'Query')!;
-    if (!/^StoredProcedure$/i.test(textOf(child(query, 'CommandType')))) continue;
     const called = textOf(child(query, 'CommandText')).trim();
-    if (!called || called.startsWith('=')) continue;
+    if (!called || called.startsWith('=') || called.startsWith('EXEC sp_getapplock')) continue;
+    if (!/^StoredProcedure$/i.test(textOf(child(query, 'CommandType')))) {
+      if (!child(query, 'CommandType')) query.children.splice(query.children.indexOf(child(query, 'CommandText')!), 0, el('CommandType', 'Text'));
+      child(query, 'CommandText')!.children = [[
+        `EXEC sp_getapplock @Resource = ${resource}, @LockMode = 'Exclusive', @LockOwner = 'Session', @LockTimeout = 600000;`,
+        called.replace(/;?\s*$/, ';'),
+        `EXEC sp_releaseapplock @Resource = ${resource}, @LockOwner = 'Session';`,
+      ].join('\n')];
+      continue;
+    }
     const params = childElements(child(query, 'QueryParameters') ?? el('x'), 'QueryParameter').map((q) => q.attributes.Name ?? '').filter((n) => /^@\w+$/.test(n));
     child(query, 'CommandType')!.children = ['Text'];
     child(query, 'CommandText')!.children = [[
@@ -2718,6 +2732,11 @@ function widenNarrow(tablix: XmlElement): void {
     const t = cellItem(cell);
     if (!contents || Number(textOf(child(contents, 'ColSpan')) || 1) > 1 || t?.name !== 'Textbox' || child(t, 'Visibility') || isBlank(t)) return;
     const text = fixedText(t);
+    const format = descendants(t).map((e) => (e.name === 'Format' ? (textOf(e) === 'd' ? 'MM/dd/yyyy' : textOf(e)) : '')).find((f) => /y/.test(f) && /[dM]/.test(f) && !f.startsWith('='));
+    if ((kinds[i] === 'heading' || headingBlock.has(t)) && text === undefined && format) {
+      const sample = format.replace(/'[^']*'/g, (q) => q.slice(1, -1)).replace(/yyyy/g, '0000').replace(/[yMdHhms]{1,2}/g, '00');
+      need[k] = Math.max(need[k]!, arialWidth(sample, designText ? DESIGN_FONT : 8, true) * 1.05 + sides);
+    }
     if ((kinds[i] === 'heading' || headingBlock.has(t)) && text !== undefined) {
       const sizes = descendants(t).filter((e) => e.name === 'FontSize' && !textOf(e).startsWith('=')).map((e) => (inches(textOf(e)) ?? 0) * 72);
       const size = Math.max(Math.max(...sizes, 0) || 8, designText ? DESIGN_FONT : 0);
@@ -2726,12 +2745,18 @@ function widenNarrow(tablix: XmlElement): void {
   }));
   const short = widths.map((w, k) => Math.max(0, need[k]! - w));
   const wanted = short.reduce((a, b) => a + b, 0);
-  const slack = widths.map((w, k) => (short[k]! > 0 ? 0 : Math.max(0, w - Math.max(need[k]!, 1.5))));
-  const spare = slack.reduce((a, b) => a + b, 0);
-  if (wanted < 0.01 || spare < 0.01) return;
-  const give = Math.min(1, spare / wanted);
-  const take = Math.min(1, wanted / spare);
-  columns.forEach((c, k) => setChild(c, 'Width', inch(widths[k]! + short[k]! * give - slack[k]! * take)));
+  if (wanted < 0.01) return;
+  const widest = widths.indexOf(Math.max(...widths));
+  const slackOf = (floor: (k: number) => number) => widths.map((w, k) => (short[k]! > 0 ? 0 : Math.max(0, w - Math.max(need[k]!, floor(k)))));
+  const first = slackOf((k) => (k === widest ? Infinity : 0.75));
+  const then = slackOf((k) => (k === widest ? 1.5 : Infinity));
+  const firstSpare = first.reduce((a, b) => a + b, 0);
+  const thenSpare = then.reduce((a, b) => a + b, 0);
+  if (firstSpare + thenSpare < 0.01) return;
+  const give = Math.min(1, (firstSpare + thenSpare) / wanted);
+  const fromFirst = Math.min(firstSpare, wanted * give);
+  const fromThen = wanted * give - fromFirst;
+  columns.forEach((c, k) => setChild(c, 'Width', inch(widths[k]! + short[k]! * give - (firstSpare ? first[k]! * fromFirst / firstSpare : 0) - (thenSpare ? then[k]! * fromThen / thenSpare : 0))));
 }
 
 function summarize(tablix: XmlElement): void {
@@ -2809,7 +2834,8 @@ function summarize(tablix: XmlElement): void {
     const before = cuts.find((c) => c.y > lineTop + 0.001 && c.y <= Math.min(...(lines[li + 1] ?? [{ y: Infinity }]).map((it) => it.y)) + 0.001);
     if (after) headerCols.clear();
     const value = line.find((it) => isField(it.t) && it !== line[0]);
-    const label = value && line[0]!.x < value.x && !headerCols.has(colOf(line[0]!)) && !line.some((o) => o.x > line[0]!.x && o.x < value.x && !isField(o.t)) ? line[0] : undefined;
+    const label = value && line[0]!.x < value.x && !headerCols.has(colOf(line[0]!)) && !line.some((o) => o.x > line[0]!.x && o.x < value.x && !isField(o.t))
+      && (colOf(line[0]!) === 0 || fixedText(line[0]!.t) === undefined || /:\s*$/.test(fixedText(line[0]!.t)!)) ? line[0] : undefined;
     let labelAside = false;
     const place = (it: Item, want: number) => {
       let k = want;
@@ -3794,7 +3820,7 @@ function roomForDates(body: XmlElement): void {
     const room = owner && owner.name !== 'Body' ? len(owner, 'Width') : Math.max(0, ...childElements(holder).map((e) => len(e, 'Left') + len(e, 'Width')));
     const list = childElements(holder).filter((e) => ITEMS.has(e.name) && child(e, 'Width'));
     for (const box of list.filter((e) => e.name === 'Textbox')) {
-      const formats = descendants(box).filter((e) => e.name === 'Format').map(textOf);
+      const formats = descendants(box).filter((e) => e.name === 'Format').map((e) => (textOf(e) === 'd' ? 'MM/dd/yyyy' : textOf(e)));
       if (formats.length !== 1 || !/y/.test(formats[0]!) || !/[dM]/.test(formats[0]!) || formats[0]!.startsWith('=')) continue;
       const sizes = descendants(box).filter((e) => e.name === 'FontSize').map(textOf);
       const size = Math.max(sizes.some((v) => v.startsWith('=')) || !sizes.length ? DESIGN_FONT : 0, ...sizes.filter((v) => !v.startsWith('=')).map((v) => (inches(v) ?? 0) * 72));
@@ -4093,7 +4119,7 @@ function unpile(container: XmlElement | undefined): number {
       const contentEnd = a.name === 'Rectangle' ? aTop + contentBottom(a) : aBottom;
       const o = list.find((e) => e !== a && e.name !== 'Line' && len(e, 'Top') > aTop + 0.001 && len(e, 'Top') < aBottom - 0.001
         && Math.min(aRight, len(e, 'Left') + len(e, 'Width')) - Math.max(aLeft, len(e, 'Left')) > 0.001
-        && (BLOCKS.has(e.name) || len(e, 'Top') < contentEnd - 0.001));
+        && (BLOCKS.has(e.name) || len(e, 'Top') < contentEnd - 0.001) && !alternates(a, e));
       if (!o) continue;
       const oTop = len(o, 'Top');
       if (contentEnd <= oTop + 0.001) {

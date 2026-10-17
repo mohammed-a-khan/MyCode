@@ -115,6 +115,13 @@ describe('sections of a report made of many parts', () => {
     }
   });
 
+  it('makes a plain query of such a report wait its turn too', () => {
+    const fields = ['name', 'owner_key'];
+    const rdl = build([sub(listing('first_rows'), table('first_rows_get', 'storedProcedure', fields), 1), sub(listing('plain_rows'), table('plain_rows', 'table', fields), 2)], [[subreport(1)], [subreport(2)]]);
+    const plain = descendants(parseXml(rdl)).find((e) => e.name === 'Query' && /plain_rows/.test(textOf(child(e, 'CommandText'))))!;
+    assert.match(textOf(child(plain, 'CommandText')), /^EXEC sp_getapplock[^\n]*\nSELECT[\s\S]*;\nEXEC sp_releaseapplock/);
+  });
+
   it('leaves out a hidden field that only sets a variable nothing reads', () => {
     const T = 'rows';
     const setter = { kind: 'formula', name: 'Counted', index: 3, text: `WhilePrintingRecords; shared numbervar counted; counted := 0; counted := {${T}.amount}; counted;`, referencedFields: [`${T}.amount`], valueType: 'number' };
