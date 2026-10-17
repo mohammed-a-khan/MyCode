@@ -3421,7 +3421,8 @@ class RdlBuilder {
       if (parameters.length === 0 && this.definition.parameters.length > 0) {
         this.note('Dataset', `calls stored procedure ${name} without parameters, while the report has parameters; check the procedure's signature`);
       }
-      const called = procedure.schema ? `${this.quote(procedure.schema)}.${this.quote(name)}` : this.quote(name);
+      const part = (n: string) => (/^[A-Za-z_][\w]*$/.test(n) ? n : this.quote(n));
+      const called = procedure.schema ? `${part(procedure.schema)}.${part(name)}` : part(name);
       return {
         commandType: 'StoredProcedure',
         text: called,

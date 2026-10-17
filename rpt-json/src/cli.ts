@@ -12,7 +12,7 @@ import { layoutSummary } from './crystal/layoutinfo.ts';
 import { checkRdlWidths } from './ssrs/widthcheck.ts';
 import { diagnoseRdl, diagnosisLine, diagnosisText, type Finding } from './ssrs/diagnose.ts';
 import { extractHeaders, formatHeadersCsv, formatHeadersText, type HeaderText } from './crystal/headers.ts';
-import { lstat, mkdir, readdir, stat } from 'node:fs/promises';
+import { lstat, mkdir, readdir, stat, unlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
 /**
@@ -339,6 +339,7 @@ async function main(argv: string[]): Promise<number> {
           if (report.rdl) await writeFile(join(targetDir, report.fileName), report.rdl);
           // Files beside it (a team template's stored procedure, its custom code).
           for (const [ending, text] of Object.entries(report.files ?? {})) await writeFile(join(targetDir, report.fileName.replace(/\.rdl$/i, ending)), text);
+          if (report.rdl && reshape) for (const ending of ['.code.vb', '.sql'].filter((e) => !(report.files ?? {})[e])) await unlink(join(targetDir, report.fileName.replace(/\.rdl$/i, ending))).catch(() => undefined);
         }
         const reviewPath = join(targetDir, `${reports[0]?.fileName.replace(/\.rdl$/, '') ?? base}.review.md`);
         await writeFile(reviewPath, reviewMarkdown(basename(file), reports));

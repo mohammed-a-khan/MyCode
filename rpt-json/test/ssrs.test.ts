@@ -169,7 +169,7 @@ describe('RDL generation', () => {
     const { rdl } = convertToRdl(definition, source, { reportName: 'Proc' });
     assertBalancedXml(rdl);
     assert.ok(rdl.includes('<CommandType>StoredProcedure</CommandType>'));
-    assert.ok(rdl.includes('<CommandText>[usp_OrdersByDate]</CommandText>'));
+    assert.ok(rdl.includes('<CommandText>usp_OrdersByDate</CommandText>'));
     assert.ok(rdl.includes('<QueryParameter Name="@StartDate">') && rdl.includes('<Value>=Parameters!StartDate.Value</Value>'));
     assert.ok(rdl.includes('<ReportParameter Name="StartDate">') && rdl.includes('<DataType>DateTime</DataType>'));
     assert.ok(rdl.includes('<DataField>OrderDate</DataField>'));
@@ -1382,7 +1382,7 @@ describe('subreports in page headers and footers', () => {
     assert.ok(!rdl.includes('<Subreport '), 'SSRS allows no subreport in a page header or footer');
     assert.ok(rdl.includes('<ConnectString>Data Source=dbhost\\INST,1433;Initial Catalog=SalesDb</ConnectString>'), 'server, instance, port and database from the JDBC URL');
     assert.equal((rdl.match(/<DataSource Name=/g) ?? []).length, 1, 'subreports on the same connection share the data source');
-    assert.match(rdl, /<DataSet Name="DataSet_Main_Subdocument_1">[\s\S]*<CommandType>StoredProcedure<\/CommandType>\s*<CommandText>\[dbo\]\.\[usp_Header\]<\/CommandText>/);
+    assert.match(rdl, /<DataSet Name="DataSet_Main_Subdocument_1">[\s\S]*<CommandType>StoredProcedure<\/CommandType>\s*<CommandText>dbo\.usp_Header<\/CommandText>/);
     assert.match(rdl, /<DataSet Name="DataSet_Main_Subdocument_2">[\s\S]*<CommandText>SELECT 1 AS \[NoData\]<\/CommandText>/);
     assert.ok(rdl.includes('<Value>=First(Fields!Title.Value, "DataSet_Main_Subdocument_1")</Value>'));
     assert.ok(rdl.includes('<Hidden>=(Parameters!kind.Value = 1)</Hidden>'));
@@ -1583,7 +1583,7 @@ describe('house template layout', () => {
     const doc = parseXml(rdl);
     assert.equal(doc.name, 'Report');
     // The report's own stored procedure, through the template's data source.
-    assert.ok(rdl.includes('<DataSet Name="Holdings">') && rdl.includes('<CommandText>[usp_Holdings]</CommandText>'));
+    assert.ok(rdl.includes('<DataSet Name="Holdings">') && rdl.includes('<CommandText>usp_Holdings</CommandText>'));
     assert.ok(/<DataSet Name="Holdings">\s*<Query>\s*<DataSourceName>SharedDb<\/DataSourceName>/.test(rdl));
     assert.ok(!rdl.includes('usp_SampleList') && !rdl.includes('"SampleList"'), 'the template\'s own table data is gone');
     assert.ok(rdl.includes('dbo.usp_Theme') && rdl.includes('dbo.usp_PageInfo'), 'branding and header datasets are kept');

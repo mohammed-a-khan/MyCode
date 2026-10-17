@@ -178,6 +178,29 @@ describe('sections of a report made of many parts', () => {
     assert.match(out, /Stated/);
   });
 
+  it('shows one of the frames drawn in the same place for each value, and draws rules and title bands without overlap', () => {
+    const place = (top: number, left: number, height: number, width: number) => `<Top>${top}in</Top><Left>${left}in</Left><Height>${height}in</Height><Width>${width}in</Width>`;
+    const hide = (rule: string) => `<Visibility><Hidden>${rule.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</Hidden></Visibility>`;
+    const guard = (k: number) => `=(CountRows("Rows") > 0) AndAlso (Not IsNothing(Last(Fields!kind.Value, "Rows"))) AndAlso (IIf((Last(Fields!kind.Value, "Rows") <> ${k}), True, False))`;
+    const solid = '<Style><Border><Style>Solid</Style></Border></Style>';
+    const text = (name: string, value: string, at: string) => `<Textbox Name="${name}"><CanGrow>true</CanGrow><Paragraphs><Paragraph><TextRuns><TextRun><Value>${value}</Value><Style><FontSize>8pt</FontSize></Style></TextRun></TextRuns><Style><TextAlign>Center</TextAlign></Style></Paragraph></Paragraphs>${at}</Textbox>`;
+    const frame = (name: string, at: string, rule: string, inner = '') => `<Rectangle Name="${name}">${inner ? `<ReportItems>${inner}</ReportItems>` : ''}${at}${rule ? hide(rule) : ''}${solid}</Rectangle>`;
+    const items = [
+      frame('First', place(0, 2.757, 2.277, 4.716), guard(0), text('T1', 'First view', place(0, 0.1, 0.2, 4.5))),
+      `<Rectangle Name="Rule">${place(0, 2.757, 0.01, 4.716)}${hide(`=Not (${guard(1).slice(1)})`)}<Style><Border><Style>None</Style></Border><TopBorder><Style>Solid</Style></TopBorder></Style></Rectangle>`,
+      frame('Second', place(0, 2.757, 2.26, 4.716), guard(1), text('T2', 'Second view', place(0, 0.1, 0.2, 4.5))),
+      frame('Side', place(0, 7.473, 2.26, 2.822), '', text('T3', 'Beside', place(0, 0.1, 0.2, 2))),
+      frame('Whole', place(2.4, 0, 2.25, 10.571), guard(2), text('Title', 'Spread', place(0, 0.073, 0.194, 10.167))),
+      frame('Band', place(2.4, 0, 0.163, 10.571), guard(2)),
+    ].join('');
+    const rdl = `<Report xmlns="http://schemas.microsoft.com/sqlserver/reporting/2016/01/reportdefinition"><ReportSections><ReportSection><Body><ReportItems>${frame('Page', place(0, 0, 5, 10.6), '', items)}</ReportItems><Height>5in</Height></Body><Width>10.6in</Width><Page /></ReportSection></ReportSections></Report>`;
+    const out = applyConventions(rdl, 'Parts', conventions).rdl;
+    assert.ok(!diagnoseRdl(out, true).some((f) => f.kind === 'overlap'), JSON.stringify(diagnoseRdl(out, true).filter((f) => f.kind === 'overlap')));
+    const second = descendants(parseXml(out)).filter((e) => e.name === 'Rectangle' && descendants(e).some((v) => v.name === 'Value' && textOf(v) === 'Second view')).pop()!;
+    assert.match(textOf(child(second, 'Visibility/Hidden')), /OrElse Not \(\(CountRows/);
+    assert.ok(descendants(parseXml(out)).some((e) => e.name === 'Line'), 'the rule is a line');
+  });
+
   it('drops a text box that is always hidden, and the code only it called', () => {
     const box = (name: string, value: string, hidden?: string) => `<Textbox Name="${name}"><Paragraphs><Paragraph><TextRuns><TextRun><Value>${value}</Value></TextRun></TextRuns></Paragraph></Paragraphs>${hidden ? `<Visibility><Hidden>${hidden}</Hidden></Visibility>` : ''}<Top>0in</Top><Left>0in</Left><Height>0.2in</Height><Width>1in</Width></Textbox>`;
     const rdl = `<Report xmlns="http://schemas.microsoft.com/sqlserver/reporting/2016/01/reportdefinition"><Code>Public Function Counted() As Object\nReturn 1\nEnd Function</Code><ReportSections><ReportSection><Body><ReportItems><Rectangle Name="Box"><ReportItems>${box('Shown', 'Total')}${box('Never', '=Code.Counted()', '=True')}</ReportItems><Top>0in</Top><Left>0in</Left><Height>0.2in</Height><Width>1in</Width></Rectangle></ReportItems><Height>0.2in</Height></Body><Width>1in</Width><Page /></ReportSection></ReportSections></Report>`;
