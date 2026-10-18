@@ -2289,35 +2289,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     const kept = conds && centreBlock(root, tablix, conds);
     if (kept) review.push({ item: tablix.attributes.Name ?? 'Table', message: `stays at the left, not centred on the columns in use: ${kept}` });
   }
-  takeTurns(root, conv, S);
   return { rdl: toXml(withFunctions(root, extra.sqlFunctions ?? [])), review, settled: conv.dataSource ? ['Data source'] : [], ...(Object.keys(files).length ? { files } : {}) };
-}
-
-function takeTurns(root: XmlElement, conv: Conventions, name: string): void {
-  const sets = descendants(root).filter((e) => e.name === 'DataSet' && e.attributes.Name !== conv.style?.dataset && child(e, 'Query'));
-  if (sets.length < 2 || !sets.some((e) => /^StoredProcedure$/i.test(textOf(child(e, 'Query/CommandType'))))) return;
-  const resource = `N'${name.replace(/'/g, "''")}'`;
-  for (const set of sets) {
-    const query = child(set, 'Query')!;
-    const called = textOf(child(query, 'CommandText')).trim();
-    if (!called || called.startsWith('=') || called.startsWith('EXEC sp_getapplock')) continue;
-    if (!/^StoredProcedure$/i.test(textOf(child(query, 'CommandType')))) {
-      if (!child(query, 'CommandType')) query.children.splice(query.children.indexOf(child(query, 'CommandText')!), 0, el('CommandType', 'Text'));
-      child(query, 'CommandText')!.children = [[
-        `EXEC sp_getapplock ${resource}, 'Exclusive', 'Session', 600000;`,
-        called.replace(/;?\s*$/, ';'),
-        `EXEC sp_releaseapplock ${resource}, 'Session';`,
-      ].join('\n')];
-      continue;
-    }
-    const params = childElements(child(query, 'QueryParameters') ?? el('x'), 'QueryParameter').map((q) => q.attributes.Name ?? '').filter((n) => /^@\w+$/.test(n));
-    child(query, 'CommandType')!.children = ['Text'];
-    child(query, 'CommandText')!.children = [[
-      `EXEC sp_getapplock ${resource}, 'Exclusive', 'Session', 600000;`,
-      `EXEC ${called}${params.length ? ` ${params.map((n) => `${n} = ${n}`).join(', ')}` : ''};`,
-      `EXEC sp_releaseapplock ${resource}, 'Session';`,
-    ].join('\n')];
-  }
 }
 
 /** The functions (and the values they keep) of VB code that the names called reach, in their order. */

@@ -104,22 +104,15 @@ describe('sections of a report made of many parts', () => {
     assert.ok(!descendants(tablix).some((e) => e.name === 'GroupExpression' && textOf(e) === '=1'), 'the heading rows repeat on each page with the band');
   });
 
-  it('reads the procedures of a report one after another, so one writing does not clash with another reading', () => {
+  it('calls each procedure of a report as it is', () => {
     const fields = ['name', 'owner_key'];
     const rdl = build([sub(listing('first_rows'), table('first_rows_get', 'storedProcedure', fields), 1), sub(listing('second_rows'), table('second_rows_get', 'storedProcedure', fields), 2)], [[subreport(1)], [subreport(2)]]);
     const queries = descendants(parseXml(rdl)).filter((e) => e.name === 'Query' && /_rows_get/.test(textOf(child(e, 'CommandText'))));
     assert.equal(queries.length, 2);
     for (const q of queries) {
-      assert.equal(textOf(child(q, 'CommandType')), 'Text');
-      assert.match(textOf(child(q, 'CommandText')), /^EXEC sp_getapplock N'Parts', 'Exclusive', 'Session', 600000;\nEXEC [\w.]+_rows_get;\nEXEC sp_releaseapplock N'Parts', 'Session';$/);
+      assert.equal(textOf(child(q, 'CommandType')), 'StoredProcedure');
+      assert.match(textOf(child(q, 'CommandText')), /^dbo\.\w+_rows_get$/);
     }
-  });
-
-  it('makes a plain query of such a report wait its turn too', () => {
-    const fields = ['name', 'owner_key'];
-    const rdl = build([sub(listing('first_rows'), table('first_rows_get', 'storedProcedure', fields), 1), sub(listing('plain_rows'), table('plain_rows', 'table', fields), 2)], [[subreport(1)], [subreport(2)]]);
-    const plain = descendants(parseXml(rdl)).find((e) => e.name === 'Query' && /plain_rows/.test(textOf(child(e, 'CommandText'))))!;
-    assert.match(textOf(child(plain, 'CommandText')), /^EXEC sp_getapplock[^\n]*\nSELECT[\s\S]*;\nEXEC sp_releaseapplock/);
   });
 
   it('leaves out a hidden field that only sets a variable nothing reads', () => {
