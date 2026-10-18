@@ -43,6 +43,7 @@
  */
 
 import { child, childElements, descendants, el, parseXml, textOf, toXml, type XmlElement } from './xml.ts';
+import { alignToRules } from './align.ts';
 import { alternates } from './diagnose.ts';
 import { parametersLayout, type ReviewNote } from './rdl.ts';
 
@@ -50,7 +51,7 @@ const NAME_KEYS = ['rect', 'table', 'title', 'heading', 'value', 'groupText', 's
   'blank', 'noData', 'footer', 'text', 'cellRect', 'cellLine', 'line', 'image', 'chart', 'group', 'details'] as const;
 type NameKey = typeof NAME_KEYS[number];
 
-const ROLE_KEYS = ['title', 'heading', 'headingFirst', 'body', 'bodyFirst', 'number', 'group', 'totalLabel', 'totalValue', 'footer', 'text'] as const;
+const ROLE_KEYS = ['title', 'heading', 'headingFirst', 'body', 'bodyFirst', 'number', 'group', 'totalLabel', 'totalValue', 'footer', 'text', 'chartTitle'] as const;
 type RoleKey = typeof ROLE_KEYS[number];
 
 const STYLE_PROPS = ['FontFamily', 'FontSize', 'FontWeight', 'Color', 'BackgroundColor', 'TextAlign', 'VerticalAlign'] as const;
@@ -75,6 +76,7 @@ export interface Conventions {
     roles: Partial<Record<RoleKey, string>>;
     rowBands?: { odd: string; even: string };
     border?: string;
+    chart?: { text?: string; palette?: string[] };
   };
 }
 
@@ -129,12 +131,14 @@ export function readConventions(json: string): Conventions {
   });
   if (o.pageBands !== undefined && o.pageBands !== 'drop' && o.pageBands !== 'keep') throw new Error('"pageBands" must be "drop" or "keep"');
   if (o.documentMap !== undefined && typeof o.documentMap !== 'boolean') throw new Error('"documentMap" must be true or false');
-  const s = object('style', o.style, ['dataset', 'commandType', 'command', 'field', 'props', 'roles', 'rowBands', 'border']);
+  const s = object('style', o.style, ['dataset', 'commandType', 'command', 'field', 'props', 'roles', 'rowBands', 'border', 'chart']);
   let style: Conventions['style'];
   if (s) {
     const props = object('style.props', s.props, STYLE_PROPS) ?? {};
     const roles = object('style.roles', s.roles, ROLE_KEYS) ?? {};
     const bands = object('style.rowBands', s.rowBands, ['odd', 'even']);
+    const chart = object('style.chart', s.chart, ['text', 'palette']);
+    if (chart?.palette !== undefined && (!Array.isArray(chart.palette) || !chart.palette.length)) throw new Error('"style.chart.palette" must be a list of roles');
     style = {
       dataset: text('style.dataset', s.dataset, true)!,
       commandType: text('style.commandType', s.commandType),
@@ -144,6 +148,10 @@ export function readConventions(json: string): Conventions {
       roles: Object.fromEntries(Object.entries(roles).map(([k, v]) => [k, text(`style.roles.${k}`, v)!])),
       rowBands: bands ? { odd: text('style.rowBands.odd', bands.odd, true)!, even: text('style.rowBands.even', bands.even, true)! } : undefined,
       border: text('style.border', s.border),
+      chart: chart ? {
+        text: text('style.chart.text', chart.text),
+        palette: chart.palette ? (chart.palette as unknown[]).map((v, i) => text(`style.chart.palette[${i}]`, v, true)!) : undefined,
+      } : undefined,
     };
   }
   return {
@@ -1972,6 +1980,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     oneOfAlternates(body);
     bandsInFrames(body);
     clearOfLines(body);
+    alignToRules(report);
     plainLines(report);
     checkLayout(report, body, review);
   }
@@ -2099,7 +2108,9 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
   }
 
   // ----- Looks from the style dataset.
+  if (conv.style?.roles.chartTitle) for (const tb of titlesOverCharts(report)) roles.set(tb, 'chartTitle');
   if (conv.style) applyStyleRoles(report, conv.style, roles, tableCells, unbanded, bandRows, review, dataSources[0]?.attributes.Name ?? conv.dataSource?.name ?? '');
+  if (conv.style && body) alignToRules(report);
   const grownRows = new Set<XmlElement>();
   for (const [tb, role] of roles) {
     if (role !== 'title') continue;
@@ -2399,7 +2410,8 @@ function textHeight(textbox: XmlElement, design = false, width?: number): number
   const points = sizes.filter((v) => !v.startsWith('=')).map((v) => (inches(v) ?? 0) * 72).filter((v) => v > 0);
   const size = Math.max(worked || !points.length ? DESIGN_FONT : 0, ...points);
   // (Fixed text in a cell of known width: the lines it wraps to there.)
-  const wrapped = width !== undefined ? wrapLines(textbox, width, size) : undefined;
+  const given = (fixedText(textbox) ?? '').split(/\r?\n/).length;
+  const wrapped = width !== undefined ? (given > 1 ? given : wrapLines(textbox, width, size)) : undefined;
   const lines = wrapped ?? Math.max(1, descendants(textbox).filter((e) => e.name === 'Paragraph').length);
   const style = childElements(textbox, 'Style')[0];
   const padding = ['PaddingTop', 'PaddingBottom'].reduce((a, k) => a + (inches(textOf(child(style, k))) ?? 0), 0);
@@ -4226,6 +4238,24 @@ function insertBefore(parent: XmlElement, item: XmlElement, before: string[]): v
   else parent.children.splice(i, 0, item);
 }
 
+function titlesOverCharts(report: XmlElement): XmlElement[] {
+  const found: XmlElement[] = [];
+  for (const items of descendants(report).filter((e) => e.name === 'ReportItems')) {
+    for (const chart of childElements(items, 'Chart')) {
+      const top = len(chart, 'Top');
+      const height = len(chart, 'Height');
+      const left = len(chart, 'Left');
+      const right = left + len(chart, 'Width');
+      for (const tb of childElements(items, 'Textbox')) {
+        const t = len(tb, 'Top');
+        const l = len(tb, 'Left');
+        if (t <= top + height / 5 && t + len(tb, 'Height') >= top - 0.25 && l < right && l + len(tb, 'Width') > left && !found.includes(tb)) found.push(tb);
+      }
+    }
+  }
+  return found;
+}
+
 /** Each role's looks, as expressions reading the style dataset; the dataset itself, with the fields used. */
 function applyStyleRoles(report: XmlElement, style: NonNullable<Conventions['style']>, roles: Map<XmlElement, RoleKey>, tableCells: Set<XmlElement>,
   unbanded: Set<XmlElement>, bandRows: XmlElement[], review: ReviewNote[], dataSourceName: string): void {
@@ -4291,7 +4321,8 @@ function applyStyleRoles(report: XmlElement, style: NonNullable<Conventions['sty
     const fillWord = style.props.BackgroundColor;
     const current = textOf(child(own, 'BackgroundColor'));
     const plain = !current || /^(transparent|white|#ffffff|#00ffffff)$/i.test(current);
-    if (fillWord && tableCells.has(tb) && plain) {
+    if (fillWord && roleKey === 'chartTitle') setChild(own, 'BackgroundColor', `=${expr(field(role, fillWord))}`);
+    else if (fillWord && tableCells.has(tb) && plain) {
       if (roleKey === 'body' || roleKey === 'bodyFirst' || roleKey === 'number') {
         if (style.rowBands && !unbanded.has(tb)) {
           const row = rowOfBox.get(tb);
@@ -4339,6 +4370,39 @@ function applyStyleRoles(report: XmlElement, style: NonNullable<Conventions['sty
         used.add(name);
         setChild(b, 'Color', `=${expr(name)}`);
       }
+    }
+  }
+  const chartText = style.chart?.text;
+  const chartTitle = style.roles.chartTitle;
+  const palette = style.chart?.palette;
+  const PARTS = new Set(['ChartAxis', 'ChartAxisTitle', 'ChartLegend', 'ChartLegendTitle', 'ChartDataLabel', 'ChartNoDataMessage']);
+  for (const chart of descendants(report).filter((e) => e.name === 'Chart')) {
+    const parts = descendants(chart).filter((e) => (chartText && PARTS.has(e.name)) || (chartTitle && e.name === 'ChartTitle'));
+    for (const part of parts) {
+      const role = part.name === 'ChartTitle' ? chartTitle! : chartText!;
+      const st = ownStyle(part);
+      for (const prop of part.name === 'ChartTitle' ? ['FontFamily', 'FontSize', 'FontWeight', 'Color', 'BackgroundColor'] as const : ['FontFamily', 'FontSize', 'FontWeight', 'Color'] as const) {
+        const word = style.props[prop];
+        if (word) setChild(st, prop, `=${expr(field(role, word))}`);
+      }
+    }
+    if (chartText && style.props.BackgroundColor) {
+      for (const area of descendants(chart).filter((e) => e.name === 'ChartArea')) {
+        const st = childElements(area, 'Style')[0];
+        if (st && child(st, 'BackgroundColor')) setChild(st, 'BackgroundColor', `=${expr(field(chartText, style.props.BackgroundColor))}`);
+      }
+      for (const grid of descendants(chart).filter((e) => e.name === 'ChartMajorGridLines')) {
+        const border = child(grid, 'Style/Border');
+        if (border && /^(black|#000000)$/i.test(textOf(child(border, 'Color')))) setChild(border, 'Color', 'Gainsboro');
+      }
+    }
+    const lines = descendants(chart).some((e) => e.name === 'ChartSeries' && textOf(child(e, 'Type')) === 'Line');
+    if (!palette || !style.props.BackgroundColor || lines) continue;
+    const colors = palette.map((role) => expr(field(role, style.props.BackgroundColor!)));
+    for (const list of descendants(chart).filter((e) => e.name === 'ChartCustomPaletteColors')) list.children = colors.map((c) => el('ChartCustomPaletteColor', `=${c}`));
+    for (const color of descendants(chart).filter((e) => e.name === 'Color')) {
+      const place = /^=Choose\(\((.+) - 1\) Mod \d+ \+ 1, "[^"]*"(, "[^"]*")*\)$/.exec(textOf(color))?.[1];
+      if (place) color.children = [`=Choose((${place} - 1) Mod ${colors.length} + 1, ${colors.join(', ')})`];
     }
   }
   if (!used.size) return;

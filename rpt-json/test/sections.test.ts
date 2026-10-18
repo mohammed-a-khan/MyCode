@@ -6,6 +6,8 @@ import { convertToRdl } from '../src/ssrs/rdl.ts';
 import { child, descendants, parseXml, textOf } from '../src/ssrs/xml.ts';
 
 const conventions = readConventions(JSON.stringify({ names: { table: '{S}_Tab_{n}', title: '{S}_SchTitle_Txt', heading: '{T}_{col}_ColTxt', value: '{T}_{col}_ColVal', blank: '{T}_blnk{n}', group: '{S}_grp_{n}' } }));
+const styled = readConventions(JSON.stringify({ names: { table: '{S}_Tab_{n}', title: '{S}_SchTitle_Txt' }, style: { dataset: 'Theme', command: 'theme_get',
+  props: { FontFamily: 'font', FontSize: 'size', Color: 'color', BackgroundColor: 'fill' }, roles: { title: 'Head', heading: 'Col_Head', chartTitle: 'Plot_Head' }, chart: { text: 'Plot', palette: ['Pal_A', 'Pal_B'] } } }));
 const empty = { saveInfo: {}, selectionFormulas: {}, sqlExpressions: [], parameters: [], groups: [], sortFields: [], summarizedFields: [], formulas: [] };
 const params = [{ name: 'owner_key', type: 'number' }];
 const box = (x: number, y: number, w: number, h: number) => ({ position: { x, y }, size: { width: w, height: h } });
@@ -13,13 +15,13 @@ const field = (name: string, f: string, x: number, y: number, w: number, h: numb
 const text = (name: string, value: string, x: number, y: number, w: number, h: number) => ({ kind: 'text', name, text: value, style: { size: 8, bold: true }, ...box(x, y, w, h) });
 const table = (name: string, kind: string, fields: string[]) => ({ connections: [], links: [], tables: [{ alias: name, name, schema: 'dbo', kind, fields: fields.map((n) => ({ name: n, type: /amount|par/.test(n) ? 'number' : 'string' })) }] });
 const sub = (definition: object, source: object, n: number) => ({ name: `Part_${n}`, links: [], parameters: ['owner_key'], definition, dataSource: source });
-const build = (subs: object[], placed: object[]) => {
+const build = (subs: object[], placed: object[], conv = conventions) => {
   const main = { ...empty, parameters: params, page: { orientation: 'landscape', paperSize: 1 }, layout: [
     { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 0, suppressed: true, objects: [] }] },
     { name: 'DetailArea1', sections: [{ name: 'D', height: 0, suppressed: true, objects: [] }] },
     { name: 'ReportFooterArea1', sections: placed.map((objects, i) => ({ name: `RF${i + 1}`, height: 2000, objects })) }] };
   const converted = convertToRdl(main as never, { connections: [], links: [], tables: [] } as never, { reportName: 'Parts', subreports: new Map(subs.map((s, i) => [i + 2, s] as [number, never])), formulasInQuery: true, rulesAsText: true } as never);
-  return applyConventions(converted.rdl, 'Parts', conventions).rdl;
+  return applyConventions(converted.rdl, 'Parts', conv).rdl;
 };
 const subreport = (n: number, x = 0) => ({ kind: 'subreport', name: `Sub${n}`, subreport: { index: n + 1, onDemand: false }, ...box(x, 0, 6000, 300) });
 const listing = (T: string, extraFormulas: object[] = [], extraHeads: object[] = [], extraDetail: object[] = []) => ({ ...empty, parameters: params, groups: ['@G'],
@@ -218,6 +220,46 @@ describe('sections of a report made of many parts', () => {
     const out = applyConventions(rdl, 'Parts', conventions).rdl;
     assert.ok(!/Counted/.test(out), out);
     assert.match(out, />Total</);
+  });
+
+  it('styles charts, their colours and their titles from the style dataset', () => {
+    const T = 'chart_rows';
+    const def = { ...empty, parameters: params, groups: [`${T}.label`], formulas: [{ kind: 'internal', name: 'Group #1 Order', index: 2, text: `if IsNull ({${T}.label}) then 2 else 2`, referencedFields: [`${T}.label`] },
+      { kind: 'conditionalFormat', name: 'None', index: 3, text: `Count ({${T}.amount}) = 0`, referencedFields: [`${T}.amount`] }],
+      layout: [{ name: 'ReportHeaderArea1', sections: [{ name: 'RH1', height: 3200, objects: [
+        { kind: 'chart', name: 'Bars', ...box(0, 15, 4000, 3000), chart: { family: 0, graphType: 0, values: [`Sum of ${T}.amount`], onChangeOf: `${T}.label` } },
+        field('Heading', '@Head', 30, 75, 3900, 225, { conditions: { suppress: { name: 'None', index: 3 } } })] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 0, suppressed: true, objects: [] }] }] };
+    def.formulas.push({ kind: 'formula', name: 'Head', index: 4, text: '"Spread by label"', referencedFields: [] } as never);
+    const main = { ...empty, parameters: params, page: { orientation: 'landscape', paperSize: 1 }, layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 0, suppressed: true, objects: [] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 0, suppressed: true, objects: [] }] },
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF1', height: 300, objects: [{ ...subreport(1, 180), ...box(180, 40, 3970, 210), border: { sides: [1, 1, 1, 1], width: 20 } }] }] }] };
+    const converted = convertToRdl(main as never, { connections: [], links: [], tables: [] } as never, { reportName: 'Parts', subreports: new Map([[2, sub(def, table('chart_rows_get', 'storedProcedure', ['label', 'amount']), 1)]] as [number, never][]), formulasInQuery: true, rulesAsText: true } as never);
+    const out = applyConventions(converted.rdl, 'Parts', styled).rdl;
+    const doc = parseXml(out);
+    const colors = descendants(doc).filter((e) => e.name === 'ChartCustomPaletteColor').map(textOf);
+    assert.deepEqual(colors, ['=First(Fields!Pal_A_fill.Value, "Theme")', '=First(Fields!Pal_B_fill.Value, "Theme")']);
+    assert.match(out, /<Color>=Choose\(\(RunningValue\(Fields!label\.Value, CountDistinct, Nothing\) - 1\) Mod 2 \+ 1, First\(Fields!Pal_A_fill\.Value, "Theme"\), First\(Fields!Pal_B_fill\.Value, "Theme"\)\)</);
+    const axis = descendants(doc).find((e) => e.name === 'ChartAxis')!;
+    assert.equal(textOf(child(axis, 'Style/FontFamily')), '=First(Fields!Plot_font.Value, "Theme")');
+    const heading = descendants(doc).find((e) => e.name === 'Textbox' && descendants(e).some((v) => v.name === 'Value' && /Spread by label/.test(textOf(v))))!;
+    assert.equal(textOf(child(heading, 'Style/BackgroundColor')), '=First(Fields!Plot_Head_fill.Value, "Theme")');
+    assert.match(textOf(child(heading, 'Visibility/Hidden')), /CountRows\("[^"]+"\) = 0/);
+    assert.ok(!/Count\(Fields!amount/.test(textOf(child(heading, 'Visibility/Hidden'))));
+    const chart = descendants(doc).find((e) => e.name === 'Chart')!;
+    const len = (e: typeof chart, n: string) => Number(textOf(child(e, n)).replace('in', ''));
+    assert.ok(len(chart, 'Top') >= len(heading, 'Top') + len(heading, 'Height') - 0.001, 'the chart starts under its title band');
+    assert.ok(!diagnoseRdl(out, true).some((f) => f.kind === 'overlap'), JSON.stringify(diagnoseRdl(out, true).filter((f) => f.kind === 'overlap')));
+  });
+
+  it('keeps a heading written as two text objects one over the other to its two lines', () => {
+    const T = 'notes';
+    const heads = [text('Upper', 'Expected Amount Owing', 2200, 40, 1665, 240), text('Lower', 'by the Following Date', 2200, 235, 1620, 240), text('Plain', 'Balance', 4000, 115, 1300, 240)];
+    const def = listing(T, [], heads, [field('V2', `${T}.amount`, 2200, 0, 1620, 180), field('V3', `${T}.par`, 4000, 0, 1300, 180)]);
+    const rdl = build([sub(def, table(T, 'table', ['name', 'amount', 'par', 'owner_key']), 1)], [[subreport(1)]], styled);
+    const row = descendants(parseXml(rdl)).find((e) => e.name === 'TablixRow' && descendants(e).some((v) => v.name === 'Value' && /Expected/.test(textOf(v))))!;
+    assert.ok(Number(textOf(child(row, 'Height')).replace('in', '')) < 0.5, textOf(child(row, 'Height')));
   });
 });
 
