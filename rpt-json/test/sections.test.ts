@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { applyConventions, readConventions } from '../src/ssrs/conventions.ts';
+import { standaloneParts } from '../src/ssrs/convert.ts';
 import { diagnoseRdl } from '../src/ssrs/diagnose.ts';
 import { convertToRdl } from '../src/ssrs/rdl.ts';
 import { child, descendants, parseXml, textOf } from '../src/ssrs/xml.ts';
@@ -133,6 +134,34 @@ describe('sections of a report made of many parts', () => {
     const inch = (name: string) => parseFloat(textOf(child(stamp, name)));
     assert.ok(inch('Width') > 0.6, `width ${inch('Width')}`);
     assert.ok(inch('Left') >= 9.65 - 0.001 && inch('Left') + inch('Width') <= 10.5 + 0.001, `left ${inch('Left')}`);
+  });
+
+  it('writes each part a report prints as a report of its own, in print order, named and laid out as the template asks', () => {
+    const fields = ['name', 'owner_key'];
+    const main = { ...empty, parameters: params, page: { orientation: 'landscape', paperSize: 1 }, layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 0, suppressed: true, objects: [] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 0, suppressed: true, objects: [] }] },
+      { name: 'ReportFooterArea1', sections: [
+        { name: 'RF1', height: 2000, objects: [{ ...subreport(2), position: { x: 0, y: 900 } }, subreport(1, 6200)] },
+        { name: 'RF2', height: 0, suppressed: true, objects: [subreport(3)] }] }] };
+    const part = (T: string) => ({ definition: listing(T), dataSource: table(T, 'table', fields) });
+    const models = [{ storage: '', definition: main }, { storage: 'Subdocument 2', ...part('first') }, { storage: 'Subdocument 3', ...part('second') }, { storage: 'Subdocument 4', ...part('third') }];
+    const named = readConventions(JSON.stringify({ names: { table: '{S}_Tab_{n}', title: '{S}_SchTitle_Txt' }, dataset: '{S}_Data' }));
+    const parts = standaloneParts(models as never, 'Parts', { formulasInQuery: true, rulesAsText: true, reshape: (rdl, name, extra) => applyConventions(rdl, name, named, extra?.prefix, { sqlFunctions: extra?.sqlFunctions }) });
+    assert.deepEqual(parts.map((p) => p.fileName), ['Parts_01_first_title.rdl', 'Parts_02_second_title.rdl']);
+    for (const [k, p] of parts.entries()) {
+      const doc = parseXml(p.rdl);
+      const items = descendants(doc);
+      assert.ok(!items.some((e) => e.name === 'Subreport'), p.fileName);
+      assert.equal(textOf(items.find((e) => e.name === 'PageWidth')), '11in');
+      const first = items.find((e) => e.name === 'Rectangle')!;
+      assert.ok(first.attributes.Name?.startsWith(`Parts_0${k + 1}_`), first.attributes.Name);
+      assert.ok(items.some((e) => e.name === 'Tablix' && e.attributes.Name === `Parts_0${k + 1}_Tab_1`));
+      assert.ok(items.some((e) => e.name === 'ReportParameter' && e.attributes.Name === 'owner_key'));
+      assert.ok(!diagnoseRdl(p.rdl, true).some((f) => f.kind === 'merge' || f.kind === 'overlap'), p.fileName);
+    }
+    const names = parts.flatMap((p) => descendants(parseXml(p.rdl)).filter((e) => e.attributes.Name && ['Textbox', 'Tablix', 'Rectangle', 'DataSet'].includes(e.name) && e.attributes.Name !== 'Report_CSS').map((e) => e.attributes.Name!));
+    assert.equal(new Set(names).size, names.length, names.filter((n, i) => names.indexOf(n) !== i).join(', '));
   });
 
   it('gives a bold date at the far side of the body the room up to the page edge', () => {

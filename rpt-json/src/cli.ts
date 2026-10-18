@@ -5,7 +5,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 import { buildMetadata, jsonToRpt, readCfb, rptToJson, type RptJson } from './index.ts';
 import { jsonToDocument, sha256 } from './json.ts';
-import { convertDocumentsWithTemplate, convertDocumentToSsrs, reviewMarkdown } from './ssrs/convert.ts';
+import { convertDocumentsWithTemplate, convertDocumentToSsrs, convertSubreportsStandalone, reviewMarkdown } from './ssrs/convert.ts';
 import { readHouseTemplate, type HouseTemplate } from './ssrs/house.ts';
 import { chartStructure } from './crystal/chartinfo.ts';
 import { layoutSummary } from './crystal/layoutinfo.ts';
@@ -39,7 +39,7 @@ Usage:
   rpt-json to-rdl  <input.rpt|input.json|folder> [output-dir] [--connection "<connection string>"]
                    [--shared-datasource <name>] [--template <house.rdl>] [--separate-subreports]
                    [--page-number] [--parameter name=value]... [--chart-axis-format <format>] [--house <style.json>]
-                   [--conventions <conventions.json> [--prefix <short name>]]
+                   [--conventions <conventions.json> [--prefix <short name>]] [--split-subreports]
                                             Convert to SSRS .rdl files (+ subreports) and a review checklist;
                                             a folder converts every .rpt in it and its subfolders, each written
                                             to the same subfolder of the output folder;
@@ -56,7 +56,9 @@ Usage:
                                             source and parameters, looks read from their style dataset;
                                             --prefix gives the report's items a short name of their own;
                                             its datasets run their queries themselves; <name>.sql drafts the
-                                            procedures to put in their place
+                                            procedures to put in their place;
+                                            --split-subreports also writes each part the report prints as a
+                                            report of its own, in <name>_parts, numbered in print order
   rpt-json to-rdl  --template <house.rdl> --combine <output.rdl> <input.rpt|folder>...
                                             Combine several reports into one .rdl, one block per report
   rpt-json headers <input.rpt|input.json|folder> [output-file] [--json | --csv] [--all]
@@ -209,6 +211,7 @@ async function main(argv: string[]): Promise<number> {
     const connectionString = takeOption(args, '--connection');
     const sharedDataSource = takeOption(args, '--shared-datasource');
     const separateSubreports = takeFlag(args, '--separate-subreports');
+    const splitSubreports = takeFlag(args, '--split-subreports');
     const pageNumber = takeFlag(args, '--page-number');
     const chartAxisFormat = takeOption(args, '--chart-axis-format');
     let parameterValues: Record<string, string> | undefined;
@@ -240,7 +243,7 @@ async function main(argv: string[]): Promise<number> {
     const prefix = takeOption(args, '--prefix');
     if (takeFlag(args, '--preview')) console.error('NOTE --preview is no longer needed: the template runs its queries itself');
     let standardParameters: string[] = [];
-    let reshape: ((rdl: string, name: string, extra?: { sqlFunctions?: string[] }) => { rdl: string; review: { item: string; message: string }[]; settled: string[]; settles?: RegExp; files?: Record<string, string> }) | undefined;
+    let reshape: ((rdl: string, name: string, extra?: { sqlFunctions?: string[]; prefix?: string }) => { rdl: string; review: { item: string; message: string }[]; settled: string[]; settles?: RegExp; files?: Record<string, string> }) | undefined;
     if (conventionsPath) {
       const { readConventions, applyConventions } = await import('./ssrs/conventions.ts');
       let conv: ReturnType<typeof readConventions>;
@@ -249,7 +252,7 @@ async function main(argv: string[]): Promise<number> {
       } catch (err) {
         throw new Error(`conventions ${conventionsPath}: ${(err as Error).message}`);
       }
-      reshape = (rdl, name, extra) => applyConventions(rdl, name, conv, prefix, { ...extra, parameterValues });
+      reshape = (rdl, name, extra) => applyConventions(rdl, name, conv, extra?.prefix ?? prefix, { sqlFunctions: extra?.sqlFunctions, parameterValues });
       standardParameters = conv.parameters.map((p) => p.name);
       // The house style step's layout work (tables, bands and frames reaching the page's rules), without its looks:
       // the team's looks come from their style dataset.
@@ -266,6 +269,7 @@ async function main(argv: string[]): Promise<number> {
     const templatePath = takeOption(args, '--template');
     if (conventionsPath && templatePath) throw new Error('to-rdl: --conventions reshapes the converted layout and --template replaces it; use one or the other');
     if (housePath && templatePath) throw new Error('to-rdl: --house keeps the Crystal layout and --template replaces it; use one or the other');
+    if (splitSubreports && templatePath) throw new Error('to-rdl: --split-subreports goes without --template');
     const combine = takeOption(args, '--combine');
     let template: HouseTemplate | undefined;
     if (templatePath) {
@@ -350,6 +354,23 @@ async function main(argv: string[]): Promise<number> {
           const shown = join(folder, report.fileName);
           checks.push(diagnosisText(shown, findings));
           console.error(`CHECK ${shown}: ${diagnosisLine(findings)}`);
+        }
+        if (splitSubreports) {
+          const parts = convertSubreportsStandalone(doc, base, { connectionString, sharedDataSource, pageNumber, parameterValues, chartAxisFormat, restyle, reshape, formulasInQuery: !!conventionsPath, rulesAsText: !!conventionsPath }, prefix);
+          const partsDir = join(targetDir, `${base}_parts`);
+          if (parts.length) await mkdir(partsDir, { recursive: true });
+          for (const part of parts) {
+            if (part.rdl) await writeFile(join(partsDir, part.fileName), part.rdl);
+            for (const [ending, text] of Object.entries(part.files ?? {})) await writeFile(join(partsDir, part.fileName.replace(/\.rdl$/i, ending)), text);
+          }
+          if (parts.length) await writeFile(join(partsDir, `${base}_parts.review.md`), reviewMarkdown(basename(file), parts));
+          console.error(parts.length ? `OK   ${file}: ${parts.filter((r) => r.rdl).length} part(s) written on their own in ${partsDir}` : `NOTE ${file}: no parts to write on their own`);
+          for (const part of parts.filter((r) => r.rdl)) {
+            const findings = checkConverted(part.rdl, part.files, !!conventionsPath, standardParameters);
+            const shown = join(folder, `${base}_parts`, part.fileName);
+            checks.push(diagnosisText(shown, findings));
+            console.error(`CHECK ${shown}: ${diagnosisLine(findings)}`);
+          }
         }
       } catch (err) {
         failures++;

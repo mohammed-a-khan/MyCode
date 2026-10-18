@@ -1,9 +1,11 @@
 /** Converts a whole .rpt (main report and subreports) into SSRS report definitions. */
 
-import { buildMetadata } from '../json.ts';
+import { buildMetadata, type ReportModel } from '../json.ts';
 import type { CfbDocument, CfbNode, CfbStorage } from '../cfb/types.ts';
 import { convertToRdl, sanitizeName, type ReviewNote, type SubreportInfo } from './rdl.ts';
 import { buildHouseReport, type HouseInput, type HouseTemplate } from './house.ts';
+import { classifyAreas } from '../crystal/areas.ts';
+import { extractHeaders } from '../crystal/headers.ts';
 
 export interface ConvertedReport {
   /** File name for the .rdl (without directory). */
@@ -36,7 +38,7 @@ export interface SsrsOptions {
   /** A last step over each report's RDL (a house style laid over the Crystal layout, ...). */
   restyle?: (rdl: string) => string;
   /** The very last step: the report reshaped as a team's template (names, structure, looks), with notes. */
-  reshape?: (rdl: string, reportName: string, extra?: { sqlFunctions?: string[] }) => { rdl: string; review: ReviewNote[]; settled?: string[]; settles?: RegExp; files?: Record<string, string> };
+  reshape?: (rdl: string, reportName: string, extra?: { sqlFunctions?: string[]; prefix?: string }) => { rdl: string; review: ReviewNote[]; settled?: string[]; settles?: RegExp; files?: Record<string, string> };
 }
 
 const safeFileName = (name: string) => name.replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'Report';
@@ -89,16 +91,7 @@ export function convertDocumentToSsrs(doc: CfbDocument, baseName: string, option
       subreport: Boolean(model.storage),
       images: embeddedImages(storageAt(doc.root, model.storage)),
     });
-    let out = rdl && options.restyle ? options.restyle(rdl) : rdl;
-    let files: Record<string, string> | undefined;
-    if (out && options.reshape) {
-      const shaped = options.reshape(out, reportName, { sqlFunctions });
-      out = shaped.rdl;
-      files = shaped.files;
-      const settled = new Set(shaped.settled ?? []);
-      const gone = (n: ReviewNote) => [...n.message.matchAll(/\bCode\.(\w+)/g)].some((m) => !new RegExp(`\\bCode\\.(\\w+_)?${m[1]}\\b`).test(out ?? ''));
-      review.splice(0, review.length, ...review.filter((n) => !settled.has(n.item) && !shaped.settles?.test(n.item) && !gone(n)), ...shaped.review);
-    }
+    const { out, files } = finish(rdl, review, reportName, sqlFunctions, options);
     return { fileName: `${reportName}.rdl`, storage: model.storage, rdl: out, review, referenced, files };
   });
   // Only the subreports the main report refers to need an .rdl of their own: those placed inside it need none, nor
@@ -108,6 +101,73 @@ export function convertDocumentToSsrs(doc: CfbDocument, baseName: string, option
   return results
     .filter((r) => !r.storage || !used || used.has(Number(/^Subdocument (\d+)$/.exec(r.storage)?.[1])))
     .map(({ referenced: _, ...r }) => r);
+}
+
+function finish(rdl: string, review: ReviewNote[], reportName: string, sqlFunctions: string[] | undefined, options: SsrsOptions, prefix?: string): { out: string; files?: Record<string, string> } {
+  let out = rdl && options.restyle ? options.restyle(rdl) : rdl;
+  let files: Record<string, string> | undefined;
+  if (out && options.reshape) {
+    const shaped = options.reshape(out, reportName, { sqlFunctions, ...(prefix ? { prefix } : {}) });
+    out = shaped.rdl;
+    files = shaped.files;
+    const settled = new Set(shaped.settled ?? []);
+    const gone = (n: ReviewNote) => [...n.message.matchAll(/\bCode\.(\w+)/g)].some((m) => !new RegExp(`\\bCode\\.(\\w+_)?${m[1]}\\b`).test(out ?? ''));
+    review.splice(0, review.length, ...review.filter((n) => !settled.has(n.item) && !shaped.settles?.test(n.item) && !gone(n)), ...shaped.review);
+  }
+  return { out, files };
+}
+
+export function convertSubreportsStandalone(doc: CfbDocument, baseName: string, options: SsrsOptions = {}, prefix?: string): ConvertedReport[] {
+  return standaloneParts(buildMetadata(doc).reports ?? [], baseName, options, prefix, (storage) => embeddedImages(storageAt(doc.root, storage)));
+}
+
+export function standaloneParts(models: ReportModel[], baseName: string, options: SsrsOptions = {}, prefix?: string, imagesOf?: (storage: string) => Map<number, Uint8Array>): ConvertedReport[] {
+  const main = models.find((m) => !m.storage)?.definition;
+  if (!main) return [];
+  const base = safeFileName(baseName);
+  const areas = classifyAreas(main.layout);
+  const levels = [...new Set([...areas.groupHeaders.keys(), ...areas.groupFooters.keys()])].sort((a, b) => a - b);
+  const sections = [
+    ...areas.reportHeader, ...areas.pageHeader, ...levels.flatMap((l) => areas.groupHeaders.get(l) ?? []), ...areas.detail,
+    ...[...levels].reverse().flatMap((l) => areas.groupFooters.get(l) ?? []), ...areas.reportFooter, ...areas.pageFooter,
+  ].filter((section) => !section.suppressed || section.conditions?.suppress);
+  const order: number[] = [];
+  for (const section of sections) {
+    const placed = section.objects.filter((o) => o.kind === 'subreport' && o.subreport && (!o.suppressed || o.conditions?.suppress))
+      .sort((a, b) => (a.position?.y ?? 0) - (b.position?.y ?? 0) || (a.position?.x ?? 0) - (b.position?.x ?? 0));
+    for (const o of placed) if (!order.includes(o.subreport!.index)) order.push(o.subreport!.index);
+  }
+  const width = String(order.length).length < 2 ? 2 : String(order.length).length;
+  const used = new Set<string>();
+  return order.flatMap((index, k) => {
+    const model = models.find((m) => m.storage === `Subdocument ${index}`);
+    if (!model) return [];
+    const number = String(k + 1).padStart(width, '0');
+    const title = extractHeaders([model]).find((h) => (h.kind === 'chart title' || h.kind === 'text') && /[A-Za-z]/.test(h.text))?.text ?? '';
+    const words = safeFileName(title).split('_').filter(Boolean).slice(0, 6).join('_');
+    let reportName = words ? `${base}_${number}_${words}` : `${base}_${number}`;
+    for (let n = 2; used.has(reportName.toLowerCase()); n++) reportName = `${base}_${number}_${n}`;
+    used.add(reportName.toLowerCase());
+    if (!model.definition) {
+      return [{ fileName: `${reportName}.rdl`, storage: model.storage, rdl: '', review: [{ item: 'Report', message: `could not be decoded: ${(model.errors ?? []).join('; ')}` }] }];
+    }
+    const definition = { ...model.definition, page: model.definition.page ?? main.page };
+    const { rdl, review, sqlFunctions } = convertToRdl(definition, model.dataSource, {
+      reportName,
+      connectionString: options.connectionString,
+      sharedDataSource: options.sharedDataSource,
+      pageNumber: options.pageNumber,
+      parameterValues: options.parameterValues,
+      chartAxisFormat: options.chartAxisFormat,
+      formulasInQuery: options.formulasInQuery,
+      rulesAsText: options.rulesAsText,
+      subreports: new Map(),
+      subreport: true,
+      images: imagesOf?.(model.storage),
+    });
+    const { out, files } = finish(rdl, review, reportName, sqlFunctions, options, `${prefix ?? base}_${number}`);
+    return [{ fileName: `${reportName}.rdl`, storage: model.storage, rdl: out, review, files }];
+  });
 }
 
 function storageAt(root: CfbStorage, path: string): CfbStorage | undefined {
