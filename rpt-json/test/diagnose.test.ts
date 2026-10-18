@@ -101,6 +101,9 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
     assert.equal(overlaps('=Not ((Parameters!k.Value = 1))', '=Parameters!k.Value = 2'), 1);
     assert.equal(overlaps('=CountRows("Rows") = 0', '=CountRows("Rows") > 0'), 0);
     assert.equal(overlaps('=CountRows("Rows") = 0', '=CountRows("Rows") > 1'), 1);
+    assert.equal(overlaps('=IIf((Last(Fields!k.Value, "Rows") &lt;&gt; 0), True, Nothing)', '=IIf((Last(Fields!k.Value, "Rows") &lt;&gt; 1), True, Nothing)'), 0);
+    assert.equal(overlaps('=IIf((Fields!k.Value = "A"), True, Nothing)', '=IIf((Fields!k.Value = "A"), Nothing, True)'), 0);
+    assert.equal(overlaps('=IIf((Last(Fields!k.Value, "Rows") &lt;&gt; 0), True, Nothing)', '=IIf((Last(Fields!j.Value, "Rows") &lt;&gt; 1), True, Nothing)'), 1);
   });
 
   it('takes a heading naming its column from the data as meant, and still lists one showing the column\'s own value', () => {

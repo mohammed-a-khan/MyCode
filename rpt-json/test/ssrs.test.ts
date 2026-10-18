@@ -571,6 +571,38 @@ describe('layout conversion', () => {
     assert.ok(foot && Math.abs(Number(foot[1]) + 0.01 - parseFloat(height('Left'))) < 0.002);
   });
 
+  it('draws a framed box down to its row\'s foot past a box below that never shows with it', () => {
+    const subSource: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Customer', type: 'string' }] }] };
+    const sub: ReportDefinition = { ...emptyDefinition(), layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 3000, objects: [{ kind: 'text', name: 'Title', text: 'Title', position: { x: 60, y: 60 }, size: { width: 3000, height: 255 } }] }] }] };
+    const framed = (name: string, x: number, y: number, rule?: string) => ({ kind: 'subreport' as const, name, subreport: { index: 1, onDemand: false }, position: { x, y }, size: { width: 3900, height: 215 },
+      border: { sides: [1, 1, 1, 1] as [number, number, number, number], width: 20 }, ...(rule ? { conditions: { suppress: { name: rule, index: rule === 'Zero' ? 1 : 2 } } } : {}) });
+    const main: ReportDefinition = { ...emptyDefinition(), page: { orientation: 'landscape', paperSize: 1 },
+      formulas: [{ name: 'Zero', index: 1, kind: 'conditionalFormat', text: 'if {Orders.Amount} <> 0 then true', referencedFields: ['Orders.Amount'] },
+        { name: 'One', index: 2, kind: 'conditionalFormat', text: 'if {Orders.Amount} <> 1 then true', referencedFields: ['Orders.Amount'] }],
+      layout: [{ name: 'ReportFooterArea1', sections: [{ name: 'Row', height: 2000, objects: [framed('Side', 140, 40), framed('Upper', 4140, 40, 'Zero'), framed('Shared', 4140, 40, 'One'), framed('Lower', 4140, 1500, 'One')] }] }] };
+    const { rdl } = convertToRdl(main, source, { reportName: 'Main', subreports: new Map([[1, { name: 'Sub1', links: [], definition: sub, dataSource: subSource }]]) });
+    const height = (name: string) => parseFloat(new RegExp(`<Rectangle Name="${name}">[\\s\\S]*?<KeepTogether>true</KeepTogether>\\s*<Top>[^<]*</Top>\\s*<Left>[^<]*</Left>\\s*<Height>([^<]*)</Height>`).exec(rdl)?.[1] ?? 'NaN');
+    assert.ok(Math.abs(height('Upper') - height('Side')) < 0.002, `${height('Upper')} / ${height('Side')}`);
+    assert.ok(height('Shared') < height('Side') - 0.5, `${height('Shared')}`);
+  });
+
+  it('hides a subreport by its section\'s formula once, with no frame, when its own formula is the same', () => {
+    const subSource: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Customer', type: 'string' }] }] };
+    const sub: ReportDefinition = { ...emptyDefinition(), layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 3000, objects: [{ kind: 'text', name: 'Title', text: 'Title', position: { x: 60, y: 60 }, size: { width: 3000, height: 255 } }] }] }] };
+    const subreport = { kind: 'subreport' as const, name: 'Only', subreport: { index: 1, onDemand: false }, position: { x: 140, y: 0 }, size: { width: 4000, height: 215 },
+      border: { sides: [1, 1, 1, 1] as [number, number, number, number], width: 20 }, conditions: { suppress: { name: 'Suppress', index: 1 } } };
+    const main: ReportDefinition = { ...emptyDefinition(), page: { orientation: 'landscape', paperSize: 1 },
+      formulas: [{ name: 'Suppress', index: 1, kind: 'conditionalFormat', text: '{Orders.Amount} = 0', referencedFields: ['Orders.Amount'] }],
+      layout: [{ name: 'ReportFooterArea1', sections: [{ name: 'Row', height: 300, conditions: { suppress: { name: 'Suppress', index: 1 } }, objects: [subreport] }] }] };
+    const { rdl } = convertToRdl(main, source, { reportName: 'Main', subreports: new Map([[1, { name: 'Sub1', links: [], definition: sub, dataSource: subSource }]]) });
+    assert.ok(!rdl.includes('Only_Frame'));
+    const rule = /<Rectangle Name="Only">[\s\S]*?<Hidden>([^<]*)<\/Hidden>/.exec(rdl)?.[1] ?? '';
+    assert.match(rule, /Amount/);
+    assert.ok(!/OrElse/.test(rule), rule);
+  });
+
   it('draws the empty frame of a bordered subreport its own formula hides', () => {
     const subSource: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Customer', type: 'string' }] }] };
     const sub: ReportDefinition = { ...emptyDefinition(), layout: [
@@ -2490,7 +2522,23 @@ describe('subreports in the report footer', () => {
       ...panel.layout.slice(1),
     ] };
     const { rdl } = convertToRdl(main([sub('Titled', 1, 150)]), source, { reportName: 'M', subreports: new Map([[1, { name: 'M_Subdocument_1', links: [], definition: withTitle, dataSource: source }]]) });
-    assert.ok(/<Hidden>=\(CountRows\("DataSet_M_Subdocument_1"\) &gt; 0\) AndAlso \(/.test(rdl), rdl.slice(rdl.indexOf('<Textbox Name="Heading">'), rdl.indexOf('<Textbox Name="Heading">') + 1500));
+    const heading = rdl.slice(rdl.indexOf('<Textbox Name="Heading">'), rdl.indexOf('</Textbox>', rdl.indexOf('<Textbox Name="Heading">')));
+    assert.ok(!heading.includes('<Hidden>'), heading);
+  });
+
+  it('writes a count condition guarded for no records as the plain count, or leaves out one that never holds', () => {
+    const formulas = [{ name: 'Object_Visibility', index: 0, kind: 'conditionalFormat' as const, text: 'Count ({T.Label}) > 0', referencedFields: ['T.Label'] },
+      { name: 'Field_Visibility', index: 1, kind: 'conditionalFormat' as const, text: '{T.Label} = "x"', referencedFields: ['T.Label'] }];
+    const withNote: ReportDefinition = { ...panel, formulas, formulaTexts: formulas.map((f) => f.text), layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 700, objects: [
+        { kind: 'text', name: 'Note', text: 'Nothing yet', position: { x: 0, y: 0 }, size: { width: 2000, height: 220 }, conditions: { suppress: { name: 'Object_Visibility', index: 0 } } },
+        { kind: 'text', name: 'Mark', text: 'Mark', position: { x: 0, y: 300 }, size: { width: 2000, height: 220 }, conditions: { suppress: { name: 'Field_Visibility', index: 1 } } }] }] },
+      ...panel.layout.slice(1),
+    ] };
+    const { rdl } = convertToRdl(main([sub('Noted', 1, 150)]), source, { reportName: 'M', subreports: new Map([[1, { name: 'M_Subdocument_1', links: [], definition: withNote, dataSource: source }]]) });
+    const rule = (name: string) => new RegExp(`<Textbox Name="${name}">[\\s\\S]*?<Hidden>([^<]*)</Hidden>`).exec(rdl)?.[1] ?? '';
+    assert.equal(rule('Note'), '=CountRows("DataSet_M_Subdocument_1") &gt; 0');
+    assert.match(rule('Mark'), /^=\(CountRows\("DataSet_M_Subdocument_1"\) &gt; 0\) AndAlso /);
   });
 
   it('keeps a subreport to its frame, its wider content cut off at the frame as Crystal does', () => {

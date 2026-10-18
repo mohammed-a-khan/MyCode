@@ -14,6 +14,7 @@
  */
 
 import { foldRepeatedSubreports } from './fold.ts';
+import { alternates } from './diagnose.ts';
 import type {
   AreaInfo,
   BorderInfo,
@@ -1204,7 +1205,7 @@ class RdlBuilder {
     const scoped = outside ? scopeOutsideRegion(expression.slice(1), this.dataset, this.lastRecord ? 'Last' : 'First') : expression.slice(1);
     // With no records Crystal gives such a formula no result: the condition does not hold, so what it suppresses
     // still prints.
-    if (nullable) return rowCounted(`=(CountRows(${vbString(this.dataset)}) > 0) AndAlso (${scoped})`);
+    if (nullable) return settledByCount(rowCounted(`=(CountRows(${vbString(this.dataset)}) > 0) AndAlso (${scoped})`), vbString(this.dataset));
     return rowCounted(`=${scoped}`);
   }
 
@@ -1621,7 +1622,8 @@ class RdlBuilder {
         const own = obj.conditions?.suppress
           ? this.conditionExpression(obj.conditions.suppress, false, `subreport object "${obj.name}" in ${area}`, scope)
           : obj.suppressed ? '=True' : undefined;
-        const both = hidden && own ? `=(${hidden.slice(1)}) OrElse (${own.slice(1)})` : (hidden ?? own);
+        const same = !!hidden && !!own && hidden.replace(/\s+/g, '') === own.replace(/\s+/g, '');
+        const both = hidden && own && !same ? `=(${hidden.slice(1)}) OrElse (${own.slice(1)})` : (hidden ?? own);
         // Page 1's page header, moved into the body, keeps its subreports as in a page header (first row, items
         // at their places).
         const room = collapsible ? MIN_DESIGN_HEIGHT : section.height !== undefined ? twipsToInches(section.height) - (box.top - top) : undefined;
@@ -1633,7 +1635,7 @@ class RdlBuilder {
         const x = obj.position?.x ?? 0;
         const right = x + (obj.size?.width ?? 0);
         const ownColumn = !section.objects.some((o) => o !== obj && (o.position?.x ?? 0) < right && (o.position?.x ?? 0) + (o.size?.width ?? 0) > x);
-        if (inline && own && own !== '=True' && ownColumn && obj.border?.sides.some((side) => side > 0)) {
+        if (inline && own && own !== '=True' && !same && ownColumn && obj.border?.sides.some((side) => side > 0)) {
           const name = inline.item.attributes.Name ?? obj.name;
           const frame = el('Rectangle', { Name: this.itemNames.make(`${name}_Frame`) },
             el('KeepTogether', 'true'),
@@ -1658,7 +1660,19 @@ class RdlBuilder {
     for (const item of framedRow) {
       const row = framedRow.filter((other) => Math.abs(itemNumber(other, 'Top') - itemNumber(item, 'Top')) < 0.05);
       if (row.length < 2) continue;
-      const tallest = Math.max(...row.map((other) => Math.max(itemNumber(other, 'Height'), this.contentHeights.get(other) ?? 0)));
+      const rowFoot = Math.max(...row.map((other) => Math.max(itemNumber(other, 'Height'), this.contentHeights.get(other) ?? 0)));
+      const left = itemNumber(item, 'Left');
+      const right = left + itemNumber(item, 'Width');
+      const under = framedRow.filter((other) => itemNumber(other, 'Top') > itemNumber(item, 'Top') + 0.05 && itemNumber(other, 'Top') < itemNumber(item, 'Top') + rowFoot
+        && Math.min(right, itemNumber(other, 'Left') + itemNumber(other, 'Width')) - Math.max(left, itemNumber(other, 'Left')) > (right - left) / 2
+        && !alternates(item, other))
+        .sort((a, b) => itemNumber(a, 'Top') - itemNumber(b, 'Top'))[0];
+      const tallest = under ? Math.max(itemNumber(item, 'Height'), Math.min(rowFoot, itemNumber(under, 'Top') - itemNumber(item, 'Top') - 0.02)) : rowFoot;
+      if (under) {
+        const reach = itemNumber(item, 'Top') + rowFoot - itemNumber(under, 'Top');
+        const own = Math.max(itemNumber(under, 'Height'), this.contentHeights.get(under) ?? 0);
+        if (reach > own + 0.005) under.children = under.children.map((c) => (typeof c === 'object' && c !== null && (c as XmlElement).name === 'Height' ? el('Height', inches(reach)) : c));
+      }
       if (tallest - itemNumber(item, 'Height') >= 0.005) {
         // With the empty frame drawn in its place where its own formula hides it.
         const frame = items.find((other) => other.attributes.Name === `${item.attributes.Name}_Frame`);
@@ -4635,6 +4649,27 @@ class RdlBuilder {
 }
 
 const PAGE_GLOBALS = /Globals!(?:Overall)?(?:PageNumber|TotalPages)\b/g;
+
+function settledByCount(expression: string, dataset: string): string | undefined {
+  const head = `=(CountRows(${dataset}) > 0) AndAlso (`;
+  if (!expression.startsWith(head) || !expression.endsWith(')')) return expression;
+  let inner = expression.slice(head.length, -1).trim();
+  const wrapped = (t: string) => {
+    if (!t.startsWith('(') || !t.endsWith(')')) return false;
+    let depth = 0;
+    for (let i = 0; i < t.length; i++) {
+      if (t[i] === '(') depth++;
+      else if (t[i] === ')') depth--;
+      if (depth === 0 && i < t.length - 1) return false;
+    }
+    return true;
+  };
+  while (wrapped(inner)) inner = inner.slice(1, -1).trim();
+  const count = `CountRows(${dataset})`;
+  if (inner === `${count} = 0` || inner === `${count} < 1` || inner === `${count} <= 0`) return undefined;
+  if (inner === `${count} > 0` || inner === `${count} <> 0` || inner === `${count} >= 1`) return `=${count} > 0`;
+  return expression;
+}
 
 export function rowCounted(expression: string): string {
   return expression.replace(/\bCount\(Fields!\w+\.Value((?:, "(?:[^"]|"")*")?)\)(?=\s*(?:=|<>|>=|<=|>|<)\s*0(?![\d.]))/g, (_, scope: string) => `CountRows(${scope.replace(/^, /, '')})`);

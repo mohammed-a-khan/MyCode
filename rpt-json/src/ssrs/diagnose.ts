@@ -48,9 +48,25 @@ const negated = (s: string): string | undefined => {
   const m = /^Not\b\s*(.*)$/i.exec(unwrap(s));
   return m ? unwrap(m[1]!) : undefined;
 };
+const balanced = (s: string): boolean => {
+  let depth = 0;
+  for (const ch of s.replace(/"(?:[^"]|"")*"/g, '""')) {
+    if (ch === '(') depth++;
+    else if (ch === ')' && --depth < 0) return false;
+  }
+  return depth === 0;
+};
+const plain = (rule: string): string => {
+  const t = unwrap(rule);
+  const shown = /^IIf\((.*),\s*True,\s*(?:Nothing|False)\)$/i.exec(t);
+  if (shown && balanced(shown[1]!)) return unwrap(shown[1]!);
+  const hidden = /^IIf\((.*),\s*(?:Nothing|False),\s*True\)$/i.exec(t);
+  if (hidden && balanced(hidden[1]!)) return `Not (${unwrap(hidden[1]!)})`;
+  return t;
+};
 export const alternates = (a: XmlElement, b: XmlElement): boolean => {
-  const x = hideRule(a);
-  const y = hideRule(b);
+  const x = plain(hideRule(a));
+  const y = plain(hideRule(b));
   if (!x || !y) return false;
   const shown = (rule: string) => {
     const inner = negated(rule);
@@ -61,11 +77,12 @@ export const alternates = (a: XmlElement, b: XmlElement): boolean => {
   const q = shown(y);
   if (p && q && p.on === q.on && p.value !== q.value && p.equal === q.equal) return true;
   const compare = (r: string) => {
-    const m = /^(.+?)\s*(<>|>=|<=|=|>|<)\s*(-?\d+(?:\.\d+)?)$/.exec(unwrap(r));
-    return m ? { on: unwrap(m[1]!).replace(/^(?:CountRows\([^)]*\)|Count\(Fields!\w+\.Value(?:,\s*"[^"]*")?\))$/i, 'CountRows()'), op: m[2]!, n: Number(m[3]) } : undefined;
+    const m = /^(.+?)\s*(<>|>=|<=|=|>|<)\s*(-?\d+(?:\.\d+)?|"(?:[^"]|"")*")$/.exec(unwrap(r));
+    return m ? { on: unwrap(m[1]!).replace(/^(?:CountRows\([^)]*\)|Count\(Fields!\w+\.Value(?:,\s*"[^"]*")?\))$/i, 'CountRows()'), op: m[2]!, n: m[3]!.startsWith('"') ? m[3]! : Number(m[3]) } : undefined;
   };
   const cx = compare(x);
   const cy = compare(y);
+  if (cx && cy && cx.on === cy.on && cx.op === '<>' && cy.op === '<>' && cx.n !== cy.n) return true;
   if (cx && cy && cx.on === cy.on && cx.n === cy.n) {
     const pair = `${cx.op} ${cy.op}`;
     if (['= <>', '<> =', '> <=', '<= >', '< >=', '>= <'].includes(pair)) return true;
