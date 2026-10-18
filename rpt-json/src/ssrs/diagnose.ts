@@ -11,7 +11,7 @@
 import { child, childElements, descendants, parseXml, textOf, type XmlElement } from './xml.ts';
 
 export interface Finding {
-  kind: 'code' | 'overlap' | 'cut off' | 'page' | 'expression' | 'name' | 'empty row' | 'merge' | 'value';
+  kind: 'code' | 'overlap' | 'cut off' | 'page' | 'expression' | 'name' | 'empty row' | 'merge' | 'value' | 'look';
   item: string;
   message: string;
 }
@@ -218,6 +218,22 @@ export function diagnoseRdl(xml: string, template = false, standardParameters: s
   const headed = (t: XmlElement) => descendants(t).some((e) => e.name === 'Textbox' && /_ColTxt$/i.test(e.attributes.Name ?? ''));
   const later = tables.slice(1).find(headed);
   if (tables[0] && !headed(tables[0]) && later) out.push({ kind: 'merge', item: tables[0].attributes.Name ?? 'Tablix', message: `the first table has no _ColTxt heading, ${later.attributes.Name} has: the merge looks for the headings in the first` });
+  if (template) {
+    const styled = new Map<string, number>();
+    for (const st of descendants(report).filter((e) => e.name === 'Style')) {
+      for (const m of descendants(st).flatMap((e) => e.children.filter((c): c is string => typeof c === 'string')).join('\n').matchAll(/First\(Fields!\w+\.Value,\s*"([^"]+)"\)/g)) styled.set(m[1]!, (styled.get(m[1]!) ?? 0) + 1);
+    }
+    const look = [...styled].sort((a, b) => b[1] - a[1])[0];
+    if (look && look[1] >= 10) {
+      for (const chart of descendants(report).filter((e) => e.name === 'Chart')) {
+        const reads = (e: XmlElement) => descendants(e).some((x) => x.children.some((c) => typeof c === 'string' && c.includes(`"${look[0]}"`)));
+        const palette = descendants(chart).filter((e) => e.name === 'ChartCustomPaletteColor');
+        const area = descendants(chart).filter((e) => e.name === 'ChartArea').map((a) => child(a, 'Style/BackgroundColor')).filter((x): x is XmlElement => !!x);
+        if (palette.some(reads) || area.some(reads)) continue;
+        out.push({ kind: 'look', item: chart.attributes.Name ?? 'Chart', message: `keeps its own colours and title: nothing in it reads ${look[0]} (the conventions file needs style.roles.chartTitle and style.chart)` });
+      }
+    }
+  }
   return out;
 }
 

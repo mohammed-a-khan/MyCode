@@ -571,6 +571,20 @@ describe('layout conversion', () => {
     assert.ok(foot && Math.abs(Number(foot[1]) + 0.01 - parseFloat(height('Left'))) < 0.002);
   });
 
+  it('joins framed boxes side by side a hair apart, whatever their heights', () => {
+    const subSource: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Customer', type: 'string' }] }] };
+    const tall = (height: number): ReportDefinition => ({ ...emptyDefinition(), layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height, objects: [{ kind: 'text', name: 'Title', text: 'Title', position: { x: 60, y: 60 }, size: { width: 3000, height: 255 } }] }] }] });
+    const framed = (name: string, x: number, index: number) => ({ kind: 'subreport' as const, name, subreport: { index, onDemand: false }, position: { x, y: 40 }, size: { width: 4000, height: 215 },
+      border: { sides: [1, 1, 1, 1] as [number, number, number, number], width: 20 } });
+    const main: ReportDefinition = { ...emptyDefinition(), page: { orientation: 'landscape', paperSize: 1 },
+      layout: [{ name: 'ReportFooterArea1', sections: [{ name: 'Row', height: 2200, objects: [framed('Left', 140, 1), framed('Right', 4200, 2), { ...framed('Under', 4200, 3), position: { x: 4200, y: 1700 } }] }] }] };
+    const subs = new Map([[1, { name: 'Sub1', links: [], definition: tall(3000), dataSource: subSource }], [2, { name: 'Sub2', links: [], definition: tall(1500), dataSource: subSource }], [3, { name: 'Sub3', links: [], definition: tall(600), dataSource: subSource }]]);
+    const { rdl } = convertToRdl(main, source, { reportName: 'Main', subreports: subs });
+    const place = (name: string) => { const m = new RegExp(`<Rectangle Name="${name}">[\\s\\S]*?<KeepTogether>true</KeepTogether>\\s*<Top>[^<]*</Top>\\s*<Left>([^<]*)</Left>\\s*<Height>[^<]*</Height>\\s*<Width>([^<]*)</Width>`).exec(rdl); return { left: parseFloat(m?.[1] ?? 'NaN'), width: parseFloat(m?.[2] ?? 'NaN') }; };
+    assert.ok(Math.abs(place('Left').left + place('Left').width - place('Right').left) < 0.001, JSON.stringify([place('Left'), place('Right')]));
+  });
+
   it('draws a framed box down to its row\'s foot past a box below that never shows with it', () => {
     const subSource: DataSourceInfo = { connections: [], links: [], tables: [{ alias: 'T', name: 'T', kind: 'table', fields: [{ name: 'Customer', type: 'string' }] }] };
     const sub: ReportDefinition = { ...emptyDefinition(), layout: [

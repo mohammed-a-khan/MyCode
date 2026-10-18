@@ -671,3 +671,14 @@ End Function</Code><ReportSections><ReportSection><Body><ReportItems>
   });
 });
 
+describe('house looks', () => {
+  it('points out a chart that reads nothing from the style dataset the rest of the report reads', () => {
+    const styled = Array.from({ length: 10 }, (_, k) => `<Textbox Name="T${k}"><Paragraphs><Paragraph><TextRuns><TextRun><Value>x</Value><Style><Color>=First(Fields!Text_color.Value, "Theme")</Color></Style></TextRun></TextRuns></Paragraph></Paragraphs><Top>${k * 0.2}in</Top><Left>0in</Left><Height>0.2in</Height><Width>1in</Width></Textbox>`).join('');
+    const chart = (name: string, palette: string) => `<Chart Name="${name}">${palette}<ChartAreas><ChartArea Name="Default" /></ChartAreas><Top>3in</Top><Left>${name === 'Plain' ? 0 : 3}in</Left><Height>1in</Height><Width>2in</Width></Chart>`;
+    const branded = '<CustomPaletteColors><ChartCustomPaletteColor>=First(Fields!Pal_A_fill.Value, "Theme")</ChartCustomPaletteColor></CustomPaletteColors>';
+    const rdl = `<Report xmlns="http://schemas.microsoft.com/sqlserver/reporting/2016/01/reportdefinition"><ReportSections><ReportSection><Body><ReportItems>${styled}${chart('Plain', '')}${chart('Branded', branded)}</ReportItems><Height>5in</Height></Body><Width>6in</Width><Page /></ReportSection></ReportSections></Report>`;
+    const looks = diagnoseRdl(rdl, true).filter((f) => f.kind === 'look');
+    assert.deepEqual(looks.map((f) => f.item), ['Plain']);
+    assert.ok(!diagnoseRdl(rdl, false).some((f) => f.kind === 'look'));
+  });
+});

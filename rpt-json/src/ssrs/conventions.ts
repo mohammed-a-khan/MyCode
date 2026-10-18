@@ -2121,6 +2121,11 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
   // ----- Looks from the style dataset.
   if (conv.style?.roles.chartTitle) for (const tb of titlesOverCharts(report)) roles.set(tb, 'chartTitle');
   if (conv.style) applyStyleRoles(report, conv.style, roles, tableCells, unbanded, bandRows, review, dataSources[0]?.attributes.Name ?? conv.dataSource?.name ?? '');
+  const charts = descendants(report).filter((e) => e.name === 'Chart').length;
+  if (conv.style && charts && (!conv.style.roles.chartTitle || !conv.style.chart)) {
+    const missing = [!conv.style.roles.chartTitle ? 'style.roles.chartTitle' : '', !conv.style.chart ? 'style.chart' : ''].filter(Boolean).join(' and ');
+    review.push({ item: `Charts (${charts})`, message: `keep their own colours and plain titles: the conventions file has no ${missing}, so the style dataset's chart looks are not applied` });
+  }
   if (conv.style && body) alignToRules(report);
   const grownRows = new Set<XmlElement>();
   for (const [tb, role] of roles) {
@@ -2311,6 +2316,10 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     const kept = conds && centreBlock(root, tablix, conds);
     if (kept) review.push({ item: tablix.attributes.Name ?? 'Table', message: `stays at the left, not centred on the columns in use: ${kept}` });
   }
+  if (body) stackedFramesAligned(body);
+  if (body) rulesClearOfColumns(body);
+  if (body) sidesMeetRules(body);
+  if (body) edgePastThinColumns(body);
   if (body) labelsInLine(body);
   if (body) touchNotOverlap(body);
   return { rdl: toXml(withFunctions(root, extra.sqlFunctions ?? [])), review, settled: conv.dataSource ? ['Data source'] : [], ...(page && conv.pageBands === 'drop' ? { settles: /^Page header$| in Page (Header|Footer)\b/ } : {}), ...(Object.keys(files).length ? { files } : {}) };
@@ -2737,6 +2746,10 @@ function widenNarrow(tablix: XmlElement): void {
       const sizes = descendants(t).filter((e) => e.name === 'FontSize' && !textOf(e).startsWith('=')).map((e) => (inches(textOf(e)) ?? 0) * 72);
       const size = Math.max(Math.max(...sizes, 0) || 8, designText ? DESIGN_FONT : 0);
       need[k] = Math.max(need[k]!, ...text.split(/\s+/).map((w) => arialWidth(w, size, true) * 1.05 + sides));
+      const words = text.trim().split(/\s+/);
+      if (designText && !/[\r\n]/.test(text) && words.length > 1 && words.length <= 3) {
+        need[k] = Math.max(need[k]!, arialWidth(words.join(' '), Math.max(Math.max(...sizes, 0), 8), true) * 1.05 + sides);
+      }
     }
   }));
   const short = widths.map((w, k) => Math.max(0, need[k]! - w));
@@ -3811,9 +3824,18 @@ function clearOfLines(body: XmlElement): void {
 
 function roomForDates(body: XmlElement, width: number): void {
   const sample = (format: string) => format.replace(/'[^']*'/g, (q) => q.slice(1, -1)).replace(/yyyy/g, '0000').replace(/tt/g, 'PM').replace(/[yMdHhms]{1,2}/g, '00');
+  const parents = new Map<XmlElement, XmlElement>();
+  for (const e of descendants(body)) for (const c of childElements(e)) parents.set(c, e);
+  const open = (e: XmlElement) => e.name === 'Rectangle' && /^(none)?$/i.test(textOf(child(e, 'Style/Border/Style')));
+  const reachOf = (e: XmlElement): number => {
+    const holder = parents.get(e);
+    const owner = holder && parents.get(holder);
+    if (!owner || owner.name === 'Body') return width;
+    return open(owner) ? Math.max(len(owner, 'Width'), reachOf(owner) - len(owner, 'Left')) : len(owner, 'Width');
+  };
   for (const holder of descendants(body).filter((e) => e.name === 'ReportItems')) {
     const owner = descendants(body).find((e) => child(e, 'ReportItems') === holder);
-    const room = owner && owner.name !== 'Body' ? len(owner, 'Width') : Math.max(width, ...childElements(holder).map((e) => len(e, 'Left') + len(e, 'Width')));
+    const room = owner && owner.name !== 'Body' ? (open(owner) ? Math.max(len(owner, 'Width'), reachOf(owner) - len(owner, 'Left')) : len(owner, 'Width')) : Math.max(width, ...childElements(holder).map((e) => len(e, 'Left') + len(e, 'Width')));
     const list = childElements(holder).filter((e) => ITEMS.has(e.name) && child(e, 'Width'));
     for (const box of list.filter((e) => e.name === 'Textbox')) {
       const formats = descendants(box).filter((e) => e.name === 'Format').map((e) => (textOf(e) === 'd' ? 'MM/dd/yyyy' : textOf(e)));
@@ -3831,12 +3853,17 @@ function roomForDates(body: XmlElement, width: number): void {
       const across = list.filter((o) => o !== box && len(o, 'Top') < bottom - 0.001 && len(o, 'Top') + len(o, 'Height') > top + 0.001
         && !(len(o, 'Left') < left + width - 0.001 && len(o, 'Left') + len(o, 'Width') > left + 0.001));
       const rightEdge = Math.min(room || Infinity, ...across.filter((o) => len(o, 'Left') >= left + width - 0.001).map((o) => len(o, 'Left')));
-      const leftEdge = Math.max(0, ...across.filter((o) => len(o, 'Left') + len(o, 'Width') <= left + 0.001).map((o) => len(o, 'Left') + len(o, 'Width')));
+      const leftEdge = Math.max(0, ...across.filter((o) => len(o, 'Left') + len(o, 'Width') <= left + 0.001).map((o) => len(o, 'Left') + len(o, 'Width') + 0.04));
       const want = text + sides - width;
       const rightward = Math.max(0, Math.min(want, rightEdge - left - width));
       const leftward = Math.max(0, Math.min(want - rightward, left - leftEdge));
       setChild(box, 'Left', inch(left - leftward));
       setChild(box, 'Width', inch(width + rightward + leftward));
+      let need = left - leftward + width + rightward + leftward;
+      for (let up = owner; up && up.name === 'Rectangle' && len(up, 'Width') < need - 0.0005; up = parents.get(parents.get(up)!)) {
+        setChild(up, 'Width', inch(need));
+        need = len(up, 'Left') + need;
+      }
       if (width + rightward + leftward - sides < text) {
         const st = ownStyle(box);
         setChild(st, 'PaddingLeft', '0pt');
@@ -3887,6 +3914,121 @@ function labelsInLine(body: XmlElement): void {
         if (clash || top < 0) continue;
         setChild(p.box, 'Top', inch(top));
       }
+    }
+  }
+}
+
+function rulesClearOfColumns(body: XmlElement): void {
+  for (const holder of descendants(body).filter((e) => e.name === 'ReportItems')) {
+    const items = childElements(holder).filter((e) => ITEMS.has(e.name) && child(e, 'Left'));
+    for (const line of items.filter((e) => e.name === 'Line' && Math.abs(len(e, 'Width')) < 0.02 && len(e, 'Height') > 0.2)) {
+      const x = len(line, 'Left');
+      const top = len(line, 'Top');
+      const bottom = top + len(line, 'Height');
+      for (const o of items.filter((e) => e !== line && len(e, 'Top') < bottom && reach(e) > top)) {
+        const tables = o.name === 'Tablix' ? [{ t: o, at: 0, room: Infinity }]
+          : o.name === 'Rectangle'
+            ? childElements(child(o, 'ReportItems') ?? el('x'), 'Tablix').map((t) => ({ t, at: len(o, 'Left') + len(t, 'Left'), room: len(o, 'Width') - len(t, 'Left') }))
+            : [];
+        for (const { t, at, room } of tables) {
+          const columns = childElements(child(t, 'TablixBody/TablixColumns') ?? el('x'), 'TablixColumn');
+          let start = at;
+          for (let k = 0; k < columns.length - 1; k++) {
+            start += len(columns[k]!, 'Width');
+            if (x < start - 0.001 || x >= start + 0.12) continue;
+            const need = x + 0.06 - start;
+            const width = widthsOf(t).reduce((a, w) => a + w, 0);
+            if (width + need > room + 0.001) break;
+            setChild(columns[k]!, 'Width', inch(len(columns[k]!, 'Width') + need));
+            setChild(t, 'Width', inch(width + need));
+            break;
+          }
+        }
+      }
+    }
+  }
+}
+
+function sidesMeetRules(body: XmlElement): void {
+  const solid = (e: XmlElement, side: string) => !/^(none)?$/i.test(textOf(child(ownStyle(e), `${side}/Style`)));
+  const parents = new Map<XmlElement, XmlElement>();
+  for (const e of descendants(body)) for (const c of childElements(e)) parents.set(c, e);
+  const offset = (e: XmlElement, side: 'Top' | 'Left') => {
+    let at = 0;
+    for (let up: XmlElement | undefined = e; up && up !== body; up = parents.get(up)) if (ITEMS.has(up.name)) at += len(up, side);
+    return at;
+  };
+  const rules = descendants(body).flatMap((e) => {
+    if (e.name === 'Textbox' && solid(e, 'BottomBorder') && child(e, 'Top')) return [{ y: offset(e, 'Top') + len(e, 'Height'), l: offset(e, 'Left'), r: offset(e, 'Left') + len(e, 'Width') }];
+    if (e.name === 'Line' && Math.abs(len(e, 'Height')) < 0.001 && child(e, 'Top')) return [{ y: offset(e, 'Top'), l: offset(e, 'Left'), r: offset(e, 'Left') + len(e, 'Width') }];
+    return [];
+  });
+  for (const box of descendants(body).filter((e) => e.name === 'Rectangle' && child(e, 'ReportItems') && !solid(e, 'TopBorder') && !solid(e, 'Border') && (solid(e, 'RightBorder') || solid(e, 'LeftBorder')))) {
+    const top = offset(box, 'Top');
+    const left = offset(box, 'Left');
+    const xs = [solid(box, 'LeftBorder') ? left : undefined, solid(box, 'RightBorder') ? left + len(box, 'Width') : undefined].filter((x): x is number => x !== undefined);
+    const rule = rules.filter((r) => r.y <= top + 0.0005 && top - r.y <= 0.06 && xs.every((x) => x >= r.l - 0.01 && x <= r.r + 0.01)).sort((a, b) => b.y - a.y)[0];
+    if (!rule) continue;
+    const d = Math.min(top - rule.y, len(box, 'Top'));
+    if (d < 0.002) continue;
+    setChild(box, 'Top', inch(len(box, 'Top') - d));
+    setChild(box, 'Height', inchUp(len(box, 'Height') + d));
+    for (const c of childElements(child(box, 'ReportItems')!).filter((x) => ITEMS.has(x.name) && child(x, 'Top'))) setChild(c, 'Top', inch(len(c, 'Top') + d));
+  }
+}
+
+function stackedFramesAligned(body: XmlElement): void {
+  const framed = (e: XmlElement) => e.name === 'Rectangle' && !/^(none)?$/i.test(textOf(child(e, 'Style/Border/Style')));
+  for (const holder of descendants(body).filter((e) => e.name === 'ReportItems')) {
+    const boxes = childElements(holder).filter((e) => framed(e) && child(e, 'Top')).sort((a, b) => len(a, 'Top') - len(b, 'Top'));
+    for (const b of boxes) {
+      const l = len(b, 'Left');
+      const r = l + len(b, 'Width');
+      const a = boxes.filter((o) => o !== b && Math.abs(len(b, 'Top') - len(o, 'Top') - len(o, 'Height')) <= 0.1
+        && Math.abs(len(o, 'Left') - l) <= 0.06 && Math.abs(len(o, 'Left') + len(o, 'Width') - r) <= 0.06
+        && (Math.abs(len(o, 'Left') - l) > 0.0005 || Math.abs(len(o, 'Left') + len(o, 'Width') - r) > 0.0005))[0];
+      if (!a) continue;
+      const left = len(a, 'Left');
+      const width = len(a, 'Width');
+      const dx = left - l;
+      setChild(b, 'Left', inch(left));
+      setChild(b, 'Width', inch(width));
+      for (const c of childElements(child(b, 'ReportItems') ?? el('x')).filter((x) => ITEMS.has(x.name) && child(x, 'Left'))) {
+        if (len(c, 'Left') - dx >= 0 && len(c, 'Left') - dx + len(c, 'Width') <= width + 0.0005) setChild(c, 'Left', inch(len(c, 'Left') - dx));
+      }
+    }
+  }
+}
+
+function edgePastThinColumns(body: XmlElement): void {
+  for (const t of descendants(body).filter((e) => e.name === 'Tablix')) {
+    const widths = widthsOf(t);
+    let spare = 0;
+    while (spare < widths.length - 1 && Math.abs(widths[widths.length - 1 - spare]! - SPARE_WIDTH) < 0.0005) spare++;
+    if (!spare) continue;
+    const at = widths.length - spare - 1;
+    for (const row of rowsOf(t)) {
+      const placed: { item: XmlElement; first: number; span: number }[] = [];
+      let c = 0;
+      for (const cell of cellsOf(row)) {
+        const contents = child(cell, 'CellContents');
+        if (!contents) continue;
+        const span = Number(textOf(child(contents, 'ColSpan')) || 1);
+        const item = cellItem(cell);
+        if (item) placed.push({ item, first: c, span });
+        c += span;
+      }
+      const real = placed.find((p) => p.first <= at && at < p.first + p.span && p.first + p.span - 1 === at);
+      const edge = placed.find((p) => p.first + p.span === widths.length);
+      if (!real || !edge || edge === real || !isBlank(edge.item)) continue;
+      const from = ownStyle(real.item);
+      const right = child(from, 'RightBorder') ?? (child(from, 'Border') && !child(from, 'RightBorder') ? child(from, 'Border') : undefined);
+      if (!right || /^none$/i.test(textOf(child(right, 'Style')) || 'None')) continue;
+      const to = ownStyle(edge.item);
+      removeChildren(to, ['RightBorder']);
+      to.children.push(el('RightBorder', ...childElements(right).map((c) => el(c.name, textOf(c)))));
+      removeChildren(from, ['RightBorder']);
+      from.children.push(el('RightBorder', el('Style', 'None')));
     }
   }
 }
@@ -4225,7 +4367,14 @@ function fitItems(container: XmlElement | undefined): number {
       const inner = fitItems(child(e, 'ReportItems'));
       g = Math.max(0, inner - len(e, 'Height'));
     } else if (e.name === 'Tablix') g = fitTablix(e);
-    else if (e.name === 'Textbox' && designText && !isBlank(e)) g = Math.max(0, textHeight(e, true)! - len(e, 'Height'));
+    else if (e.name === 'Textbox' && designText && !isBlank(e)) {
+      const stacked = items.some((o) => o !== e && o.name === 'Textbox' && !isBlank(o) && Math.abs(len(o, 'Left') - len(e, 'Left')) < 0.05
+        && Math.abs(len(o, 'Top') - len(e, 'Top')) < 2.5 * len(e, 'Height') && Math.abs(len(o, 'Top') - len(e, 'Top')) > 0.001 && len(e, 'Height') < 0.25 && len(o, 'Height') < 0.25);
+      const leading = designLeading;
+      if (stacked) designLeading = DESIGN_TIGHT;
+      g = Math.max(0, textHeight(e, true)! - len(e, 'Height'));
+      designLeading = leading;
+    }
     if (g > 0.001) {
       if (e.name === 'Rectangle' || e.name === 'Textbox') setChild(e, 'Height', inchUp(len(e, 'Height') + g));
       grew.set(e, g);
@@ -4245,7 +4394,9 @@ function fitItems(container: XmlElement | undefined): number {
       const rule = j.name === 'Line' && len(j, 'Height') === 0 && i.name === 'Textbox' && bj.top >= (bi.top + bi.bottom) / 2 - 0.001;
       // (Items Crystal drew touching, or a hair over each other, are one under the other.)
       if (bi.bottom > bj.top + 0.01 && !rule) continue;
-      s = Math.max(s, (shift.get(i) ?? 0) + (grew.get(i) ?? 0));
+      const lines = i.name === 'Textbox' && (j.name === 'Textbox' || (j.name === 'Rectangle' && bj.bottom - bj.top <= 0.02)) && bi.bottom - bi.top < 0.25 && bj.bottom - bj.top < 0.25;
+      const room = lines ? Math.max(0, bj.top - bi.bottom - 0.005) : 0;
+      s = Math.max(s, (shift.get(i) ?? 0) + Math.max(0, (grew.get(i) ?? 0) - room));
     }
     if (s > 0.001) {
       shift.set(j, s);
