@@ -240,7 +240,7 @@ async function main(argv: string[]): Promise<number> {
     const prefix = takeOption(args, '--prefix');
     if (takeFlag(args, '--preview')) console.error('NOTE --preview is no longer needed: the template runs its queries itself');
     let standardParameters: string[] = [];
-    let reshape: ((rdl: string, name: string, extra?: { sqlFunctions?: string[] }) => { rdl: string; review: { item: string; message: string }[]; settled: string[]; files?: Record<string, string> }) | undefined;
+    let reshape: ((rdl: string, name: string, extra?: { sqlFunctions?: string[] }) => { rdl: string; review: { item: string; message: string }[]; settled: string[]; settles?: RegExp; files?: Record<string, string> }) | undefined;
     if (conventionsPath) {
       const { readConventions, applyConventions } = await import('./ssrs/conventions.ts');
       let conv: ReturnType<typeof readConventions>;

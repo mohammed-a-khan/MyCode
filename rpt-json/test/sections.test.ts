@@ -135,6 +135,51 @@ describe('sections of a report made of many parts', () => {
     assert.ok(inch('Left') >= 9.65 - 0.001 && inch('Left') + inch('Width') <= 10.5 + 0.001, `left ${inch('Left')}`);
   });
 
+  it('gives a bold date at the far side of the body the room up to the page edge', () => {
+    const box = (name: string, value: string, left: number, width: number, format = '') => `<Textbox Name="${name}"><CanGrow>false</CanGrow><Paragraphs><Paragraph><TextRuns><TextRun><Value>${value}</Value><Style><FontSize>7pt</FontSize><FontWeight>Bold</FontWeight>${format ? `<Format>${format}</Format>` : ''}</Style></TextRun></TextRuns></Paragraph></Paragraphs><Top>0.4in</Top><Left>${left}in</Left><Height>0.19in</Height><Width>${width}in</Width><Style><PaddingLeft>0pt</PaddingLeft><PaddingRight>0pt</PaddingRight></Style></Textbox>`;
+    const rdl = `<Report xmlns="http://schemas.microsoft.com/sqlserver/reporting/2016/01/reportdefinition"><ReportSections><ReportSection><Body><ReportItems>${box('Owner', '=Parameters!who.Value', 0, 4.4)}${box('Label', 'As at:', 9.3, 0.35)}${box('Stamp', '=Parameters!run_date.Value', 9.734, 0.52, "MM'/'dd'/'yyyy")}</ReportItems><Height>0.6in</Height></Body><Width>10.6in</Width><Page /></ReportSection></ReportSections></Report>`;
+    const out = parseXml(applyConventions(rdl, 'Parts', conventions).rdl);
+    const stamp = descendants(out).find((e) => e.name === 'Textbox' && /=Parameters!run_date/.test(descendants(e).filter((v) => v.name === 'Value').map(textOf).join('')))!;
+    const inch = (name: string) => parseFloat(textOf(child(stamp, name)));
+    assert.ok(inch('Width') > 0.55, `width ${inch('Width')}`);
+    assert.ok(inch('Left') >= 9.65 - 0.001 && inch('Left') + inch('Width') <= 10.6 + 0.001, `left ${inch('Left')}`);
+  });
+
+  it('keeps a chart\'s foot in place when the text above it grows', () => {
+    const chart = `<Chart Name="Plot"><ChartCategoryHierarchy><ChartMembers><ChartMember><Label /></ChartMember></ChartMembers></ChartCategoryHierarchy><ChartSeriesHierarchy><ChartMembers><ChartMember><Label /></ChartMember></ChartMembers></ChartSeriesHierarchy><ChartData><ChartSeriesCollection><ChartSeries Name="S"><ChartDataPoints><ChartDataPoint><ChartDataPointValues><Y>=1</Y></ChartDataPointValues></ChartDataPoint></ChartDataPoints></ChartSeries></ChartSeriesCollection></ChartData><ChartAreas><ChartArea Name="Default" /></ChartAreas><Top>0.208in</Top><Left>0in</Left><Height>2.052in</Height><Width>2.75in</Width></Chart>`;
+    const title = `<Textbox Name="Caption"><Paragraphs><Paragraph><TextRuns><TextRun><Value>Spread by kind</Value><Style><FontSize>8pt</FontSize></Style></TextRun></TextRuns></Paragraph></Paragraphs><Top>0.052in</Top><Left>0.02in</Left><Height>0.156in</Height><Width>2.7in</Width></Textbox>`;
+    const rdl = `<Report xmlns="http://schemas.microsoft.com/sqlserver/reporting/2016/01/reportdefinition"><ReportSections><ReportSection><Body><ReportItems><Rectangle Name="Frame"><ReportItems>${chart}${title}</ReportItems><Top>0in</Top><Left>0in</Left><Height>2.26in</Height><Width>2.76in</Width><Style><Border><Style>Solid</Style></Border></Style></Rectangle></ReportItems><Height>2.3in</Height></Body><Width>3in</Width><Page /></ReportSection></ReportSections></Report>`;
+    const out = parseXml(applyConventions(rdl, 'Parts', styled).rdl);
+    const plot = descendants(out).find((e) => e.name === 'Chart')!;
+    const frame = descendants(out).find((e) => e.name === 'Rectangle' && descendants(e).includes(plot) && /Solid/.test(textOf(child(e, 'Style/Border/Style'))))!;
+    const foot = parseFloat(textOf(child(plot, 'Top'))) + parseFloat(textOf(child(plot, 'Height')));
+    assert.ok(Math.abs(foot - 2.26) < 0.002, `chart ends ${foot}`);
+    assert.ok(Math.abs(parseFloat(textOf(child(frame, 'Height'))) - 2.26) < 0.002, `frame ${textOf(child(frame, 'Height'))}`);
+  });
+
+  it('puts a value on its label\'s line when it sits a hair lower', () => {
+    const box = (name: string, value: string, top: number, left: number) => `<Textbox Name="${name}"><Paragraphs><Paragraph><TextRuns><TextRun><Value>${value}</Value></TextRun></TextRuns></Paragraph></Paragraphs><Top>${top}in</Top><Left>${left}in</Left><Height>0.16in</Height><Width>1.2in</Width></Textbox>`;
+    const rdl = `<Report xmlns="http://schemas.microsoft.com/sqlserver/reporting/2016/01/reportdefinition"><ReportSections><ReportSection><Body><ReportItems><Rectangle Name="Pairs"><ReportItems>${box('First', 'Starts:', 0.1, 0)}${box('FirstValue', '=Parameters!a.Value', 0.112, 1.3)}${box('Second', 'Ends:', 0.4, 0)}${box('SecondValue', '=Parameters!b.Value', 0.46, 1.3)}</ReportItems><Top>0in</Top><Left>0in</Left><Height>0.7in</Height><Width>3in</Width></Rectangle></ReportItems><Height>0.7in</Height></Body><Width>3in</Width><Page /></ReportSection></ReportSections></Report>`;
+    const out = parseXml(applyConventions(rdl, 'Parts', conventions).rdl);
+    const topOf = (value: string) => parseFloat(textOf(child(descendants(out).find((e) => e.name === 'Textbox' && descendants(e).some((v) => v.name === 'Value' && textOf(v) === value))!, 'Top')));
+    assert.equal(topOf('=Parameters!a.Value'), topOf('Starts:'));
+    assert.ok(Math.abs(topOf('=Parameters!b.Value') - topOf('Ends:') - 0.06) < 0.001);
+  });
+
+  it('trims a box running a hair into the one under it back to touch it', () => {
+    const inner = (name: string, height: number) => `<Rectangle Name="${name}"><ReportItems><Textbox Name="${name}_T"><Paragraphs><Paragraph><TextRuns><TextRun><Value>x</Value></TextRun></TextRuns></Paragraph></Paragraphs><Top>0in</Top><Left>0in</Left><Height>0.2in</Height><Width>1in</Width></Textbox></ReportItems><Top>0in</Top><Left>0in</Left><Height>${height}in</Height><Width>5in</Width><Style><Border><Style>Solid</Style></Border></Style></Rectangle>`;
+    const row = (name: string, top: number, height: number, content: number) => `<Rectangle Name="${name}"><ReportItems>${inner(`${name}_In`, content)}</ReportItems><Top>${top}in</Top><Left>0in</Left><Height>${height}in</Height><Width>5in</Width></Rectangle>`;
+    const rdl = `<Report xmlns="http://schemas.microsoft.com/sqlserver/reporting/2016/01/reportdefinition"><ReportSections><ReportSection><Body><ReportItems>${row('Upper', 0, 1.761, 1.76)}${row('Lower', 1.76, 1.8, 1.8)}</ReportItems><Height>3.6in</Height></Body><Width>5in</Width><Page /></ReportSection></ReportSections></Report>`;
+    const { rdl: out, review } = applyConventions(rdl, 'Parts', conventions);
+    const doc = parseXml(out);
+    const holder = descendants(doc).find((e) => e.name === 'ReportItems' && descendants(e).filter((c) => c.name === 'Rectangle' && e.children.includes(c)).length === 2)!;
+    const [upper, lower] = descendants(holder).filter((c) => c.name === 'Rectangle' && holder.children.includes(c));
+    const top = (e: typeof upper) => parseFloat(textOf(child(e, 'Top')));
+    const reach = (e: typeof upper) => top(e) + parseFloat(textOf(child(e, 'Height')));
+    assert.ok(reach(upper!) <= top(lower!) + 0.0001, `upper ends ${reach(upper!)}, lower starts ${top(lower!)}`);
+    assert.ok(!review.some((n) => /drawn over each other/.test(n.message)));
+  });
+
   it('starts text in a cell clear of a rule drawn down over the cell', () => {
     const T = 'facts';
     const def = { ...listing(T), groups: [], formulas: [], layout: [
@@ -260,6 +305,48 @@ describe('sections of a report made of many parts', () => {
     const rdl = build([sub(def, table(T, 'table', ['name', 'amount', 'par', 'owner_key']), 1)], [[subreport(1)]], styled);
     const row = descendants(parseXml(rdl)).find((e) => e.name === 'TablixRow' && descendants(e).some((v) => v.name === 'Value' && /Expected/.test(textOf(v))))!;
     assert.ok(Number(textOf(child(row, 'Height')).replace('in', '')) < 0.5, textOf(child(row, 'Height')));
+  });
+
+  it('stacks two framed parts shown together under one choice beside the part shown otherwise, as one row of frames', () => {
+    const chartPart = (T: string, rh: number) => ({ ...empty, parameters: params, groups: [`${T}.label`],
+      formulas: [{ kind: 'internal', name: 'Group #1 Order', index: 2, text: `if IsNull ({${T}.label}) then 2 else 2`, referencedFields: [`${T}.label`] }],
+      layout: [{ name: 'ReportHeaderArea1', sections: [{ name: 'RH1', height: rh, objects: [{ kind: 'chart', name: 'Bars', ...box(15, 15, 3945, rh - 30), chart: { family: 0, graphType: 0, values: [`Sum of ${T}.amount`], onChangeOf: `${T}.label` } }] }] },
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 0, suppressed: true, objects: [] }] }] });
+    const framed = (n: number, x: number, y: number, rule: number) => ({ kind: 'subreport', name: `Sub${n}`, subreport: { index: n + 1, onDemand: false }, ...box(x, y, 6745, 200), border: { sides: [1, 1, 1, 1], width: 20 }, conditions: { suppress: { name: `S${rule}`, index: 10 + rule } } });
+    const main = { ...empty, parameters: params, formulas: [0, 1].map((k) => ({ kind: 'conditionalFormat', name: `S${k}`, index: 10 + k, text: `if {head.flag} <> ${k} then true`, referencedFields: ['head.flag'] })), page: { orientation: 'landscape', paperSize: 1 }, layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 0, suppressed: true, objects: [] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 0, suppressed: true, objects: [] }] },
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF1', height: 2070, objects: [framed(1, 0, 40, 0), framed(2, 0, 40, 1), framed(3, 0, 1815, 1),
+        { kind: 'subreport', name: 'Sub4', subreport: { index: 5, onDemand: false }, ...box(6800, 40, 3900, 200), border: { sides: [1, 1, 1, 1], width: 20 } }] }] }] };
+    const parts = [chartPart('one_rows', 3240), chartPart('two_rows', 1710), chartPart('three_rows', 1710), chartPart('four_rows', 3240)]
+      .map((d, i) => sub(d, table(['one_rows', 'two_rows', 'three_rows', 'four_rows'][i]!, 'table', ['label', 'amount', 'owner_key']), i + 1));
+    const converted = convertToRdl(main as never, table('head', 'table', ['flag', 'owner_key']) as never, { reportName: 'Parts', subreports: new Map(parts.map((p, i) => [i + 2, p] as [number, never])), formulasInQuery: true, rulesAsText: true } as never);
+    const rdl = applyConventions(converted.rdl, 'Parts', conventions).rdl;
+    assert.ok(!diagnoseRdl(rdl, true).some((f) => f.kind === 'overlap'), JSON.stringify(diagnoseRdl(rdl, true).filter((f) => f.kind === 'overlap')));
+    const frames = descendants(parseXml(rdl)).filter((e) => e.name === 'Rectangle' && descendants(e).some((c) => c.name === 'Chart') && /flag/.test(textOf(child(e, 'Visibility/Hidden'))));
+    const at = (e: typeof frames[number], n: string) => Number(textOf(child(e, n)).replace('in', ''));
+    const shownTogether = frames.filter((e) => /<> 1/.test(textOf(child(e, 'Visibility/Hidden')))).sort((a, b) => at(a, 'Top') - at(b, 'Top'));
+    assert.equal(shownTogether.length, 2);
+    assert.ok(at(shownTogether[1]!, 'Top') >= at(shownTogether[0]!, 'Top') + at(shownTogether[0]!, 'Height') - 0.001, 'the second sits under the first');
+    assert.ok(at(shownTogether[1]!, 'Top') < 2, 'and is not pushed under the frame shown otherwise');
+  });
+
+  it('settles the notes about a page header it leaves out', () => {
+    const rdl = `<Report xmlns="http://schemas.microsoft.com/sqlserver/reporting/2016/01/reportdefinition"><ReportSections><ReportSection><Body><ReportItems><Textbox Name="T"><Paragraphs><Paragraph><TextRuns><TextRun><Value>x</Value></TextRun></TextRuns></Paragraph></Paragraphs><Top>0in</Top><Left>0in</Left><Height>0.2in</Height><Width>1in</Width></Textbox></ReportItems><Height>0.2in</Height></Body><Width>1in</Width><Page><PageHeader><Height>0.3in</Height><PrintOnFirstPage>true</PrintOnFirstPage><PrintOnLastPage>true</PrintOnLastPage><ReportItems><Textbox Name="H"><Paragraphs><Paragraph><TextRuns><TextRun><Value>Head</Value></TextRun></TextRuns></Paragraph></Paragraphs><Top>0in</Top><Left>0in</Left><Height>0.2in</Height><Width>1in</Width></Textbox></ReportItems></PageHeader></Page></ReportSection></ReportSections></Report>`;
+    const { settles } = applyConventions(rdl, 'Parts', conventions);
+    assert.ok(settles?.test('Page header') && settles!.test('subreport object "Part" in Page Header (page 1)'));
+    assert.ok(!settles!.test('subreport object "Part" in Report Footer'));
+  });
+
+  it('keeps a short row that only carries the column rules down tall enough to find in the designer', () => {
+    const T = 'tests';
+    const up = (name: string, x: number) => ({ kind: 'line', name, ...box(x, 360, 0, 1543), border: { sides: [1, 0, 0, 0], width: 20 } });
+    const def = listing(T, [], [up('L1', 2100), up('L2', 4100)], [field('V2', `${T}.amount`, 2200, 0, 1800, 180)]);
+    def.layout[0]!.sections = [{ name: 'RH1', height: 0, suppressed: true, objects: [] }] as never;
+    def.layout[2]!.sections[0] = { name: 'GH1', height: 915, objects: [{ kind: 'box', name: 'Frame', ...box(45, 25, 6000, 1895), border: { sides: [1, 1, 1, 1], width: 20 } }, text('H1', 'Name', 120, 480, 1900, 210), text('H2', 'Amount', 2200, 480, 1800, 210), up('L1', 2100), up('L2', 4100)] } as never;
+    def.layout[3]!.sections[0] = { name: 'GF1', height: 100, objects: [] } as never;
+    const rdl = build([sub(def, table(T, 'table', ['name', 'amount', 'owner_key']), 1)], [[subreport(1)]]);
+    assert.ok(!diagnoseRdl(rdl, true).some((f) => f.kind === 'empty row'), JSON.stringify(diagnoseRdl(rdl, true).filter((f) => f.kind === 'empty row')));
   });
 });
 

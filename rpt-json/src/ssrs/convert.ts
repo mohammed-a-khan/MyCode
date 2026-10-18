@@ -36,7 +36,7 @@ export interface SsrsOptions {
   /** A last step over each report's RDL (a house style laid over the Crystal layout, ...). */
   restyle?: (rdl: string) => string;
   /** The very last step: the report reshaped as a team's template (names, structure, looks), with notes. */
-  reshape?: (rdl: string, reportName: string, extra?: { sqlFunctions?: string[] }) => { rdl: string; review: ReviewNote[]; settled?: string[]; files?: Record<string, string> };
+  reshape?: (rdl: string, reportName: string, extra?: { sqlFunctions?: string[] }) => { rdl: string; review: ReviewNote[]; settled?: string[]; settles?: RegExp; files?: Record<string, string> };
 }
 
 const safeFileName = (name: string) => name.replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'Report';
@@ -97,7 +97,7 @@ export function convertDocumentToSsrs(doc: CfbDocument, baseName: string, option
       files = shaped.files;
       const settled = new Set(shaped.settled ?? []);
       const gone = (n: ReviewNote) => [...n.message.matchAll(/\bCode\.(\w+)/g)].some((m) => !new RegExp(`\\bCode\\.(\\w+_)?${m[1]}\\b`).test(out ?? ''));
-      review.splice(0, review.length, ...review.filter((n) => !settled.has(n.item) && !gone(n)), ...shaped.review);
+      review.splice(0, review.length, ...review.filter((n) => !settled.has(n.item) && !shaped.settles?.test(n.item) && !gone(n)), ...shaped.review);
     }
     return { fileName: `${reportName}.rdl`, storage: model.storage, rdl: out, review, referenced, files };
   });

@@ -861,7 +861,7 @@ const unplace = (item: XmlElement) => removeChildren(item, ['Top', 'Left', 'Heig
 // ---------------------------------------------------------------------------------------------------------------
 
 /** Reshapes a converted report as a template following the conventions. */
-export function applyConventions(rdl: string, reportName: string, conv: Conventions, prefix?: string, extra: { sqlFunctions?: string[]; parameterValues?: Record<string, string> } = {}): { rdl: string; review: ReviewNote[]; settled: string[]; files?: Record<string, string> } {
+export function applyConventions(rdl: string, reportName: string, conv: Conventions, prefix?: string, extra: { sqlFunctions?: string[]; parameterValues?: Record<string, string> } = {}): { rdl: string; review: ReviewNote[]; settled: string[]; settles?: RegExp; files?: Record<string, string> } {
   const review: ReviewNote[] = [];
   const root = parseXml(rdl);
   const report = root.name === 'Report' ? root : descendants(root).find((e) => e.name === 'Report')!;
@@ -1217,12 +1217,22 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       const rowsEl = child(tablix, 'TablixBody/TablixRows')!;
       rowLeaves(tablix).forEach((l, i) => {
         const row = all[i];
-        if (!row || len(row, 'Height') >= 0.1 || child(l.member, 'Group') || !emptyRow(row)) return;
+        if (!row || len(row, 'Height') >= 0.1 || child(l.member, 'Group')) return;
         if ((all[i - 1] && ruledRow(all[i - 1]!, 'Bottom')) || (all[i + 1] && ruledRow(all[i + 1]!, 'Top'))) return;
+        if (!emptyRow(row)) {
+          const textless = cellsOf(row).every((cell) => descendants(cell).every((e) => (e.name === 'Value' ? !textOf(e).trim() : /^(Top|Bottom)?Border$/.test(e.name) ? /^None$/i.test(textOf(child(e, 'Style')) || 'None') : !/^(Line|Image|Chart|Subreport|Tablix|Map|GaugePanel)$/.test(e.name))));
+          if (textless) {
+            setChild(row, 'Height', '0.1in');
+            setChild(tablix, 'Height', inch(Math.max(0.01, rowsOf(tablix).reduce((sum, r) => sum + len(r, 'Height'), 0))));
+          }
+          return;
+        }
         const holder = descendants(child(tablix, 'TablixRowHierarchy')!).find((e) => e.name === 'TablixMembers' && e.children.includes(l.member));
-        if (!holder || childElements(holder, 'TablixMember').length < 2 || rowsOf(tablix).length < 2) return;
-        holder.children = holder.children.filter((c) => c !== l.member);
-        rowsEl.children = rowsEl.children.filter((c) => c !== row);
+        if (!holder || childElements(holder, 'TablixMember').length < 2 || rowsOf(tablix).length < 2) setChild(row, 'Height', '0.1in');
+        else {
+          holder.children = holder.children.filter((c) => c !== l.member);
+          rowsEl.children = rowsEl.children.filter((c) => c !== row);
+        }
         setChild(tablix, 'Height', inch(Math.max(0.01, rowsOf(tablix).reduce((sum, r) => sum + len(r, 'Height'), 0))));
       });
     }
@@ -1975,13 +1985,14 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
         el('Style', el('Border', el('Style', 'None'))));
       items.children = [wrapper];
     }
-    roomForDates(body);
+    roomForDates(body, reportWidth);
     rulesAsLines(body);
     oneOfAlternates(body);
     bandsInFrames(body);
     clearOfLines(body);
     alignToRules(report);
     plainLines(report);
+    touchNotOverlap(body);
     checkLayout(report, body, review);
   }
   // Where reports are combined, hiding columns takes the last columns off every table in the box, not only the first
@@ -2300,7 +2311,9 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     const kept = conds && centreBlock(root, tablix, conds);
     if (kept) review.push({ item: tablix.attributes.Name ?? 'Table', message: `stays at the left, not centred on the columns in use: ${kept}` });
   }
-  return { rdl: toXml(withFunctions(root, extra.sqlFunctions ?? [])), review, settled: conv.dataSource ? ['Data source'] : [], ...(Object.keys(files).length ? { files } : {}) };
+  if (body) labelsInLine(body);
+  if (body) touchNotOverlap(body);
+  return { rdl: toXml(withFunctions(root, extra.sqlFunctions ?? [])), review, settled: conv.dataSource ? ['Data source'] : [], ...(page && conv.pageBands === 'drop' ? { settles: /^Page header$| in Page (Header|Footer)\b/ } : {}), ...(Object.keys(files).length ? { files } : {}) };
 }
 
 /** The functions (and the values they keep) of VB code that the names called reach, in their order. */
@@ -3796,18 +3809,19 @@ function clearOfLines(body: XmlElement): void {
   }
 }
 
-function roomForDates(body: XmlElement): void {
+function roomForDates(body: XmlElement, width: number): void {
   const sample = (format: string) => format.replace(/'[^']*'/g, (q) => q.slice(1, -1)).replace(/yyyy/g, '0000').replace(/tt/g, 'PM').replace(/[yMdHhms]{1,2}/g, '00');
   for (const holder of descendants(body).filter((e) => e.name === 'ReportItems')) {
     const owner = descendants(body).find((e) => child(e, 'ReportItems') === holder);
-    const room = owner && owner.name !== 'Body' ? len(owner, 'Width') : Math.max(0, ...childElements(holder).map((e) => len(e, 'Left') + len(e, 'Width')));
+    const room = owner && owner.name !== 'Body' ? len(owner, 'Width') : Math.max(width, ...childElements(holder).map((e) => len(e, 'Left') + len(e, 'Width')));
     const list = childElements(holder).filter((e) => ITEMS.has(e.name) && child(e, 'Width'));
     for (const box of list.filter((e) => e.name === 'Textbox')) {
       const formats = descendants(box).filter((e) => e.name === 'Format').map((e) => (textOf(e) === 'd' ? 'MM/dd/yyyy' : textOf(e)));
       if (formats.length !== 1 || !/y/.test(formats[0]!) || !/[dM]/.test(formats[0]!) || formats[0]!.startsWith('=')) continue;
       const sizes = descendants(box).filter((e) => e.name === 'FontSize').map(textOf);
       const size = Math.max(sizes.some((v) => v.startsWith('=')) || !sizes.length ? DESIGN_FONT : 0, ...sizes.filter((v) => !v.startsWith('=')).map((v) => (inches(v) ?? 0) * 72));
-      const text = arialWidth(sample(formats[0]!), size, false) * 1.05;
+      const bold = descendants(box).some((e) => e.name === 'FontWeight' && (textOf(e).startsWith('=') || /bold|heavy|black/i.test(textOf(e))));
+      const text = arialWidth(sample(formats[0]!), size, bold) * (designText ? 1.15 : 1.05);
       const sides = paddingOf(box, ['PaddingLeft', 'PaddingRight']);
       const left = len(box, 'Left');
       const width = len(box, 'Width');
@@ -3827,6 +3841,75 @@ function roomForDates(body: XmlElement): void {
         const st = ownStyle(box);
         setChild(st, 'PaddingLeft', '0pt');
         setChild(st, 'PaddingRight', '0pt');
+      }
+    }
+  }
+}
+
+function labelsInLine(body: XmlElement): void {
+  type Placed = { box: XmlElement; holder: XmlElement; order: number };
+  const scopes: Placed[][] = [];
+  const free = (holder: XmlElement, order = 0): Placed[] => childElements(holder).filter((e) => e.name === 'Textbox' && child(e, 'Top') && child(e, 'Height'))
+    .map((box) => ({ box, holder, order: order + len(box, 'Left') }));
+  const all = descendants(body);
+  const inCells = new Set(all.filter((c) => c.name === 'CellContents').map((c) => child(c, 'Rectangle')).filter((r) => r !== undefined));
+  const owners = new Map(all.filter((e) => child(e, 'ReportItems')).map((e) => [child(e, 'ReportItems')!, e]));
+  for (const holder of all.filter((e) => e.name === 'ReportItems')) {
+    const owner = owners.get(holder);
+    if (!owner || !inCells.has(owner)) scopes.push(free(holder));
+  }
+  for (const row of descendants(body).filter((e) => e.name === 'TablixRow')) {
+    const cells = childElements(child(row, 'TablixCells') ?? el('x'), 'TablixCell');
+    scopes.push(cells.flatMap((cell, k) => {
+      const rect = child(cell, 'CellContents/Rectangle');
+      const holder = rect && child(rect, 'ReportItems');
+      return holder ? free(holder, k * 1000) : [];
+    }));
+  }
+  const single = (p: Placed) => len(p.box, 'Height') < 0.3;
+  const label = (p: Placed) => /:\s*$/.test(fixedText(p.box) ?? '');
+  for (const list of scopes) {
+    const sorted = list.filter(single).sort((a, b) => a.order - b.order);
+    for (const lead of sorted.filter(label)) {
+      const top = len(lead.box, 'Top');
+      const height = len(lead.box, 'Height');
+      const line = sorted.filter((q) => q.order > lead.order + 0.001 && Math.abs(len(q.box, 'Top') - top) <= 0.025 && Math.abs(len(q.box, 'Height') - height) <= 0.02);
+      for (const p of line) {
+        if (label(p)) break;
+        const t = len(p.box, 'Top');
+        if (Math.abs(t - top) < 0.0005) continue;
+        const l = len(p.box, 'Left');
+        const r = l + len(p.box, 'Width');
+        const b = top + len(p.box, 'Height');
+        const clash = childElements(p.holder).some((o) => o !== p.box && ITEMS.has(o.name) && child(o, 'Top') && !alternates(o, p.box)
+          && len(o, 'Left') < r - 0.001 && len(o, 'Left') + len(o, 'Width') > l + 0.001 && len(o, 'Top') < b - 0.001 && len(o, 'Top') + len(o, 'Height') > top + 0.001
+          && !(len(o, 'Top') < t + len(p.box, 'Height') - 0.001 && len(o, 'Top') + len(o, 'Height') > t + 0.001));
+        if (clash || top < 0) continue;
+        setChild(p.box, 'Top', inch(top));
+      }
+    }
+  }
+}
+
+function touchNotOverlap(body: XmlElement): void {
+  for (const box of descendants(body).filter((e) => e.name === 'Rectangle' && child(e, 'Height'))) {
+    for (const chart of childElements(child(box, 'ReportItems') ?? el('x'), 'Chart')) {
+      const over = len(chart, 'Top') + len(chart, 'Height') - len(box, 'Height');
+      if (over > 0 && over <= 0.0025) setChild(chart, 'Height', inch(len(chart, 'Height') - over));
+    }
+  }
+  for (const holder of descendants(body).filter((e) => e.name === 'ReportItems').reverse()) {
+    const list = childElements(holder).filter((e) => ITEMS.has(e.name) && e.name !== 'Line' && child(e, 'Top') && child(e, 'Height'));
+    for (const a of list) {
+      for (const o of list) {
+        if (a === o || len(o, 'Top') <= len(a, 'Top') + 0.001) continue;
+        const across = Math.min(len(a, 'Left') + len(a, 'Width'), len(o, 'Left') + len(o, 'Width')) - Math.max(len(a, 'Left'), len(o, 'Left'));
+        const over = len(a, 'Top') + len(a, 'Height') - len(o, 'Top');
+        if (across <= 0.001 || over <= 0 || over > 0.0025 || alternates(a, o)) continue;
+        const room = len(o, 'Top') - len(a, 'Top');
+        if (a.name === 'Rectangle' && contentBottom(a) > room + 0.0001) continue;
+        if (a.name === 'Tablix' && rowsOf(a).reduce((sum, row) => sum + len(row, 'Height'), 0) > room + 0.0001) continue;
+        setChild(a, 'Height', inch(room));
       }
     }
   }
@@ -4110,7 +4193,7 @@ function unpile(container: XmlElement | undefined): number {
         setChild(a, 'Height', inch(oTop - aTop));
       } else {
         const by = aBottom - oTop;
-        for (const e of list) if (e !== a && len(e, 'Top') >= oTop - 0.001) setChild(e, 'Top', inchUp(len(e, 'Top') + by));
+        for (const e of list) if (e !== a && len(e, 'Top') >= oTop - 0.001 && (e === o || !alternates(a, e))) setChild(e, 'Top', inchUp(len(e, 'Top') + by));
       }
       fixed = true;
       break;
@@ -4167,6 +4250,10 @@ function fitItems(container: XmlElement | undefined): number {
     if (s > 0.001) {
       shift.set(j, s);
       setChild(j, 'Top', inchUp(bj.top + s));
+      if (j.name === 'Chart' && s < (bj.bottom - bj.top) / 5) {
+        setChild(j, 'Height', inch(bj.bottom - bj.top - s));
+        grew.set(j, (grew.get(j) ?? 0) - s);
+      }
     }
   }
   return Math.max(0, ...items.map((e) => len(e, 'Top') + len(e, 'Height')));
