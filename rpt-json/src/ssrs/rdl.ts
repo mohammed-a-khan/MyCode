@@ -1199,13 +1199,13 @@ class RdlBuilder {
     const expression = nullable ? `=${this.unlessEmpty(t.expression.slice(1))}` : t.expression;
     // Outside the table, fields need a dataset scope; table rows outside every group read the first record.
     const outside = scope !== 'row';
-    if (!outside && !this.ungroupedRows) return expression;
+    if (!outside && !this.ungroupedRows) return rowCounted(expression);
     // Crystal reads a report footer's conditions on the last record.
     const scoped = outside ? scopeOutsideRegion(expression.slice(1), this.dataset, this.lastRecord ? 'Last' : 'First') : expression.slice(1);
     // With no records Crystal gives such a formula no result: the condition does not hold, so what it suppresses
     // still prints.
-    if (nullable) return `=(CountRows(${vbString(this.dataset)}) > 0) AndAlso (${scoped})`;
-    return `=${scoped}`;
+    if (nullable) return rowCounted(`=(CountRows(${vbString(this.dataset)}) > 0) AndAlso (${scoped})`);
+    return rowCounted(`=${scoped}`);
   }
 
   /** Whether a formatting formula reads a shared variable, itself or through the formulas it uses. */
@@ -4635,6 +4635,10 @@ class RdlBuilder {
 }
 
 const PAGE_GLOBALS = /Globals!(?:Overall)?(?:PageNumber|TotalPages)\b/g;
+
+export function rowCounted(expression: string): string {
+  return expression.replace(/\bCount\(Fields!\w+\.Value((?:, "(?:[^"]|"")*")?)\)(?=\s*(?:=|<>|>=|<=|>|<)\s*0(?![\d.]))/g, (_, scope: string) => `CountRows(${scope.replace(/^, /, '')})`);
+}
 
 const SCOPED_AGGREGATES = ['Sum', 'Count', 'Avg', 'Max', 'Min', 'CountDistinct', 'StDev', 'StDevP', 'Var', 'VarP', 'First', 'Last'];
 
