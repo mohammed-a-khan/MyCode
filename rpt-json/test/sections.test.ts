@@ -4,7 +4,8 @@ import { applyConventions, readConventions } from '../src/ssrs/conventions.ts';
 import { standaloneParts } from '../src/ssrs/convert.ts';
 import { diagnoseRdl } from '../src/ssrs/diagnose.ts';
 import { convertToRdl } from '../src/ssrs/rdl.ts';
-import { child, descendants, parseXml, textOf } from '../src/ssrs/xml.ts';
+import { child, childElements, descendants, parseXml, textOf } from '../src/ssrs/xml.ts';
+import { alignToRules } from '../src/ssrs/align.ts';
 
 const conventions = readConventions(JSON.stringify({ names: { table: '{S}_Tab_{n}', title: '{S}_SchTitle_Txt', heading: '{T}_{col}_ColTxt', value: '{T}_{col}_ColVal', blank: '{T}_blnk{n}', group: '{S}_grp_{n}' } }));
 const styled = readConventions(JSON.stringify({ names: { table: '{S}_Tab_{n}', title: '{S}_SchTitle_Txt' }, style: { dataset: 'Theme', command: 'theme_get',
@@ -379,3 +380,129 @@ describe('sections of a report made of many parts', () => {
   });
 });
 
+
+describe('edges lined up', () => {
+  const doc = (items: string) => `<Report xmlns="http://schemas.microsoft.com/sqlserver/reporting/2016/01/reportdefinition"><ReportSections><ReportSection><Body><ReportItems><Line Name="Rule"><Top>0in</Top><Left>0in</Left><Height>0in</Height><Width>10in</Width><Style><Border><Style>Solid</Style></Border></Style></Line>${items}</ReportItems><Height>4in</Height></Body><Width>10in</Width><Page /></ReportSection></ReportSections></Report>`;
+  const box = (name: string, left: number, top: number, width: number, height: number, inner = '', border = 'Solid', extra = '') => `<Rectangle Name="${name}"><ReportItems>${inner}</ReportItems><Top>${top}in</Top><Left>${left}in</Left><Height>${height}in</Height><Width>${width}in</Width>${extra}<Style><Border><Style>${border}</Style></Border></Style></Rectangle>`;
+  const cell = (name: string) => `<TablixCell><CellContents><Textbox Name="${name}"><Paragraphs><Paragraph><TextRuns><TextRun><Value>${name}</Value></TextRun></TextRuns></Paragraph></Paragraphs></Textbox></CellContents></TablixCell>`;
+  const table = (name: string, widths: number[]) => `<Tablix Name="${name}"><TablixBody><TablixColumns>${widths.map((w) => `<TablixColumn><Width>${w}in</Width></TablixColumn>`).join('')}</TablixColumns><TablixRows><TablixRow><Height>0.2in</Height><TablixCells>${widths.map((_, k) => cell(`${name}_${k}`)).join('')}</TablixCells></TablixRow></TablixRows></TablixBody><TablixColumnHierarchy><TablixMembers>${widths.map(() => '<TablixMember />').join('')}</TablixMembers></TablixColumnHierarchy><TablixRowHierarchy><TablixMembers><TablixMember /></TablixMembers></TablixRowHierarchy><Top>0in</Top><Left>0in</Left><Height>0.2in</Height><Width>${widths.reduce((a, b) => a + b, 0)}in</Width></Tablix>`;
+  const at = (out: ReturnType<typeof parseXml>, name: string) => descendants(out).find((e) => e.attributes.Name === name)!;
+  const num = (e: ReturnType<typeof parseXml>, prop: string) => parseFloat(textOf(child(e, prop)));
+
+  it('takes a table and a ruled title in a frame to the frame\'s right side, the table a border short of it', () => {
+    const ruled = `<Textbox Name="Heading"><Paragraphs><Paragraph><TextRuns><TextRun><Value>Heading</Value></TextRun></TextRuns></Paragraph></Paragraphs><Top>0in</Top><Left>0in</Left><Height>0.2in</Height><Width>9.7in</Width><Style><BottomBorder><Style>Solid</Style></BottomBorder></Style></Textbox>`;
+    const out = parseXml(doc(box('Frame', 0, 0.1, 10, 2, ruled + box('Holder', 6, 0.3, 3.6, 1, table('Grid', [1.5, 2, 0.01]), 'None'))));
+    alignToRules(out);
+    assert.equal(num(at(out, 'Heading'), 'Width'), 10);
+    const widths = childElements(child(at(out, 'Grid'), 'TablixBody/TablixColumns')!, 'TablixColumn').map((c) => num(c, 'Width'));
+    assert.equal(widths[2], 0.01);
+    assert.ok(Math.abs(6 + widths.reduce((a, b) => a + b, 0) - (10 - 1 / 72)) < 0.002, widths.join(' '));
+  });
+
+  it('starts a row of frames at the rule\'s left end, a frame in the same place moving with its twin', () => {
+    const hidden = '<Visibility><Hidden>=Parameters!k.Value = 1</Hidden></Visibility>';
+    const out = parseXml(doc(box('Row', 0.12, 0.2, 9.88, 2, box('First', 0, 0, 3, 2) + box('FirstEmpty', 0, 0, 3, 2, '', 'Solid', hidden) + box('Second', 3, 0, 6.88, 2), 'None')));
+    alignToRules(out);
+    assert.ok(num(at(out, 'Row'), 'Left') < 0.001);
+    assert.ok(Math.abs(num(at(out, 'First'), 'Width') - 3.12) < 0.002);
+    assert.equal(textOf(child(at(out, 'FirstEmpty'), 'Width')), textOf(child(at(out, 'First'), 'Width')));
+    assert.equal(textOf(child(at(out, 'FirstEmpty'), 'Left')), textOf(child(at(out, 'First'), 'Left')));
+    assert.ok(Math.abs(num(at(out, 'Row'), 'Left') + num(at(out, 'Second'), 'Left') - 3.12) < 0.002);
+  });
+});
+
+describe('spacing and edges in the template', () => {
+  const doc = (items: string, height = 3) => `<Report xmlns="http://schemas.microsoft.com/sqlserver/reporting/2016/01/reportdefinition"><ReportSections><ReportSection><Body><ReportItems>${items}</ReportItems><Height>${height}in</Height></Body><Width>10.5in</Width><Page /></ReportSection></ReportSections></Report>`;
+  const text = (name: string, value: string, left: number, top: number, width: number, height: number, style = '') => `<Textbox Name="${name}"><Paragraphs><Paragraph><TextRuns><TextRun><Value>${value}</Value><Style><FontSize>8pt</FontSize></Style></TextRun></TextRuns></Paragraph></Paragraphs><Top>${top}in</Top><Left>${left}in</Left><Height>${height}in</Height><Width>${width}in</Width><Style>${style}</Style></Textbox>`;
+  const box = (name: string, left: number, top: number, width: number, height: number, inner: string, style = '<Border><Style>None</Style></Border>') => `<Rectangle Name="${name}"><ReportItems>${inner}</ReportItems><Top>${top}in</Top><Left>${left}in</Left><Height>${height}in</Height><Width>${width}in</Width><Style>${style}</Style></Rectangle>`;
+  const valued = (out: ReturnType<typeof parseXml>, value: string) => descendants(out).find((e) => e.name === 'Textbox' && descendants(e).some((v) => v.name === 'Value' && textOf(v) === value))!;
+  const holderOf = (out: ReturnType<typeof parseXml>, inner: ReturnType<typeof parseXml>) => descendants(out).filter((e) => e.name === 'Rectangle' && descendants(e).includes(inner)).pop()!;
+  const num = (e: ReturnType<typeof parseXml>, prop: string) => parseFloat(textOf(child(e, prop)));
+
+  it('keeps lines placed one under another at their own spacing, each grown to a line', () => {
+    const lines = [0.75, 0.917, 1.083].map((top, k) => text(`Line${k}`, `=Parameters!line${k}.Value`, 0.1, top, 4.4, 0.125)).join('');
+    const out = parseXml(applyConventions(doc(lines), 'Parts', styled).rdl);
+    const tops = [0, 1, 2].map((k) => { const tb = valued(out, `=Parameters!line${k}.Value`); return { top: descendants(out).filter((e) => e.name === 'Rectangle' && descendants(e).includes(tb)).reduce((a, r) => a + num(r, 'Top'), 0) + num(tb, 'Top'), height: num(tb, 'Height') }; });
+    assert.ok(Math.abs(tops[1]!.top - tops[0]!.top - 0.167) < 0.003 && Math.abs(tops[2]!.top - tops[1]!.top - 0.166) < 0.003, JSON.stringify(tops));
+    assert.ok(tops.every((t) => t.height >= 0.159), JSON.stringify(tops));
+  });
+
+  it('starts a side border drawn as a divider at the rule above it', () => {
+    const title = text('Heading', 'Heading', 0, 0, 10, 0.233, '<BottomBorder><Style>Solid</Style></BottomBorder>');
+    const parted = box('Parted', 0, 0.035, 6, 1, text('Note', 'Note', 0, 0, 2, 0.2), '<Border><Style>None</Style></Border><RightBorder><Style>Solid</Style></RightBorder>');
+    const out = parseXml(applyConventions(doc(box('Frame', 0, 0, 10.4, 1.4, title + box('Inner', 0, 0.233, 10, 1.1, parted), '<Border><Style>Solid</Style></Border>')), 'Parts', styled).rdl);
+    const note = valued(out, 'Note');
+    const side = descendants(out).find((e) => e.name === 'Rectangle' && /Solid/.test(textOf(child(e, 'Style/RightBorder/Style'))) && descendants(e).includes(note))!;
+    assert.ok(num(side, 'Top') < 0.001, textOf(child(side, 'Top')));
+    assert.ok(num(note, 'Top') >= 0.034, textOf(child(note, 'Top')));
+  });
+
+  const grid = (name: string, widths: number[], right = -1) => {
+    const cells = widths.map((_, k) => `<TablixCell><CellContents><Textbox Name="${name}_${k}"><Paragraphs><Paragraph><TextRuns><TextRun><Value>${k < widths.length - 2 ? `=Fields!f${k}.Value` : ''}</Value></TextRun></TextRuns></Paragraph></Paragraphs><Style>${k === right ? '<RightBorder><Style>Solid</Style></RightBorder>' : ''}</Style></Textbox></CellContents></TablixCell>`).join('');
+    return `<Tablix Name="${name}"><TablixBody><TablixColumns>${widths.map((w) => `<TablixColumn><Width>${w}in</Width></TablixColumn>`).join('')}</TablixColumns><TablixRows><TablixRow><Height>0.2in</Height><TablixCells>${cells}</TablixCells></TablixRow></TablixRows></TablixBody><TablixColumnHierarchy><TablixMembers>${widths.map(() => '<TablixMember />').join('')}</TablixMembers></TablixColumnHierarchy><TablixRowHierarchy><TablixMembers><TablixMember><Group Name="${name}_Rows" /></TablixMember></TablixMembers></TablixRowHierarchy><DataSetName>Rows</DataSetName><Top>0in</Top><Left>0in</Left><Height>0.2in</Height><Width>${widths.reduce((a, w) => a + w, 0)}in</Width></Tablix>`;
+  };
+
+  it('starts a table column a little clear of a rule drawn down over its first letters', () => {
+    const line = '<Line Name="Divider"><Top>0in</Top><Left>3.12in</Left><Height>1.5in</Height><Width>0in</Width><Style><Border><Style>Solid</Style></Border></Style></Line>';
+    const out = parseXml(applyConventions(doc(box('Holder', 0, 0, 10, 1.6, line + box('Part', 0, 0, 6.3, 1.5, grid('Facts', [1.3, 1.786, 1.5, 0.01, 0.01])))), 'Parts', styled).rdl);
+    const t = descendants(out).find((e) => e.name === 'Tablix')!;
+    const widths = childElements(child(t, 'TablixBody/TablixColumns')!, 'TablixColumn').map((c) => num(c, 'Width'));
+    assert.ok(widths[0]! + widths[1]! >= 3.12 + 0.059, widths.join(' '));
+  });
+
+  it('draws a table\'s right border at its edge, past its thin spare columns, so its bands end there', () => {
+    const fields = ['name', 'owner_key'];
+    const framed = listing('second', [], [], []);
+    const detail = framed.layout.find((a) => a.name === 'DetailArea1')!.sections[0]!;
+    detail.objects = [field('V1', 'second.name', 0, 0, 2000, 180, { border: { sides: [1, 1, 1, 1], width: 20 } })];
+    const wide = listing('first', [], [{ kind: 'text', name: 'H2', text: 'Amount', style: { size: 8, bold: true }, position: { x: 2200, y: 200 }, size: { width: 1800, height: 200 } }], [field('V2', 'first.amount', 2200, 0, 1800, 180)]);
+    const rdl = build([sub(wide, table('first', 'table', ['name', 'amount', 'owner_key']), 1), sub(framed, table('second', 'table', fields), 2)], [[subreport(1)], [subreport(2)]], styled);
+    const second = descendants(parseXml(rdl)).filter((e) => e.name === 'Tablix')[1]!;
+    const widths = childElements(child(second, 'TablixBody/TablixColumns')!, 'TablixColumn').map((c) => parseFloat(textOf(child(c, 'Width'))));
+    assert.ok(widths[widths.length - 1]! < 0.011, widths.join(' '));
+    const row = descendants(second).filter((e) => e.name === 'TablixRow').find((r) => descendants(r).some((e) => e.name === 'Value' && /second|name/.test(textOf(e))))!;
+    const cells = descendants(row).filter((e) => e.name === 'TablixCell');
+    const style = (c: ReturnType<typeof parseXml>) => descendants(c).find((e) => e.name === 'Textbox' && child(e, 'Style')) && child(descendants(c).find((e) => e.name === 'Textbox')!, 'Style');
+    assert.match(textOf(child(style(cells[cells.length - 1]!) ?? parseXml('<x/>'), 'RightBorder/Style')), /Solid/);
+    assert.match(textOf(child(style(cells[0]!) ?? parseXml('<x/>'), 'RightBorder/Style')), /None/);
+  });
+
+  it('gives a short heading of a few words the room to print on one line', () => {
+    const T = 'tests';
+    const head = (name: string, value: string, x: number) => ({ kind: 'text', name, text: value, style: { size: 8, bold: true }, position: { x, y: 200 }, size: { width: 600, height: 200 } });
+    const def = listing(T, [], [head('H2', 'Current Report', 3200), head('H3', 'Grade', 3900)], [field('V2', `${T}.score`, 3200, 0, 600, 180), field('V3', `${T}.grade`, 3900, 0, 600, 180)]);
+    const rdl = build([sub(def, table(T, 'table', ['name', 'score', 'grade', 'owner_key']), 1)], [[subreport(1)]], styled);
+    const t = descendants(parseXml(rdl)).find((e) => e.name === 'Tablix')!;
+    const heading = descendants(t).find((e) => e.name === 'Textbox' && descendants(e).some((v) => v.name === 'Value' && textOf(v) === 'Current Report'))!;
+    const row = descendants(t).filter((e) => e.name === 'TablixRow').find((r) => descendants(r).includes(heading))!;
+    const cells = descendants(row).filter((e) => e.name === 'TablixCell');
+    const k = cells.findIndex((c) => descendants(c).includes(heading));
+    const widths = childElements(child(t, 'TablixBody/TablixColumns')!, 'TablixColumn').map((c) => num(c, 'Width'));
+    assert.ok(widths[k]! >= 0.85, widths.join(' '));
+  });
+
+  it('keeps a date grown towards its label a little apart from it', () => {
+    const label = text('Label', 'As at:', 9.3, 0.4, 0.35, 0.19, '<PaddingLeft>0pt</PaddingLeft><PaddingRight>0pt</PaddingRight>');
+    const stamp = text('Stamp', '=Parameters!run_date.Value', 9.7, 0.4, 0.5, 0.19, '<PaddingLeft>0pt</PaddingLeft><PaddingRight>0pt</PaddingRight>').replace('<FontSize>8pt</FontSize>', "<FontSize>8pt</FontSize><Format>MM'/'dd'/'yyyy</Format>");
+    const report = doc(box('Head', 0, 0, 10.2, 0.6, label + stamp)).replace('<Width>10.5in</Width>', '<Width>10.2in</Width>');
+    const out = parseXml(applyConventions(report, 'Parts', conventions).rdl);
+    assert.ok(num(valued(out, '=Parameters!run_date.Value'), 'Left') >= 9.689, textOf(child(valued(out, '=Parameters!run_date.Value'), 'Left')));
+  });
+
+  it('notes charts left in their own colours when the conventions give charts no style', () => {
+    const chart = `<Chart Name="Plot"><ChartCategoryHierarchy><ChartMembers><ChartMember><Label /></ChartMember></ChartMembers></ChartCategoryHierarchy><ChartSeriesHierarchy><ChartMembers><ChartMember><Label /></ChartMember></ChartMembers></ChartSeriesHierarchy><ChartData><ChartSeriesCollection><ChartSeries Name="S"><ChartDataPoints><ChartDataPoint><ChartDataPointValues><Y>=1</Y></ChartDataPointValues></ChartDataPoint></ChartDataPoints></ChartSeries></ChartSeriesCollection></ChartData><ChartAreas><ChartArea Name="Default" /></ChartAreas><Top>0in</Top><Left>0in</Left><Height>2in</Height><Width>3in</Width></Chart>`;
+    const plain = readConventions(JSON.stringify({ names: { table: '{S}_Tab_{n}', title: '{S}_SchTitle_Txt' }, style: { dataset: 'Theme', command: 'theme_get', props: { BackgroundColor: 'fill' }, roles: { title: 'Head' } } }));
+    assert.ok(applyConventions(doc(chart), 'Parts', plain).review.some((n) => /Charts \(1\)/.test(n.item) && /style\.chart/.test(n.message)));
+    assert.ok(!applyConventions(doc(chart), 'Parts', styled).review.some((n) => /Charts \(/.test(n.item)));
+  });
+
+  it('lines up a framed box with the framed box just over it', () => {
+    const upper = box('Upper', 0, 0, 4.716, 1.41, text('A', 'Upper text', 0.1, 0.1, 2, 0.2), '<Border><Style>Solid</Style></Border>');
+    const lower = box('Lower', 0.042, 1.41, 4.674, 1.2, text('B', 'Lower text', 0.1, 0.1, 2, 0.2), '<Border><Style>Solid</Style></Border>');
+    const out = parseXml(applyConventions(doc(box('Column', 0.2, 0.2, 4.8, 2.7, upper + lower)), 'Parts', styled).rdl);
+    const a = holderOf(out, valued(out, 'Upper text'));
+    const b = holderOf(out, valued(out, 'Lower text'));
+    assert.equal(textOf(child(b, 'Left')), textOf(child(a, 'Left')));
+    assert.equal(textOf(child(b, 'Width')), textOf(child(a, 'Width')));
+  });
+});

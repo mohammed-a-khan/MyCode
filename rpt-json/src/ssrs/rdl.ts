@@ -5289,16 +5289,26 @@ function joinBoxes(input: XmlElement[]): XmlElement[] {
   });
   for (const b of boxes) {
     const pb = pos(b);
-    for (const { item: a, p: pa, final, held: inside } of [...boxes.map((item) => ({ item, p: pos(item), final: pos(item), held: false })), ...held]) {
+    for (const { item: a, p: pa, held: inside } of [...boxes.map((item) => ({ item, p: pos(item), held: false })), ...held]) {
       if (a === b) continue;
       // A box a formula can hide may not draw the side they share: the other meets it but keeps its own border.
       const own = canHide(a);
       const gapX = pb.left - pa.right;
       // Side by side: a row of boxes alike in height (a grid of panels).
-      if (!inside && gapX > 0 && gapX <= 0.1 && Math.abs(pa.top - pb.top) <= 0.05 && Math.abs((pa.bottom - pa.top) - (pb.bottom - pb.top)) <= 0.05) {
+      if (!inside && gapX > 0 && gapX <= 0.1 && Math.abs(pa.top - pb.top) <= 0.05) {
+        const alike = Math.abs((pa.bottom - pa.top) - (pb.bottom - pb.top)) <= 0.05;
         const c = changes.get(b) ?? { sides: [] };
-        changes.set(b, { ...c, left: c.right !== undefined ? c.left : pa.right, sides: own ? c.sides : [...c.sides, 'LeftBorder'] });
+        changes.set(b, { ...c, left: c.right !== undefined ? c.left : pa.right, sides: own || !alike ? c.sides : [...c.sides, 'LeftBorder'] });
       }
+    }
+  }
+  for (const b of boxes) {
+    const pb = pos(b);
+    for (const { item: a, p: pa, final: drawn, held: inside } of [...boxes.map((item) => ({ item, p: pos(item), final: pos(item), held: false })), ...held]) {
+      if (a === b) continue;
+      const own = canHide(a);
+      const moved = changes.get(a);
+      const final = moved?.left !== undefined ? { ...drawn, left: moved.left } : drawn;
       const gapY = pb.top - pa.bottom;
       const overlap = Math.min(pa.right, pb.right) - Math.max(pa.left, pb.left);
       // Something placed between them (a table that grows) keeps them apart: the lower box follows it.

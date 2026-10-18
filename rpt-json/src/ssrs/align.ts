@@ -222,13 +222,14 @@ export function alignToRules(root: XmlElement): void {
   // Likewise on the left: a table (or a band, a frame) starting a little inside the rule's left end, with nothing
   // beside it, reaches it; what holds it (a rectangle without a border) opens out to the left, what else is in it
   // keeping its place.
-  for (const e of order.filter((x) => x.name === 'Tablix' || isFrame(x) || (x.name === 'Textbox' && painted(x)))) {
+  for (const e of placed.filter((x) => edgeItem(x) && (x.name === 'Tablix' || isFrame(x) || (x.name === 'Textbox' && painted(x)))).sort((x, y) => area(y) - area(x))) {
     const b = boxOf(e);
     const shift = b.left - ruleLeft;
     if (shift <= 0.5 || shift > 54 || [encloser(e)].some((r) => r && framedAround(r))) continue;
     const beside = placed.some((o) => o !== e && !thin(o) && parents.get(o) === parents.get(e) && boxes.get(o)!.right <= b.left + 0.5
       && boxes.get(o)!.top < b.bottom && boxes.get(o)!.bottom > b.top);
     if (beside) continue;
+    const twins = childElements(parents.get(e)!).filter((o) => o !== e && boxes.has(o) && ['left', 'top', 'right'].every((k) => Math.abs(boxes.get(o)![k as 'left'] - boxes.get(e)![k as 'left']) <= 0.5));
     let need = shift;
     let item = e;
     for (let up = parents.get(item); need > 0.5 && up; up = parents.get(up)) {
@@ -252,6 +253,10 @@ export function alignToRules(root: XmlElement): void {
       padColumn(e, 'first', moved);
     }
     setChild(e, 'Width', inches(len(e, 'Width') + moved));
+    for (const twin of twins) {
+      setChild(twin, 'Left', textOf(child(e, 'Left')));
+      setChild(twin, 'Width', textOf(child(e, 'Width')));
+    }
   }
 
   // A painted title along a frame's top: across the frame, side to side, from its top (a frame drawn beside it, or the
@@ -310,6 +315,48 @@ export function alignToRules(root: XmlElement): void {
       if (right <= b.left || left >= b.right || below <= top || b.top > top + height / 5 || below - top >= height / 3) continue;
       setChild(chart, 'Top', inches(below));
       setChild(chart, 'Height', inches(height - (below - top)));
+    }
+  }
+  const ruled = (e: XmlElement) => ['TopBorder', 'BottomBorder'].some((side) => !/^(none)?$/i.test(textOf(child(ownStyle(e), `${side}/Style`))));
+  for (const frame of placed.filter(isFrame)) {
+    const fb = boxOf(frame);
+    const inside = (e: XmlElement) => {
+      for (let up = parents.get(e); up; up = parents.get(up)) {
+        if (up === frame) return true;
+        if (up.name === 'CellContents' || isFrame(up)) return false;
+      }
+      return false;
+    };
+    const reaching = all.filter((x) => (x.name === 'Tablix' || (x.name === 'Textbox' && (painted(x) || ruled(x)))) && parents.get(x)?.name === 'ReportItems' && inside(x));
+    const edge = points(textOf(child(ownStyle(frame), 'Border/Width'))) ?? 1;
+    for (const e of reaching) {
+      const b = boxOf(e);
+      const gap = fb.right - b.right - (e.name === 'Tablix' || painted(e) ? edge : 0);
+      if (gap <= 0.5 || gap > 36 || b.right - b.left < (fb.right - fb.left) / 3) continue;
+      let blocked = false;
+      for (let item = e; item !== frame && !blocked; item = parents.get(parents.get(item)!)!) {
+        const ib = boxOf(item);
+        blocked = childElements(parents.get(item)!).some((o) => o !== item && ITEMS.has(o.name) && !thin(o) && offsetOf(o, parents, 'Left') >= ib.right - 0.5
+          && offsetOf(o, parents, 'Top') < ib.bottom && offsetOf(o, parents, 'Top') + len(o, 'Height') > ib.top);
+        if (parents.get(parents.get(item)!) === frame) break;
+      }
+      if (blocked) continue;
+      const width = drawnWidth(e);
+      if (e.name === 'Tablix') {
+        const columns = childElements(child(e, 'TablixBody/TablixColumns') ?? el('TablixColumns'), 'TablixColumn');
+        const real = columns.filter((c) => len(c, 'Width') > 0.8);
+        const total = real.reduce((sum, c) => sum + len(c, 'Width'), 0);
+        if (!total) continue;
+        for (const c of real) setChild(c, 'Width', inches(len(c, 'Width') + gap * len(c, 'Width') / total));
+      }
+      setChild(e, 'Width', inches(width + gap));
+      let right = len(e, 'Left') + width + gap;
+      for (let up = parents.get(e); up && up !== frame; up = parents.get(up)) {
+        if (up.name !== 'Rectangle') continue;
+        const w = len(up, 'Width');
+        if (w < right) setChild(up, 'Width', inches(right));
+        right = len(up, 'Left') + Math.max(w, right);
+      }
     }
   }
   // Painted titles side by side (a row of charts' titles): on one line, at the lowest one's place.
