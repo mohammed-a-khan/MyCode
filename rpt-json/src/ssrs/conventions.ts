@@ -2071,7 +2071,8 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     const nameFree = (e: XmlElement) => {
       for (const d of descendants(e).filter((x) => ITEMS.has(x.name) && !inTables.has(x))) {
         if (d.name === 'Textbox') {
-          const below = tablixes.length > 0 && len(d, 'Top') >= tablixBottom - 0.01 && !!items && childElements(items).includes(d);
+          const lowest = Math.max(tablixBottom, ...top.filter((x) => x !== d).map((x) => len(x, 'Top') + len(x, 'Height')));
+          const below = tablixes.length > 0 && len(d, 'Top') >= lowest - 0.01 && !!items && childElements(items).includes(d);
           if (below && !footerDone && !isBlank(d)) {
             footerDone = true;
             rename(d, 'footer');
@@ -4241,7 +4242,9 @@ function inPageOrder(report: XmlElement, body: XmlElement, S: string): (text: st
     let k = 0;
     holder.children = holder.children.map((c) => (placed.includes(c as XmlElement) ? sorted[k++]! : c));
   }
-  const pattern = new RegExp(`^${S.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}_([A-Za-z]+_?)(\\d+)$`);
+  const outer = descendants(body).find((e) => e.name === 'Rectangle')?.attributes.Name ?? '';
+  const stem = outer.startsWith(`${S}_`) || !/_[A-Za-z]+_?\d+$/.test(outer) ? S : outer.replace(/_[A-Za-z]+_?\d+$/, '');
+  const pattern = new RegExp(`^${stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}_([A-Za-z]+_?)(\\d+)$`);
   const counts = new Map<string, number>();
   const renames = new Map<string, string>();
   const movable = descendants(body).filter((e) => pattern.test(e.attributes?.Name ?? '') && ITEMS.has(e.name) && e.name !== 'Tablix');
@@ -4250,9 +4253,9 @@ function inPageOrder(report: XmlElement, body: XmlElement, S: string): (text: st
   for (const e of movable) {
     const m = pattern.exec(e.attributes.Name!)!;
     let n = counts.get(m[1]!) ?? 0;
-    do n++; while (taken.has(`${S}_${m[1]}${n}`));
+    do n++; while (taken.has(`${stem}_${m[1]}${n}`));
     counts.set(m[1]!, n);
-    const name = `${S}_${m[1]}${n}`;
+    const name = `${stem}_${m[1]}${n}`;
     taken.add(name);
     if (name !== e.attributes.Name) renames.set(e.attributes.Name!, name);
   }
