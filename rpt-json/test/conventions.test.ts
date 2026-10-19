@@ -429,7 +429,7 @@ describe('conventions', () => {
     assert.equal(inch(find('Printed'), 'Top'), 0.1, 'placed within the frame');
     const band = parentOf(find('Order ID'))!;
     assert.ok(band && textOf(child(band, 'Style/BackgroundColor')) === 'Navy', 'a filled band is a box holding its text');
-    assert.equal(inch(find('=Fields!Customer.Value'), 'Width'), 3, 'a text stops where its neighbour starts');
+    assert.equal(inch(descendants(r).find((e) => e.name === 'Textbox' && valueIn(e) === '=Fields!Customer.Value' && child(e, 'Width'))!, 'Width'), 3, 'a text stops where its neighbour starts');
     const centred = find('Centred');
     assert.equal(inch(centred, 'Left'), 1);
     assert.equal(inch(centred, 'Width'), 4, 'centred text is cut equally at both ends, staying centred');

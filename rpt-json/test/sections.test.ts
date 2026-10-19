@@ -102,7 +102,7 @@ describe('sections of a report made of many parts', () => {
     const band = rows.find((r) => cells(r).includes('Name'))!;
     assert.deepEqual(cells(band), ['Name', 'Limit', 'Low', 'High', 'Score', 'Grade', 'Score', 'Score']);
     const above = rows[rows.indexOf(band) - 1]!;
-    assert.deepEqual(cells(above).slice(2, 5), ['Latest', 'Latest', 'Latest Run']);
+    assert.deepEqual(cells(above).slice(2, 6), ['Latest', 'Latest', 'Latest', 'Run'], 'a heading over two columns is spread over them, word by word');
     const background = (row: typeof rows[number]) => textOf(descendants(row).find((e) => e.name === 'BackgroundColor')!);
     assert.equal(background(above).replace(/_First/, ''), background(band).replace(/_First/, ''));
     assert.ok(!descendants(tablix).some((e) => e.name === 'GroupExpression' && textOf(e) === '=1'), 'the heading rows repeat on each page with the band');
@@ -557,6 +557,36 @@ describe('spacing and edges in the template', () => {
     const low = holderOf(out, valued(out, 'Below'));
     assert.ok(num(low, 'Top') >= num(set, 'Top') + num(set, 'Height') - 0.001, `${textOf(child(low, 'Top'))} ${textOf(child(set, 'Height'))}`);
     assert.ok(Math.abs(num(holderOf(out, valued(out, 'Beside')), 'Top') - num(set, 'Top')) < 0.002);
+  });
+
+  it('splits a one-record table at a divider drawn through it, so the divider is a side that grows with the list beside it', () => {
+    const title = text('Heading', 'Heading', 0, 0, 10, 0.233, '<BottomBorder><Style>Solid</Style></BottomBorder>');
+    const cells = ['=Fields!f0.Value', '=Fields!f1.Value', '=Fields!f2.Value'].map((v, k) => `<TablixCell><CellContents><Textbox Name="Pair_${k}"><Paragraphs><Paragraph><TextRuns><TextRun><Value>${v}</Value></TextRun></TextRuns></Paragraph></Paragraphs></Textbox></CellContents></TablixCell>`).join('');
+    const pair = `<Tablix Name="Pair"><TablixBody><TablixColumns>${[1.5, 1.5, 2].map((w) => `<TablixColumn><Width>${w}in</Width></TablixColumn>`).join('')}</TablixColumns><TablixRows><TablixRow><Height>1in</Height><TablixCells>${cells}</TablixCells></TablixRow></TablixRows></TablixBody><TablixColumnHierarchy><TablixMembers><TablixMember /><TablixMember /><TablixMember /></TablixMembers></TablixColumnHierarchy><TablixRowHierarchy><TablixMembers><TablixMember><Group Name="Pair_Rows" /></TablixMember></TablixMembers></TablixRowHierarchy><DataSetName>Rows</DataSetName><Top>0in</Top><Left>0in</Left><Height>1in</Height><Width>5in</Width></Tablix>`;
+    const rule = '<Line Name="Upright"><Top>0in</Top><Left>2.95in</Left><Height>1.2in</Height><Width>0in</Width><Style><Border><Style>Solid</Style></Border></Style></Line>';
+    const listed = box('Listed', 5.01, 0, 4.9, 0.6, grid('Entries', [2, 1.5]), '<Border><Style>None</Style></Border><LeftBorder><Style>Solid</Style></LeftBorder>');
+    const out = parseXml(applyConventions(doc(box('Frame', 0, 0, 10.4, 1.733, title + box('Inner', 0, 0.233, 10, 1.5, rule + box('Left', 0, 0, 5, 1.5, pair) + listed), '<Border><Style>Solid</Style></Border>')), 'Parts', styled).rdl);
+    assert.ok(!descendants(out).some((e) => e.name === 'Line' && num(e, 'Height') > 0.5), 'the divider is no longer a line of fixed length');
+    const tables = descendants(out).filter((e) => e.name === 'Tablix' && descendants(e).some((d) => d.name === 'Value' && /Fields!f\d/.test(textOf(d))));
+    assert.equal(tables.length, 2, 'the table is cut in two at the divider');
+    const right = tables.find((e) => descendants(e).some((d) => d.name === 'Value' && textOf(d) === '=Fields!f2.Value'))!;
+    const side = descendants(out).filter((e) => e.name === 'Rectangle' && descendants(e).includes(right)).pop()!;
+    assert.match(textOf(child(side, 'Style/LeftBorder/Style')), /Solid/, 'its right part sits in a box whose left side is the divider');
+    assert.equal(descendants(side).filter((e) => e.name === 'Tablix').length, 2, 'with the list beside it');
+    assert.equal(new Set(descendants(out).filter((e) => e.name === 'Group').map((e) => e.attributes.Name)).size, descendants(out).filter((e) => e.name === 'Group').length);
+  });
+
+  it('lists the items of each box in the order they print, numbered in that order', () => {
+    const lower = box('Lower', 0, 2, 4, 0.5, text('B', 'Second', 0.1, 0.1, 2, 0.2), '<Border><Style>Solid</Style></Border>');
+    const upper = box('Upper', 0, 0.5, 4, 0.5, text('A', 'First', 0.1, 0.1, 2, 0.2), '<Border><Style>Solid</Style></Border>');
+    const out = parseXml(applyConventions(doc(lower + upper), 'Parts', styled).rdl);
+    const boxes = descendants(out).filter((e) => e.name === 'Rectangle');
+    const first = holderOf(out, valued(out, 'First'));
+    const second = holderOf(out, valued(out, 'Second'));
+    assert.ok(boxes.indexOf(first) < boxes.indexOf(second));
+    const number = (e: ReturnType<typeof parseXml>) => Number(/(\d+)$/.exec(e.attributes.Name ?? '')?.[1]);
+    assert.ok(number(first) < number(second), `${first.attributes.Name} ${second.attributes.Name}`);
+    assert.equal(number(boxes[0]!), 1);
   });
 
   it('runs dividers down to the frame\'s foot, the one beside a growing table drawn as that table\'s own side', () => {
