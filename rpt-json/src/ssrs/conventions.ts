@@ -4242,6 +4242,10 @@ function inPageOrder(report: XmlElement, body: XmlElement, S: string): (text: st
     let k = 0;
     holder.children = holder.children.map((c) => (placed.includes(c as XmlElement) ? sorted[k++]! : c));
   }
+  for (const holder of descendants(body).filter((e) => e.name === 'ReportItems')) {
+    const placed = childElements(holder).filter((e) => ITEMS.has(e.name) && child(e, 'Top'));
+    placed.forEach((e, i) => setChild(e, 'ZIndex', String(placed.length - i)));
+  }
   const outer = descendants(body).find((e) => e.name === 'Rectangle')?.attributes.Name ?? '';
   const stem = outer.startsWith(`${S}_`) || !/_[A-Za-z]+_?\d+$/.test(outer) ? S : outer.replace(/_[A-Za-z]+_?\d+$/, '');
   const pattern = new RegExp(`^${stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}_([A-Za-z]+_?)(\\d+)$`);
