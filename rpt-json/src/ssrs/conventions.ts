@@ -258,7 +258,7 @@ class Names {
   private readonly used = new Set<string>();
   make(base: string): string {
     const clean = base.replace(/[^A-Za-z0-9_]/g, '_').replace(/^([^A-Za-z])/, 'R$1');
-    const typed = /^(.*)(_(?:SubTotVal|TotVal|SubTotTxt|TotTxt|ColTxt|ColVal|HdrTxt|HdrVal))$/i.exec(clean);
+    const typed = /^(.*)(_(?:SubTotVal|TotVal|SubTotTxt|TotTxt|ColTxt|ColVal|HdrTxt|HdrVal))$/i.exec(clean) ?? /^(.*[A-Za-z])(_Txt)$/.exec(clean);
     let name = clean;
     const counted = typed && /TotVal$/i.test(typed[2]!) ? /^(.*_Tab_\d+)_(.+)$/.exec(typed[1]!) : null;
     for (let k = 2; this.used.has(name.toLowerCase()); k++) name = counted ? `${counted[1]}_${k}_${counted[2]}${typed![2]}` : typed ? `${typed[1]}_${k}${typed[2]}` : `${clean}_${k}`;
@@ -1568,6 +1568,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           cells[c + k]!.children = [el('CellContents', blank)];
           if (parts) placePart(blank, tb, parts.texts[k]!, parts.lefts[k]!);
           if (parts && underRule.has(tb)) underRule.add(blank);
+          if (parts && summaryNames.has(blank)) summaryNames.set(blank, `${snake(parts.texts[k]!)}_Txt`);
         }
         if (parts) placePart(tb, tb, parts.texts[0]!, parts.lefts[0]!);
       }
@@ -1592,6 +1593,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
             for (let m = 1; m < n; m++) {
               placePart(cellItem(cells[k + m]!)!, tb, parts.texts[m]!, parts.lefts[m]!);
               if (underRule.has(tb)) underRule.add(cellItem(cells[k + m]!)!);
+              if (summaryNames.has(cellItem(cells[k + m]!)!)) summaryNames.set(cellItem(cells[k + m]!)!, `${snake(parts.texts[m]!)}_Txt`);
             }
             placePart(tb, tb, parts.texts[0]!, parts.lefts[0]!);
             k += n - 1;
@@ -3080,7 +3082,7 @@ function summarize(tablix: XmlElement): void {
         summaryNames.set(it.t, `${fieldOf(it.t) ?? 'value'}_HdrVal`);
       } else {
         const after = line.filter((o) => o.x > it.x && o !== label && o !== value).sort((p, q) => p.x - q.x)[0];
-        const paired = text !== undefined && /[A-Za-z]{3}/.test(text) && after && isField(after.t) && !headerCols.has(colOf(after)) ? fieldOf(after.t) : undefined;
+        const paired = text !== undefined && /[A-Za-z]{3}/.test(text) && (/:\s*$/.test(text) || !/center/i.test(textAlignOf(it.t))) && after && isField(after.t) && !headerCols.has(colOf(after)) ? fieldOf(after.t) : undefined;
         summaryNames.set(it.t, paired ? `${paired}_HdrTxt` : `${snake(text ?? 'text') || 'text'}_Txt`);
       }
       const covered = text !== undefined && /center/i.test(textAlignOf(it.t)) ? widths.map((w, j) => j).filter((j) => Math.min(it.x + it.w, starts[j]! + widths[j]!) - Math.max(it.x, starts[j]!) >= widths[j]! / 2) : [];
@@ -4229,7 +4231,8 @@ function dividerThroughTable(report: XmlElement, body: XmlElement): void {
 }
 
 function inPageOrder(report: XmlElement, body: XmlElement, S: string): (text: string) => string {
-  const lead = descendants(body).find((e) => e.name === 'Tablix');
+  const tables = descendants(body).filter((e) => e.name === 'Tablix');
+  const lead = tables.find((t) => t.attributes.Name === `${S}_Tab_1`) ?? tables.find((t) => descendants(t).some((e) => /_SchTitle_/.test(e.attributes?.Name ?? ''))) ?? tables[0];
   for (const holder of descendants(body).filter((e) => e.name === 'ReportItems')) {
     const placed = holder.children.filter((c): c is XmlElement => typeof c === 'object' && c !== null && ITEMS.has((c as XmlElement).name) && !!child(c as XmlElement, 'Top'));
     if (placed.length < 2) continue;
@@ -4241,17 +4244,19 @@ function inPageOrder(report: XmlElement, body: XmlElement, S: string): (text: st
   const pattern = new RegExp(`^${S.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}_([A-Za-z]+_?)(\\d+)$`);
   const counts = new Map<string, number>();
   const renames = new Map<string, string>();
-  for (const e of descendants(body)) {
-    const m = pattern.exec(e.attributes?.Name ?? '');
-    if (!m || !ITEMS.has(e.name) || e.name === 'Tablix') continue;
-    const n = (counts.get(m[1]!) ?? 0) + 1;
+  const movable = descendants(body).filter((e) => pattern.test(e.attributes?.Name ?? '') && ITEMS.has(e.name) && e.name !== 'Tablix');
+  const moving = new Set(movable.map((e) => e.attributes.Name!));
+  const taken = new Set(descendants(report).map((e) => e.attributes?.Name).filter((x): x is string => !!x && !moving.has(x)));
+  for (const e of movable) {
+    const m = pattern.exec(e.attributes.Name!)!;
+    let n = counts.get(m[1]!) ?? 0;
+    do n++; while (taken.has(`${S}_${m[1]}${n}`));
     counts.set(m[1]!, n);
     const name = `${S}_${m[1]}${n}`;
+    taken.add(name);
     if (name !== e.attributes.Name) renames.set(e.attributes.Name!, name);
   }
   if (!renames.size) return (text) => text;
-  const taken = new Set(descendants(report).map((e) => e.attributes?.Name).filter((x): x is string => !!x && !renames.has(x)));
-  if ([...renames.values()].some((n) => taken.has(n))) return (text) => text;
   const find = new RegExp(`(?<![A-Za-z0-9_])(${[...renames.keys()].sort((a, b) => b.length - a.length).join('|')})(?![A-Za-z0-9_])`, 'g');
   const walk = (e: XmlElement) => {
     if (e.attributes?.Name && renames.has(e.attributes.Name)) e.attributes.Name = renames.get(e.attributes.Name)!;
