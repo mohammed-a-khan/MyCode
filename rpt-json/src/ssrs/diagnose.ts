@@ -95,6 +95,19 @@ export const alternates = (a: XmlElement, b: XmlElement): boolean => {
   if (fx && unwrap(fx[2]!) === unwrap(y) && shape(fx[1]!) === shape(y)) return true;
   if (fy && unwrap(fy[2]!) === unwrap(x) && shape(fy[1]!) === shape(x)) return true;
   if (fx && fy && unwrap(fx[2]!) === unwrap(fy[2]!) && shape(fx[1]!) === shape(fy[1]!)) return true;
+  const either = (r: string) => {
+    let depth = 0;
+    const s = r.replace(/"(?:[^"]|"")*"/g, (q) => '_'.repeat(q.length));
+    for (let k = 0; k < s.length; k++) {
+      if (s[k] === '(') depth++;
+      else if (s[k] === ')') depth--;
+      else if (depth === 0 && /^ OrElse /i.test(s.slice(k, k + 8))) return [unwrap(r.slice(0, k)), unwrap(r.slice(k + 8))] as const;
+    }
+    return undefined;
+  };
+  const ex = either(unwrap(x));
+  const ey = either(unwrap(y));
+  if (ex && ey && ex[0] === ey[0] && (negated(ex[1]) === ey[1] || negated(ey[1]) === ex[1])) return true;
   return negated(x) === unwrap(y) || negated(y) === unwrap(x) || (/^true$/i.test(unwrap(x)) !== /^true$/i.test(unwrap(y)) && /^(true|false)$/i.test(unwrap(x)) && /^(true|false)$/i.test(unwrap(y)));
 };
 const valueOf = (box: XmlElement) => descendants(box).filter((e) => e.name === 'Value' && !child(e, 'Value')).map(textOf).join('');

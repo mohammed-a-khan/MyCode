@@ -1830,7 +1830,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           if ((kind === 'subtotal' || kind === 'total') && stackedRows.has(row) && !/Fields!/.test(valueOf(tb)) && !rowTexts.some((e) => fieldOf(e)) && !rowTexts.some((e) => TOTALLED.test(valueOf(e)))) return rename(tb, 'text', { T });
           switch (kind) {
             case 'heading': return across >= columns && columns > 1 ? rename(tb, 'text', { T }) : rename(tb, 'heading', { T, col: colNames[c] ?? col });
-            case 'detail': return !/Fields!/.test(valueOf(tb)) && !rowTexts.some((e) => fieldOf(e) || /Fields!/.test(valueOf(e))) ? rename(tb, 'text', { T }) : across >= columns && columns > 1 ? rename(tb, 'groupText', { T, col }) : rename(tb, 'value', { T, col });
+            case 'detail': return !/Fields!/.test(valueOf(tb)) && (!rowTexts.some((e) => fieldOf(e) || /Fields!/.test(valueOf(e))) || !valueOf(tb).includes('!')) ? rename(tb, 'text', { T }) : across >= columns && columns > 1 ? rename(tb, 'groupText', { T, col }) : rename(tb, 'value', { T, col });
             case 'groupHeading': return headingsHere ? rename(tb, 'heading', { T, col: colNames[c] ?? col }) : rename(tb, 'groupText', { T, col });
             case 'subtotal': return rename(tb, totalled ? 'subtotal' : 'subtotalText', { T, col });
             default:
@@ -2319,9 +2319,14 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
   if (body) stackedFramesAligned(body);
   if (body) rulesClearOfColumns(body);
   if (body) sidesMeetRules(body);
+  if (body) dividersToBottom(body);
   if (body) edgePastThinColumns(body);
   if (body) labelsInLine(body);
   if (body) touchNotOverlap(body);
+  if (body && alternatesStacked(body)) {
+    const bottom = unpile(child(body, 'ReportItems'));
+    if (bottom > len(body, 'Height')) setChild(body, 'Height', inchUp(bottom));
+  }
   return { rdl: toXml(withFunctions(root, extra.sqlFunctions ?? [])), review, settled: conv.dataSource ? ['Data source'] : [], ...(page && conv.pageBands === 'drop' ? { settles: /^Page header$| in Page (Header|Footer)\b/ } : {}), ...(Object.keys(files).length ? { files } : {}) };
 }
 
@@ -3995,6 +4000,113 @@ function stackedFramesAligned(body: XmlElement): void {
       setChild(b, 'Width', inch(width));
       for (const c of childElements(child(b, 'ReportItems') ?? el('x')).filter((x) => ITEMS.has(x.name) && child(x, 'Left'))) {
         if (len(c, 'Left') - dx >= 0 && len(c, 'Left') - dx + len(c, 'Width') <= width + 0.0005) setChild(c, 'Left', inch(len(c, 'Left') - dx));
+      }
+    }
+  }
+}
+
+function alternatesStacked(body: XmlElement): boolean {
+  const BLOCKS = new Set(['Rectangle', 'Tablix', 'Chart', 'Subreport', 'Image', 'GaugePanel', 'Map']);
+  let moved = false;
+  for (const holder of descendants(body).filter((e) => e.name === 'ReportItems')) {
+    const items = childElements(holder).filter((e) => BLOCKS.has(e.name) && child(e, 'Top') && child(e, 'Visibility/Hidden'));
+    const area = (e: XmlElement) => len(e, 'Width') * len(e, 'Height');
+    const over = (a: XmlElement, b: XmlElement) => Math.max(0, Math.min(len(a, 'Left') + len(a, 'Width'), len(b, 'Left') + len(b, 'Width')) - Math.max(len(a, 'Left'), len(b, 'Left')))
+      * Math.max(0, Math.min(len(a, 'Top') + len(a, 'Height'), len(b, 'Top') + len(b, 'Height')) - Math.max(len(a, 'Top'), len(b, 'Top')));
+    const done = new Set<XmlElement>();
+    const piles: { members: XmlElement[]; foot: number; left: number; right: number; added: number }[] = [];
+    for (const first of items) {
+      if (done.has(first)) continue;
+      const rule = (e: XmlElement) => textOf(child(e, 'Visibility/Hidden')).replace(/\s+/g, '');
+      const pile = [first];
+      for (let grown = true; grown;) {
+        grown = false;
+        for (const e of items) {
+          if (pile.includes(e) || done.has(e) || area(e) <= 0) continue;
+          if (pile.some((p) => over(p, e) >= 0.5 * Math.min(area(p), area(e))) && pile.every((p) => rule(p) === rule(e) || alternates(p, e)) && pile.some((p) => rule(p) !== rule(e))) {
+            pile.push(e);
+            grown = true;
+          }
+        }
+      }
+      if (pile.length < 2) continue;
+      const foot = Math.max(...pile.map(reach));
+      const top = Math.min(...pile.map((e) => len(e, 'Top')));
+      const left = Math.min(...pile.map((e) => len(e, 'Left')));
+      const right = Math.max(...pile.map((e) => len(e, 'Left') + len(e, 'Width')));
+      const groups = [...new Set(pile.map(rule))].map((r) => pile.filter((e) => rule(e) === r));
+      let at = 0;
+      for (const group of groups) {
+        const from = Math.min(...group.map((e) => len(e, 'Top')));
+        for (const e of group) if (e.name === 'Rectangle' && reach(e) > len(e, 'Top') + len(e, 'Height') + 0.0005) setChild(e, 'Height', inchUp(reach(e) - len(e, 'Top')));
+        const end = Math.max(...group.map(reach));
+        for (const e of group) {
+          setChild(e, 'Left', inch(len(e, 'Left') - left));
+          setChild(e, 'Top', inchUp(at + len(e, 'Top') - from));
+          done.add(e);
+        }
+        at += end - from;
+      }
+      const number = Math.max(0, ...descendants(body).map((e) => Number(/_Rect_(\d+)$/.exec(e.attributes?.Name ?? '')?.[1] ?? 0))) + 1;
+      const stem = /^(.*)_Rect_\d+$/.exec(descendants(body).find((e) => /_Rect_\d+$/.test(e.attributes?.Name ?? ''))?.attributes.Name ?? '')?.[1] ?? (first.attributes.Name ?? 'Item');
+      const set = el('Rectangle', { Name: `${stem}_Rect_${number}` }, el('ReportItems', ...pile), el('Top', inch(top)), el('Left', inch(left)), el('Height', inchUp(at)), el('Width', inch(right - left)), el('Style', el('Border', el('Style', 'None'))));
+      holder.children = holder.children.flatMap((c) => (c === first ? [set] : pile.includes(c as XmlElement) ? [] : [c]));
+      piles.push({ members: [set], foot, left, right, added: Math.max(0, top + at - foot) });
+      moved = true;
+    }
+    const inPiles = new Set(piles.flatMap((p) => p.members));
+    for (const e of childElements(holder).filter((x) => ITEMS.has(x.name) && child(x, 'Top') && !inPiles.has(x))) {
+      const top = len(e, 'Top');
+      const by = Math.max(0, ...piles.filter((p) => top >= p.foot - 0.001 && Math.min(p.right, len(e, 'Left') + len(e, 'Width')) - Math.max(p.left, len(e, 'Left')) > 0.001).map((p) => p.added));
+      if (by > 0) setChild(e, 'Top', inchUp(top + by));
+    }
+  }
+  return moved;
+}
+
+function dividersToBottom(body: XmlElement): void {
+  const drawn = (e: XmlElement | undefined, side: string) => !!e && [side, 'Border'].some((s) => !/^(none)?$/i.test(textOf(child(e, `Style/${s}/Style`))));
+  const parents = new Map<XmlElement, XmlElement>();
+  for (const e of descendants(body)) for (const c of childElements(e)) parents.set(c, e);
+  for (const holder of descendants(body).filter((e) => e.name === 'Rectangle' && child(e, 'ReportItems') && child(e, 'Height'))) {
+    const outer = parents.get(parents.get(holder) ?? holder);
+    const height = len(holder, 'Height');
+    const floor = drawn(holder, 'BottomBorder') || (!!outer && outer.name === 'Rectangle' && drawn(outer, 'BottomBorder') && Math.abs(len(holder, 'Top') + height - len(outer, 'Height')) <= 0.02);
+    if (!floor) continue;
+    const items = childElements(child(holder, 'ReportItems')!).filter((e) => ITEMS.has(e.name) && child(e, 'Top'));
+    const sides = (e: XmlElement) => e.name === 'Rectangle' && !drawn(e, 'TopBorder') && !drawn(e, 'BottomBorder') && (drawn(e, 'LeftBorder') !== drawn(e, 'RightBorder'));
+    const upright = (e: XmlElement) => e.name === 'Line' && Math.abs(len(e, 'Width')) <= 0.02 && len(e, 'Height') > 0;
+    for (const d of items.filter((e) => sides(e) || upright(e))) {
+      const top = len(d, 'Top');
+      const bottom = top + len(d, 'Height');
+      if (top > 0.06 || bottom >= height - 0.005 || bottom < height * 0.6) continue;
+      setChild(d, 'Height', inch(height - top));
+    }
+    for (const d of items.filter((e) => sides(e) || upright(e))) {
+      const top = len(d, 'Top');
+      const x = d.name === 'Line' || drawn(d, 'LeftBorder') ? len(d, 'Left') : len(d, 'Left') + len(d, 'Width');
+      const g = items.find((o) => o !== d && o.name === 'Rectangle' && len(o, 'Top') <= 0.06 && Math.abs(len(o, 'Left') - x) <= 0.03
+        && !drawn(o, 'LeftBorder') && descendants(o).some((e) => e.name === 'Tablix'));
+      if (!g || top > 0.06 || top + len(d, 'Height') < height - 0.005) continue;
+      const line = d.name === 'Line' ? child(d, 'Style/Border') : child(d, 'Style/LeftBorder') ?? child(d, 'Style/RightBorder') ?? child(d, 'Style/Border');
+      if (!line) continue;
+      const dx = len(g, 'Left') - x;
+      const dy = len(g, 'Top') - top;
+      for (const c of childElements(child(g, 'ReportItems')!).filter((e) => ITEMS.has(e.name) && child(e, 'Top'))) {
+        setChild(c, 'Left', inch(len(c, 'Left') + dx));
+        setChild(c, 'Top', inch(len(c, 'Top') + dy));
+      }
+      setChild(g, 'Left', inch(x));
+      setChild(g, 'Width', inch(len(g, 'Width') + dx));
+      setChild(g, 'Top', inch(top));
+      setChild(g, 'Height', inch(Math.max(height - top, len(g, 'Height') + dy)));
+      const to = ownStyle(g);
+      removeChildren(to, ['LeftBorder']);
+      to.children.push(el('LeftBorder', ...childElements(line).map((c) => el(c.name, textOf(c)))));
+      if (d.name === 'Line') child(holder, 'ReportItems')!.children = child(holder, 'ReportItems')!.children.filter((c) => c !== d);
+      else {
+        const from = ownStyle(d);
+        removeChildren(from, ['LeftBorder', 'RightBorder']);
       }
     }
   }
