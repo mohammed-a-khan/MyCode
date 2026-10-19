@@ -379,6 +379,8 @@ describe('sections of a report made of many parts', () => {
     const hide = textOf(child(chart, 'Visibility/Hidden'));
     assert.match(hide, /CountRows/);
     assert.equal(textOf(child(heading, 'Style/BackgroundColor')), `=IIf(${hide.slice(1)}, "White", First(Fields!Plot_Head_fill.Value, "Theme"))`);
+    const holder = descendants(doc).filter((e) => e.name === 'Rectangle' && childElements(child(e, 'ReportItems') ?? e).includes(heading))[0]!;
+    assert.ok(Math.abs(Number(textOf(child(heading, 'Width')).replace('in', '')) - Number(textOf(child(holder, 'Width')).replace('in', ''))) < 0.001, `${textOf(child(heading, 'Width'))} ${textOf(child(holder, 'Width'))}`);
   });
 
   it('keeps a heading written as two text objects one over the other to its two lines', () => {
