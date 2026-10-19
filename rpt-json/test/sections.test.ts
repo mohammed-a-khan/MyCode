@@ -596,6 +596,22 @@ describe('spacing and edges in the template', () => {
     assert.equal(new Set(descendants(out).filter((e) => e.name === 'Group').map((e) => e.attributes.Name)).size, descendants(out).filter((e) => e.name === 'Group').length);
   });
 
+  it('keeps the two lines of a two-line heading together, one line high each', () => {
+    const cell = (name: string, v: string) => `<TablixCell><CellContents><Textbox Name="${name}"><CanGrow>true</CanGrow><Paragraphs><Paragraph><TextRuns><TextRun><Value>${v}</Value><Style><FontSize>8pt</FontSize><FontWeight>Bold</FontWeight></Style></TextRun></TextRuns><Style><TextAlign>Center</TextAlign></Style></Paragraph></Paragraphs><Style><PaddingTop>2pt</PaddingTop><PaddingBottom>2pt</PaddingBottom></Style></Textbox></CellContents></TablixCell>`;
+    const row = (h: number, cells: string[]) => `<TablixRow><Height>${h}in</Height><TablixCells>${cells.join('')}</TablixCells></TablixRow>`;
+    const rows = [row(0.17, [cell('U1', 'Current'), cell('U2', 'Current'), cell('U3', 'Effective Date')]), row(0.17, [cell('L1', 'Numerator'), cell('L2', 'Denominator'), cell('L3', 'Result')]),
+      row(0.17, [cell('V1', '=Fields!n.Value'), cell('V2', '=Fields!d.Value'), cell('V3', '=Fields!r.Value')])];
+    const table = `<Tablix Name="Lines"><TablixBody><TablixColumns>${'<TablixColumn><Width>0.85in</Width></TablixColumn>'.repeat(3)}</TablixColumns><TablixRows>${rows.join('')}</TablixRows></TablixBody><TablixColumnHierarchy><TablixMembers>${'<TablixMember />'.repeat(3)}</TablixMembers></TablixColumnHierarchy><TablixRowHierarchy><TablixMembers><TablixMember><KeepWithGroup>After</KeepWithGroup></TablixMember><TablixMember><KeepWithGroup>After</KeepWithGroup></TablixMember><TablixMember><Group Name="Lines_Rows" /></TablixMember></TablixMembers></TablixRowHierarchy><DataSetName>Rows</DataSetName><Top>0in</Top><Left>0in</Left><Height>0.51in</Height><Width>2.55in</Width></Tablix>`;
+    const out = parseXml(applyConventions(doc(table), 'Parts', styled).rdl);
+    const tablix = descendants(out).find((e) => e.name === 'Tablix')!;
+    const heads = childElements(child(tablix, 'TablixBody/TablixRows')!, 'TablixRow');
+    const upper = heads.find((r) => descendants(r).some((e) => e.name === 'Value' && textOf(e) === 'Effective Date'))!;
+    const lower = heads.find((r) => descendants(r).some((e) => e.name === 'Value' && textOf(e) === 'Numerator'))!;
+    assert.ok(num(upper, 'Height') < 0.3, textOf(child(upper, 'Height')));
+    for (const tb of descendants(upper).filter((e) => e.name === 'Textbox')) assert.equal(textOf(child(tb, 'Style/VerticalAlign')), 'Bottom', tb.attributes.Name);
+    for (const tb of descendants(lower).filter((e) => e.name === 'Textbox')) assert.equal(textOf(child(tb, 'Style/VerticalAlign')), 'Top', tb.attributes.Name);
+  });
+
   it('names a box of labels in a table cell after the field it shows, not after a label', () => {
     const tb = (name: string, v: string, top: number) => `<Textbox Name="${name}"><Paragraphs><Paragraph><TextRuns><TextRun><Value>${v}</Value></TextRun></TextRuns></Paragraph></Paragraphs><Top>${top}in</Top><Left>0in</Left><Height>0.2in</Height><Width>1.4in</Width></Textbox>`;
     const holder = (name: string, inner: string) => `<TablixCell><CellContents><Rectangle Name="${name}"><ReportItems>${inner}</ReportItems><Top>0in</Top><Left>0in</Left><Height>1in</Height><Width>1.5in</Width></Rectangle></CellContents></TablixCell>`;
@@ -604,7 +620,7 @@ describe('spacing and edges in the template', () => {
     const out = parseXml(applyConventions(doc(box('Frame', 0, 0, 3, 1, pair)), 'Parts', styled).rdl);
     const labels = holderOf(out, valued(out, 'Reached at:'));
     assert.match(labels.attributes.Name ?? '', /lead_label/, labels.attributes.Name);
-    assert.doesNotMatch(labels.attributes.Name ?? '', /Text/, labels.attributes.Name);
+    assert.ok(!/Text/.test(labels.attributes.Name ?? ''), labels.attributes.Name);
   });
 
   it('lists the items of each box in the order they print, numbered in that order', () => {
