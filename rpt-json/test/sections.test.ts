@@ -361,6 +361,26 @@ describe('sections of a report made of many parts', () => {
     assert.ok(!diagnoseRdl(out, true).some((f) => f.kind === 'overlap'), JSON.stringify(diagnoseRdl(out, true).filter((f) => f.kind === 'overlap')));
   });
 
+  it('paints a chart title band only while its chart is shown', () => {
+    const T = 'chart_rows';
+    const def = { ...empty, parameters: params, groups: [`${T}.label`], formulas: [{ kind: 'internal', name: 'Group #1 Order', index: 2, text: `if IsNull ({${T}.label}) then 2 else 2`, referencedFields: [`${T}.label`] }],
+      layout: [{ name: 'ReportHeaderArea1', sections: [{ name: 'RH1', height: 3200, objects: [
+        { kind: 'chart', name: 'Bars', ...box(0, 15, 4000, 3000), chart: { family: 0, graphType: 0, values: [`Sum of ${T}.amount`], onChangeOf: `${T}.label` } },
+        field('Heading', `${T}.label`, 30, 75, 3900, 225)] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 0, suppressed: true, objects: [] }] }] };
+    const main = { ...empty, parameters: params, page: { orientation: 'landscape', paperSize: 1 }, layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 0, suppressed: true, objects: [] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 0, suppressed: true, objects: [] }] },
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF1', height: 300, objects: [{ ...subreport(1, 180), ...box(180, 40, 3970, 210), border: { sides: [1, 1, 1, 1], width: 20 } }] }] }] };
+    const converted = convertToRdl(main as never, { connections: [], links: [], tables: [] } as never, { reportName: 'Parts', subreports: new Map([[2, sub(def, table('chart_rows_get', 'storedProcedure', ['label', 'amount']), 1)]] as [number, never][]), formulasInQuery: true, rulesAsText: true } as never);
+    const doc = parseXml(applyConventions(converted.rdl, 'Parts', styled).rdl);
+    const chart = descendants(doc).find((e) => e.name === 'Chart')!;
+    const heading = descendants(doc).find((e) => e.name === 'Textbox' && descendants(e).some((v) => v.name === 'Value' && /Fields!label/.test(textOf(v))))!;
+    const hide = textOf(child(chart, 'Visibility/Hidden'));
+    assert.match(hide, /CountRows/);
+    assert.equal(textOf(child(heading, 'Style/BackgroundColor')), `=IIf(${hide.slice(1)}, "White", First(Fields!Plot_Head_fill.Value, "Theme"))`);
+  });
+
   it('keeps a heading written as two text objects one over the other to its two lines', () => {
     const T = 'notes';
     const heads = [text('Upper', 'Expected Amount Owing', 2200, 40, 1665, 240), text('Lower', 'by the Following Date', 2200, 235, 1620, 240), text('Plain', 'Balance', 4000, 115, 1300, 240)];
@@ -574,6 +594,17 @@ describe('spacing and edges in the template', () => {
     assert.match(textOf(child(side, 'Style/LeftBorder/Style')), /Solid/, 'its right part sits in a box whose left side is the divider');
     assert.equal(descendants(side).filter((e) => e.name === 'Tablix').length, 2, 'with the list beside it');
     assert.equal(new Set(descendants(out).filter((e) => e.name === 'Group').map((e) => e.attributes.Name)).size, descendants(out).filter((e) => e.name === 'Group').length);
+  });
+
+  it('names a box of labels in a table cell after the field it shows, not after a label', () => {
+    const tb = (name: string, v: string, top: number) => `<Textbox Name="${name}"><Paragraphs><Paragraph><TextRuns><TextRun><Value>${v}</Value></TextRun></TextRuns></Paragraph></Paragraphs><Top>${top}in</Top><Left>0in</Left><Height>0.2in</Height><Width>1.4in</Width></Textbox>`;
+    const holder = (name: string, inner: string) => `<TablixCell><CellContents><Rectangle Name="${name}"><ReportItems>${inner}</ReportItems><Top>0in</Top><Left>0in</Left><Height>1in</Height><Width>1.5in</Width></Rectangle></CellContents></TablixCell>`;
+    const cells = holder('Text3', tb('Text3', 'Reached at:', 0.3) + tb('Lead', '=Fields!lead_label.Value', 0)) + holder('Values', tb('Who', '=Fields!lead_name.Value', 0) + tb('Where', '=Fields!lead_place.Value', 0.3));
+    const pair = `<Tablix Name="Pair"><TablixBody><TablixColumns>${[1.5, 1.5].map((w) => `<TablixColumn><Width>${w}in</Width></TablixColumn>`).join('')}</TablixColumns><TablixRows><TablixRow><Height>1in</Height><TablixCells>${cells}</TablixCells></TablixRow></TablixRows></TablixBody><TablixColumnHierarchy><TablixMembers><TablixMember /><TablixMember /></TablixMembers></TablixColumnHierarchy><TablixRowHierarchy><TablixMembers><TablixMember><Group Name="Pair_Rows" /></TablixMember></TablixMembers></TablixRowHierarchy><DataSetName>Rows</DataSetName><Top>0in</Top><Left>0in</Left><Height>1in</Height><Width>3in</Width></Tablix>`;
+    const out = parseXml(applyConventions(doc(box('Frame', 0, 0, 3, 1, pair)), 'Parts', styled).rdl);
+    const labels = holderOf(out, valued(out, 'Reached at:'));
+    assert.match(labels.attributes.Name ?? '', /lead_label/, labels.attributes.Name);
+    assert.doesNotMatch(labels.attributes.Name ?? '', /Text/, labels.attributes.Name);
   });
 
   it('lists the items of each box in the order they print, numbered in that order', () => {
