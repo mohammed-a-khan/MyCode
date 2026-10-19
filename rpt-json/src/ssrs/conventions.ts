@@ -4244,7 +4244,7 @@ function inPageOrder(report: XmlElement, body: XmlElement, S: string): (text: st
   }
   for (const holder of descendants(body).filter((e) => e.name === 'ReportItems')) {
     const placed = childElements(holder).filter((e) => ITEMS.has(e.name) && child(e, 'Top'));
-    placed.forEach((e, i) => setChild(e, 'ZIndex', String(placed.length - i)));
+    placed.forEach((e, i) => setChild(e, 'ZIndex', String(i)));
   }
   const outer = descendants(body).find((e) => e.name === 'Rectangle')?.attributes.Name ?? '';
   const stem = outer.startsWith(`${S}_`) || !/_[A-Za-z]+_?\d+$/.test(outer) ? S : outer.replace(/_[A-Za-z]+_?\d+$/, '');
