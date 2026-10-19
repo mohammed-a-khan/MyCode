@@ -42,6 +42,7 @@
  * its column shows, else its heading), {n} a number counting from 1. Names are made unique by adding _2, _3, ...
  */
 
+import { createHash } from 'node:crypto';
 import { child, childElements, descendants, el, parseXml, textOf, toXml, type XmlElement } from './xml.ts';
 import { alignToRules } from './align.ts';
 import { alternates } from './diagnose.ts';
@@ -1662,7 +1663,10 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       let name: string | undefined;
       for (const [i, row] of rows.entries()) {
         if (kinds[i] !== 'detail') continue;
-        const tb = textboxIn(cellsOf(row)[c]);
+        const held = cellsOf(row)[c] ? cellItem(cellsOf(row)[c]!) : undefined;
+        const tb = held?.name === 'Rectangle'
+          ? descendants(held).filter((e) => e.name === 'Textbox' && !isBlank(e)).sort((a, b) => len(a, 'Top') - len(b, 'Top') || len(a, 'Left') - len(b, 'Left')).find((e) => fieldOf(e)) ?? textboxIn(cellsOf(row)[c])
+          : textboxIn(cellsOf(row)[c]);
         if (!tb || isBlank(tb)) continue;
         name = fieldOf(tb) ?? ownWord(tb);
         if (fieldOf(tb)) fromField[c] = true;
@@ -2241,8 +2245,16 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
   }
 
   // ----- Looks from the style dataset.
-  if (conv.style?.roles.chartTitle) for (const tb of titlesOverCharts(report)) roles.set(tb, 'chartTitle');
+  const chartTitles = conv.style?.roles.chartTitle ? titlesOverCharts(report) : new Map<XmlElement, XmlElement>();
+  for (const tb of chartTitles.keys()) roles.set(tb, 'chartTitle');
   if (conv.style) applyStyleRoles(report, conv.style, roles, tableCells, unbanded, bandRows, review, dataSources[0]?.attributes.Name ?? conv.dataSource?.name ?? '');
+  for (const [tb, chart] of chartTitles) {
+    const hide = textOf(child(chart, 'Visibility/Hidden'));
+    const fill = child(ownStyle(tb), 'BackgroundColor');
+    const now = textOf(fill);
+    if (!fill || !hide.startsWith('=') || child(tb, 'Visibility/Hidden') || !now || /^(transparent|white|#ffffff|#00ffffff)$/i.test(now)) continue;
+    setChild(ownStyle(tb), 'BackgroundColor', `=IIf(${hide.slice(1)}, "White", ${now.startsWith('=') ? now.slice(1) : `"${now}"`})`);
+  }
   const charts = descendants(report).filter((e) => e.name === 'Chart').length;
   if (conv.style && charts && (!conv.style.roles.chartTitle || !conv.style.chart)) {
     const missing = [!conv.style.roles.chartTitle ? 'style.roles.chartTitle' : '', !conv.style.chart ? 'style.chart' : ''].filter(Boolean).join(' and ');
@@ -2850,10 +2862,14 @@ function withFunctions(root: XmlElement, functions: string[]): XmlElement {
     };
     need(text);
     if (!needed.length || !command) continue;
-    const setup = needed.flatMap((f) => [
-      `IF OBJECT_ID(${quoted(f.name)}) IS NULL BEGIN TRY EXEC (${quoted(f.text)}); END TRY BEGIN CATCH END CATCH;`,
-      `EXEC (${quoted(f.text.replace(/CREATE\s+FUNCTION/i, 'ALTER FUNCTION'))});`,
-    ]);
+    const setup = needed.flatMap((f) => {
+      const mark = `-- ${createHash('sha1').update(f.text).digest('hex').slice(0, 16)}`;
+      const made = `${mark}\n${f.text}`;
+      return [
+        `IF OBJECT_ID(${quoted(f.name)}) IS NULL BEGIN TRY EXEC (${quoted(made)}); END TRY BEGIN CATCH END CATCH;`,
+        `IF CHARINDEX(${quoted(mark)}, ISNULL(OBJECT_DEFINITION(OBJECT_ID(${quoted(f.name)})), ${quoted(mark)})) = 0 BEGIN TRY EXEC (${quoted(made.replace(/CREATE\s+FUNCTION/i, 'ALTER FUNCTION'))}); END TRY BEGIN CATCH END CATCH;`,
+      ];
+    });
     command.children = [[...setup, text].join('\n')];
   }
   return copy;
@@ -4857,8 +4873,8 @@ function insertBefore(parent: XmlElement, item: XmlElement, before: string[]): v
   else parent.children.splice(i, 0, item);
 }
 
-function titlesOverCharts(report: XmlElement): XmlElement[] {
-  const found: XmlElement[] = [];
+function titlesOverCharts(report: XmlElement): Map<XmlElement, XmlElement> {
+  const found = new Map<XmlElement, XmlElement>();
   for (const items of descendants(report).filter((e) => e.name === 'ReportItems')) {
     for (const chart of childElements(items, 'Chart')) {
       const top = len(chart, 'Top');
@@ -4868,7 +4884,7 @@ function titlesOverCharts(report: XmlElement): XmlElement[] {
       for (const tb of childElements(items, 'Textbox')) {
         const t = len(tb, 'Top');
         const l = len(tb, 'Left');
-        if (t <= top + height / 5 && t + len(tb, 'Height') >= top - 0.25 && l < right && l + len(tb, 'Width') > left && !found.includes(tb)) found.push(tb);
+        if (t <= top + height / 5 && t + len(tb, 'Height') >= top - 0.25 && l < right && l + len(tb, 'Width') > left && !found.has(tb)) found.set(tb, chart);
       }
     }
   }

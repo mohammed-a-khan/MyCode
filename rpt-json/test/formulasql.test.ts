@@ -115,7 +115,7 @@ describe('formulas in the query of a team template', () => {
     const fn = 'CREATE FUNCTION dbo.[Q_label](@s nvarchar(max))\nRETURNS nvarchar(max)\nAS\nBEGIN\n  RETURN @s\nEND';
     const called = rdl.replace(/AS \[F_Label\]/, 'AS [F_Label], dbo.[Q_label](N\'x\') AS [F_Other]');
     const own = applyConventions(called, 'Q', conv, undefined, { sqlFunctions: [fn] }).rdl;
-    assert.match(own, /<CommandText>IF OBJECT_ID\(N'dbo\.\[Q_label\]'\) IS NULL BEGIN TRY EXEC \(N'CREATE FUNCTION dbo\.\[Q_label\][\s\S]*?END TRY BEGIN CATCH END CATCH;\s*EXEC \(N'ALTER FUNCTION dbo\.\[Q_label\][\s\S]*?'\);\s*SELECT/);
+    assert.match(own, /<CommandText>IF OBJECT_ID\(N'dbo\.\[Q_label\]'\) IS NULL BEGIN TRY EXEC \(N'-- [0-9a-f]{16}\nCREATE FUNCTION dbo\.\[Q_label\][\s\S]*?END TRY BEGIN CATCH END CATCH;\s*IF CHARINDEX\(N'-- [0-9a-f]{16}', ISNULL\(OBJECT_DEFINITION\(OBJECT_ID\(N'dbo\.\[Q_label\]'\)\), N'-- [0-9a-f]{16}'\)\) = 0 BEGIN TRY EXEC \(N'-- [0-9a-f]{16}\nALTER FUNCTION dbo\.\[Q_label\][\s\S]*?'\); END TRY BEGIN CATCH END CATCH;\s*SELECT/);
   });
 });
 
