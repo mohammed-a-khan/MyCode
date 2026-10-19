@@ -2094,6 +2094,11 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     // does, rather than moving whole to the next page and leaving the rest of this one blank.
     for (const box of descendants(child(body, 'ReportItems') ?? el('x')).filter((e) => e.name === 'Rectangle' && child(e, 'Top')
       && descendants(e).some((d) => d.name === 'Tablix'))) removeChildren(box, ['KeepTogether']);
+    for (const box of descendants(child(body, 'ReportItems') ?? el('x')).filter((e) => e.name === 'Rectangle' && child(e, 'Top') && !child(e, 'KeepTogether')
+      && descendants(e).some((d) => d.name === 'Chart') && !descendants(e).some((d) => d.name === 'Tablix'))) {
+      const items = child(box, 'ReportItems');
+      box.children.splice(items ? box.children.indexOf(items) + 1 : 0, 0, el('KeepTogether', 'true'));
+    }
     // (Then nothing is left over anything else at its full size: what lies lower moves below.)
     const bottom = unpile(child(body, 'ReportItems'));
     if (bottom > len(body, 'Height')) setChild(body, 'Height', inch(bottom));
@@ -2283,6 +2288,21 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
   for (const tb of chartTitles.keys()) roles.set(tb, 'chartTitle');
   if (conv.style) applyStyleRoles(report, conv.style, roles, tableCells, unbanded, bandRows, review, dataSources[0]?.attributes.Name ?? conv.dataSource?.name ?? '');
   for (const tablix of descendants(report).filter((e) => e.name === 'Tablix')) headingLinesTogether(tablix);
+  for (const [tb, chart] of chartTitles) {
+    const items = parentOf(report, tb);
+    const holder = parentOf(report, items);
+    if (roles.get(tb) !== 'chartTitle' || holder.name !== 'Rectangle' || !child(holder, 'Width') || childElements(items, 'Chart').length !== 1 || !childElements(items, 'Chart').includes(chart)) continue;
+    const t = len(tb, 'Top');
+    const b = t + len(tb, 'Height');
+    const l = len(tb, 'Left');
+    const r = l + len(tb, 'Width');
+    const beside = childElements(items).filter((e) => e !== tb && e !== chart && child(e, 'Top') && len(e, 'Top') < b - 0.001 && len(e, 'Top') + len(e, 'Height') > t + 0.001);
+    const from = Math.max(0, ...beside.map((e) => len(e, 'Left') + len(e, 'Width')).filter((x) => x <= l + 0.001));
+    const to = Math.min(len(holder, 'Width'), ...beside.map((e) => len(e, 'Left')).filter((x) => x >= r - 0.001));
+    if (beside.some((e) => len(e, 'Left') < r - 0.001 && len(e, 'Left') + len(e, 'Width') > l + 0.001) || to - from <= r - l) continue;
+    setChild(tb, 'Left', inch(from));
+    setChild(tb, 'Width', inch(to - from));
+  }
   for (const [tb, chart] of chartTitles) {
     const hide = textOf(child(chart, 'Visibility/Hidden'));
     const fill = child(ownStyle(tb), 'BackgroundColor');
@@ -2651,7 +2671,7 @@ function fitTablix(tablix: XmlElement): number {
       }
       // (Text in the house's fonts, worked out when the report runs: the designer draws it at its default size, and
       // a row shorter than that cuts it off there.)
-      if (item.name === 'Textbox' && designText && !isBlank(item)) need = Math.max(need, textHeight(item, true, fixedText(item) && kinds[r] !== 'heading' ? cellWidth : undefined)!);
+      if (item.name === 'Textbox' && designText && !isBlank(item) && kinds[r] !== 'detail') need = Math.max(need, textHeight(item, true, fixedText(item) && kinds[r] !== 'heading' ? cellWidth : undefined)!);
     }
     if (need > height + 0.001) {
       setChild(row, 'Height', inch(need));
