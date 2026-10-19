@@ -128,30 +128,32 @@ export function standaloneParts(models: ReportModel[], baseName: string, options
   const areas = classifyAreas(main.layout);
   const levels = [...new Set([...areas.groupHeaders.keys(), ...areas.groupFooters.keys()])].sort((a, b) => a - b);
   const sections = [
-    ...areas.reportHeader, ...areas.pageHeader, ...levels.flatMap((l) => areas.groupHeaders.get(l) ?? []), ...areas.detail,
-    ...[...levels].reverse().flatMap((l) => areas.groupFooters.get(l) ?? []), ...areas.reportFooter, ...areas.pageFooter,
+    ...areas.reportHeader, ...levels.flatMap((l) => areas.groupHeaders.get(l) ?? []), ...areas.detail,
+    ...[...levels].reverse().flatMap((l) => areas.groupFooters.get(l) ?? []), ...areas.reportFooter,
   ].filter((section) => !section.suppressed || section.conditions?.suppress);
-  const order: number[] = [];
+  const named = (t: string) => /[A-Za-z]/.test(t) && !/^report$/i.test(t) && !/^[a-z0-9_]+$/.test(t) && !/^\{[^}]*\}$/.test(t) && !/^(there (is|are|has been|have been) no|no) /i.test(t);
+  type ReportObject = NonNullable<ReportModel['definition']>['layout'][number]['sections'][number]['objects'][number];
+  const fixed = (name: string) => /^\s*\(?\s*"([^"]*)"\s*\)?\s*;?\s*$/.exec(main.formulas.find((f) => `@${f.name}`.toLowerCase() === name.toLowerCase())?.text ?? '')?.[1] ?? '';
+  const wording = (o: ReportObject) => (o.kind === 'field' && o.field?.startsWith('@') ? fixed(o.field) : o.runs?.length ? o.runs.map((r) => ('field' in r ? '' : r.text)).join('') : o.text ?? '').replace(/\s+/g, ' ').trim();
+  const order: { index: number; above: string }[] = [];
   for (const section of sections) {
     const placed = section.objects.filter((o) => o.kind === 'subreport' && o.subreport && (!o.suppressed || o.conditions?.suppress))
       .sort((a, b) => (a.position?.y ?? 0) - (b.position?.y ?? 0) || (a.position?.x ?? 0) - (b.position?.x ?? 0));
-    for (const o of placed) if (!order.includes(o.subreport!.index)) order.push(o.subreport!.index);
-  }
-  const width = String(order.length).length < 2 ? 2 : String(order.length).length;
-  const used = new Set<string>();
-  return order.flatMap((index, k) => {
-    const model = models.find((m) => m.storage === `Subdocument ${index}`);
-    if (!model) return [];
-    const number = String(k + 1).padStart(width, '0');
-    const title = extractHeaders([model]).find((h) => (h.kind === 'chart title' || h.kind === 'text') && /[A-Za-z]/.test(h.text))?.text ?? '';
-    const words = safeFileName(title).split('_').filter(Boolean).slice(0, 6).join('_');
-    let reportName = words ? `${base}_${number}_${words}` : `${base}_${number}`;
-    for (let n = 2; used.has(reportName.toLowerCase()); n++) reportName = `${base}_${number}_${n}`;
-    used.add(reportName.toLowerCase());
-    if (!model.definition) {
-      return [{ fileName: `${reportName}.rdl`, storage: model.storage, rdl: '', review: [{ item: 'Report', message: `could not be decoded: ${(model.errors ?? []).join('; ')}` }] }];
+    for (const o of placed) {
+      if (order.some((e) => e.index === o.subreport!.index)) continue;
+      const x = o.position?.x ?? 0;
+      const y = o.position?.y ?? 0;
+      const right = x + (o.size?.width ?? 0);
+      const above = section.objects
+        .filter((t) => (t.kind === 'text' || t.kind === 'field') && !t.suppressed && named(wording(t)))
+        .map((t) => ({ t, foot: (t.position?.y ?? 0) + (t.size?.height ?? 0) }))
+        .filter(({ t, foot }) => foot <= y + 72 && foot >= y - 864 && Math.min(right, (t.position?.x ?? 0) + (t.size?.width ?? 0)) - Math.max(x, t.position?.x ?? 0) > 0)
+        .sort((a, b) => b.foot - a.foot)[0];
+      order.push({ index: o.subreport!.index, above: above ? wording(above.t) : '' });
     }
-    const definition = { ...model.definition, page: model.definition.page ?? main.page };
+  }
+  const convert = (model: ReportModel, reportName: string, number: string) => {
+    const definition = { ...model.definition!, page: model.definition!.page ?? main.page };
     const { rdl, review, sqlFunctions } = convertToRdl(definition, model.dataSource, {
       reportName,
       connectionString: options.connectionString,
@@ -166,7 +168,40 @@ export function standaloneParts(models: ReportModel[], baseName: string, options
       images: imagesOf?.(model.storage),
     });
     const { out, files } = finish(rdl, review, reportName, sqlFunctions, options, `${prefix ?? base}_${number}`);
-    return [{ fileName: `${reportName}.rdl`, storage: model.storage, rdl: out, review, files }];
+    return { out, review, files };
+  };
+  const shape = (rdl: string) => rdl
+    .replace(/Subdocument_\d+/g, 'Subdocument')
+    .replace(/<FilterValue>[^<]*<\/FilterValue>/g, '<FilterValue />')
+    .replace(/<CommandText>[^<]*<\/CommandText>/g, (q) => q.replace(/'(?:[^']|'')*'/g, "''").replace(/\b\d+(?:\.\d+)?\b/g, '0'));
+  const kept: { index: number; above: string; model: ReportModel; also: string[] }[] = [];
+  const seen = new Map<string, (typeof kept)[number]>();
+  for (const { index, above } of order) {
+    const model = models.find((m) => m.storage === `Subdocument ${index}`);
+    if (!model) continue;
+    if (!model.definition) { kept.push({ index, above, model, also: [] }); continue; }
+    const key = shape(convert(model, `${base}_00`, '00').out);
+    const first = seen.get(key);
+    if (first) { first.also.push(model.storage); continue; }
+    const entry = { index, above, model, also: [] as string[] };
+    seen.set(key, entry);
+    kept.push(entry);
+  }
+  const width = Math.max(2, String(kept.length).length);
+  const used = new Set<string>();
+  return kept.map(({ above, model, also }, k) => {
+    const number = String(k + 1).padStart(width, '0');
+    const inner = model.definition ? extractHeaders([model]).find((h) => (h.kind === 'chart title' || h.kind === 'text') && named(h.text.replace(/\s+/g, ' ').trim()))?.text ?? '' : '';
+    const words = above || inner ? safeFileName(above || inner).split('_').filter(Boolean).slice(0, 6).join('_') : '';
+    let reportName = words ? `${base}_${number}_${words}` : `${base}_${number}`;
+    for (let n = 2; used.has(reportName.toLowerCase()); n++) reportName = `${base}_${number}_${words ? `${words}_` : ''}${n}`;
+    used.add(reportName.toLowerCase());
+    if (!model.definition) {
+      return { fileName: `${reportName}.rdl`, storage: model.storage, rdl: '', review: [{ item: 'Report', message: `could not be decoded: ${(model.errors ?? []).join('; ')}` }] };
+    }
+    const { out, review, files } = convert(model, reportName, number);
+    if (also.length) review.unshift({ item: 'Report', message: `stands for ${also.length} more part(s) of the same design that only pick other rows (${also.join(', ')}); its own pick is kept` });
+    return { fileName: `${reportName}.rdl`, storage: model.storage, rdl: out, review, files };
   });
 }
 

@@ -165,6 +165,39 @@ describe('sections of a report made of many parts', () => {
     assert.equal(new Set(names).size, names.length, names.filter((n, i) => names.indexOf(n) !== i).join(', '));
   });
 
+  it('names a label printed beside the values of a record as a text, never as a value', () => {
+    const fields = ['contact', 'phone', 'due', 'owner_key'];
+    const part = { ...empty, parameters: params, selectionFormulas: { record: '{head.owner_key} = {?owner_key}' }, layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 0, suppressed: true, objects: [] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 700, objects: [
+        text('L1', 'Contact:', 0, 0, 1500, 200), field('V1', 'head.contact', 1600, 0, 2000, 200),
+        text('L2', 'Phone:', 0, 250, 1500, 200), field('V2', 'head.phone', 1600, 250, 2000, 200),
+        text('L3', 'Due:', 4000, 0, 1500, 200), field('V3', 'head.due', 5600, 0, 1500, 200)] }] }] };
+    const rdl = build([sub(part, table('head', 'table', fields), 1)], [[subreport(1)]]);
+    const values = descendants(parseXml(rdl)).filter((e) => e.name === 'Textbox' && /_ColVal$/.test(e.attributes.Name ?? ''));
+    assert.ok(values.length >= 3);
+    for (const v of values) assert.match(textOf(descendants(v).find((e) => e.name === 'Value')), /!\w+\./, v.attributes.Name);
+  });
+
+  it('writes one part for a design placed many times, none for the page bands, each named after its heading', () => {
+    const fields = ['name', 'owner_key'];
+    const main = { ...empty, parameters: params, page: { orientation: 'landscape', paperSize: 1 }, layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 0, suppressed: true, objects: [] }] },
+      { name: 'PageHeaderArea1', sections: [{ name: 'PH', height: 400, objects: [subreport(3)] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 0, suppressed: true, objects: [] }] },
+      { name: 'ReportFooterArea1', sections: [
+        { name: 'RF1', height: 2000, objects: [text('Band', 'Band heading', 0, 100, 5000, 250), { ...subreport(1), position: { x: 0, y: 400 } }, { ...subreport(4), position: { x: 0, y: 1200 } }, field('Band2', '@Band2', 0, 1450, 5000, 200), { ...subreport(5), position: { x: 0, y: 1700 } }] }] }], formulas: [{ kind: 'formula', name: 'Band2', index: 1, text: '"Second band"', referencedFields: [] }] };
+    const picked = (n: number) => ({ ...listing('first'), selectionFormulas: { record: `{first.owner_key} = ${n}` } });
+    const models = [{ storage: '', definition: main },
+      { storage: 'Subdocument 2', definition: picked(1), dataSource: table('first', 'table', fields) },
+      { storage: 'Subdocument 4', definition: listing('second'), dataSource: table('second', 'table', fields) },
+      { storage: 'Subdocument 5', definition: picked(2), dataSource: table('first', 'table', fields) },
+      { storage: 'Subdocument 6', definition: listing('third'), dataSource: table('third', 'table', fields) }];
+    const parts = standaloneParts(models as never, 'Parts', { formulasInQuery: true, rulesAsText: true, reshape: (rdl, name, extra) => applyConventions(rdl, name, conventions, extra?.prefix, { sqlFunctions: extra?.sqlFunctions }) });
+    assert.deepEqual(parts.map((p) => p.fileName), ['Parts_01_Band_heading.rdl', 'Parts_02_Second_band.rdl']);
+    assert.match(parts[0]!.review.map((n) => n.message).join(' '), /1 more part/);
+  });
+
   it('gives a bold date at the far side of the body the room up to the page edge', () => {
     const box = (name: string, value: string, left: number, width: number, format = '') => `<Textbox Name="${name}"><CanGrow>false</CanGrow><Paragraphs><Paragraph><TextRuns><TextRun><Value>${value}</Value><Style><FontSize>7pt</FontSize><FontWeight>Bold</FontWeight>${format ? `<Format>${format}</Format>` : ''}</Style></TextRun></TextRuns></Paragraph></Paragraphs><Top>0.4in</Top><Left>${left}in</Left><Height>0.19in</Height><Width>${width}in</Width><Style><PaddingLeft>0pt</PaddingLeft><PaddingRight>0pt</PaddingRight></Style></Textbox>`;
     const rdl = `<Report xmlns="http://schemas.microsoft.com/sqlserver/reporting/2016/01/reportdefinition"><ReportSections><ReportSection><Body><ReportItems>${box('Owner', '=Parameters!who.Value', 0, 4.4)}${box('Label', 'As at:', 9.3, 0.35)}${box('Stamp', '=Parameters!run_date.Value', 9.734, 0.52, "MM'/'dd'/'yyyy")}</ReportItems><Height>0.6in</Height></Body><Width>10.6in</Width><Page /></ReportSection></ReportSections></Report>`;
@@ -358,7 +391,9 @@ describe('sections of a report made of many parts', () => {
     const shownTogether = frames.filter((e) => /<> 1/.test(textOf(child(e, 'Visibility/Hidden')))).sort((a, b) => at(a, 'Top') - at(b, 'Top'));
     assert.equal(shownTogether.length, 2);
     assert.ok(at(shownTogether[1]!, 'Top') >= at(shownTogether[0]!, 'Top') + at(shownTogether[0]!, 'Height') - 0.001, 'the second sits under the first');
-    assert.ok(at(shownTogether[1]!, 'Top') < 2, 'and is not pushed under the frame shown otherwise');
+    const otherwise = frames.find((e) => !shownTogether.includes(e))!;
+    assert.ok(at(shownTogether[1]!, 'Top') - at(shownTogether[0]!, 'Top') - at(shownTogether[0]!, 'Height') < 0.3, 'and stays right under it');
+    assert.ok(at(shownTogether[0]!, 'Top') >= at(otherwise, 'Top') + at(otherwise, 'Height') - 0.001 || at(otherwise, 'Top') >= at(shownTogether[1]!, 'Top') + at(shownTogether[1]!, 'Height') - 0.001, 'the frame shown otherwise drawn clear of them');
   });
 
   it('settles the notes about a page header it leaves out', () => {
@@ -504,5 +539,40 @@ describe('spacing and edges in the template', () => {
     const b = holderOf(out, valued(out, 'Lower text'));
     assert.equal(textOf(child(b, 'Left')), textOf(child(a, 'Left')));
     assert.equal(textOf(child(b, 'Width')), textOf(child(a, 'Width')));
+  });
+
+  it('draws boxes shown one at a time one under another in a box of their own, what lay under them moving down', () => {
+    const hide = (n: number) => `<Visibility><Hidden>=Parameters!pick.Value = ${n}</Hidden></Visibility>`;
+    const one = box('One', 2, 0, 4, 2, text('A', 'First choice', 0.1, 0.1, 2, 0.2), '<Border><Style>Solid</Style></Border>').replace('</ReportItems>', `</ReportItems>${hide(1)}`);
+    const two = box('Two', 2, 0, 4, 1.5, text('B', 'Second choice', 0.1, 0.1, 2, 0.2), '<Border><Style>Solid</Style></Border>').replace('</ReportItems>', `</ReportItems>${hide(2)}`);
+    const side = box('Side', 0, 0, 1.9, 2, text('C', 'Beside', 0.1, 0.1, 1.5, 0.2), '<Border><Style>Solid</Style></Border>');
+    const under = box('Under', 0, 2.1, 6, 0.5, text('D', 'Below', 0.1, 0.1, 2, 0.2), '<Border><Style>Solid</Style></Border>');
+    const out = parseXml(applyConventions(doc(box('Area', 0, 0, 6.2, 2.7, one + two + side + under), 3), 'Parts', styled).rdl);
+    const a = holderOf(out, valued(out, 'First choice'));
+    const b = holderOf(out, valued(out, 'Second choice'));
+    const set = descendants(out).find((e) => e.name === 'Rectangle' && childElements(child(e, 'ReportItems') ?? e).includes(a))!;
+    assert.ok(childElements(child(set, 'ReportItems')!).includes(b));
+    assert.ok(Math.abs(num(b, 'Top') - num(a, 'Top') - num(a, 'Height')) < 0.002, `${textOf(child(a, 'Height'))} ${textOf(child(b, 'Top'))}`);
+    assert.ok(!child(set, 'Visibility'));
+    const low = holderOf(out, valued(out, 'Below'));
+    assert.ok(num(low, 'Top') >= num(set, 'Top') + num(set, 'Height') - 0.001, `${textOf(child(low, 'Top'))} ${textOf(child(set, 'Height'))}`);
+    assert.ok(Math.abs(num(holderOf(out, valued(out, 'Beside')), 'Top') - num(set, 'Top')) < 0.002);
+  });
+
+  it('runs dividers down to the frame\'s foot, the one beside a growing table drawn as that table\'s own side', () => {
+    const title = text('Heading', 'Heading', 0, 0, 10, 0.233, '<BottomBorder><Style>Solid</Style></BottomBorder>');
+    const rule = '<Line Name="Upright"><Top>0in</Top><Left>3in</Left><Height>1.2in</Height><Width>0in</Width><Style><Border><Style>Solid</Style></Border></Style></Line>';
+    const parted = box('Parted', 0, 0, 6, 1.5, text('Note', 'Note', 0, 0, 2, 0.2) + text('Other', 'Other', 3.2, 0, 2, 0.2), '<Border><Style>None</Style></Border><RightBorder><Style>Solid</Style></RightBorder>');
+    const grown = box('Grown', 6.01, 0.014, 3.9, 0.6, grid('Listed', [2, 1.5]));
+    const out = parseXml(applyConventions(doc(box('Frame', 0, 0, 10.4, 1.733, title + box('Inner', 0, 0.233, 10, 1.5, rule + parted + grown), '<Border><Style>Solid</Style></Border>')), 'Parts', styled).rdl);
+    const inner = holderOf(out, valued(out, 'Note'));
+    const holder = descendants(out).filter((e) => e.name === 'Rectangle' && childElements(child(e, 'ReportItems') ?? e).includes(inner))[0] ?? inner;
+    const line = descendants(out).find((e) => e.name === 'Line' && num(e, 'Height') > 0.5)!;
+    assert.ok(Math.abs(num(line, 'Top') + num(line, 'Height') - num(holder, 'Height')) < 0.002, `${textOf(child(line, 'Height'))} ${textOf(child(holder, 'Height'))}`);
+    const table = descendants(out).find((e) => e.name === 'Tablix')!;
+    const side = descendants(out).filter((e) => e.name === 'Rectangle' && descendants(e).includes(table)).pop()!;
+    assert.match(textOf(child(side, 'Style/LeftBorder/Style')), /Solid/);
+    assert.ok(Math.abs(num(side, 'Top') + num(side, 'Height') - num(holder, 'Height')) < 0.002, `${textOf(child(side, 'Height'))}`);
+    assert.ok(!descendants(out).some((e) => e.name === 'Rectangle' && /Solid/.test(textOf(child(e, 'Style/RightBorder/Style'))) && descendants(e).includes(valued(out, 'Note'))));
   });
 });
