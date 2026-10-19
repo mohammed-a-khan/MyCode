@@ -446,6 +446,7 @@ class RdlBuilder {
   private readonly formulasInReport: string[] = [];
   /** T-SQL functions the query calls, by what they work out. */
   private readonly sqlFunctions = new Map<string, { name: string; text: string }>();
+  private readonly axisScales: { names: string[]; lo: string; hi: string }[] = [];
   private readonly sqlFunctionNames = new NameSet();
   /** The formula being worked out in SQL (to name a function it needs). */
   private sqlFormulaName = '';
@@ -858,46 +859,12 @@ class RdlBuilder {
   private scaleColumns(chartName: string, values: string[]): string[] {
     const extreme = (fn: 'MIN' | 'MAX') => values.map((v) => `CAST(ISNULL(${fn}(${v}) OVER (), 0) AS float)`)
       .reduce((acc, e) => (acc ? `CASE WHEN ${e} ${fn === 'MIN' ? '<' : '>'} ${acc} THEN ${e} ELSE ${acc} END` : e), '');
-    const scale = this.addSqlFunction('chart:scale', 'ChartScale', (name) => [
-      `-- A chart's value axis as Crystal scales it, for values from @lo to @hi: its start (@part 0), end (1) or step (2).`,
-      '-- The step is the first of 1, 2, 4 or 5 times a power of ten that covers the values in eight steps or fewer.',
-      `CREATE FUNCTION ${name}(@lo float, @hi float, @part int)`,
-      'RETURNS float',
-      'AS',
-      'BEGIN',
-      '  DECLARE @swap float, @power int, @k int, @step float, @bottom float, @top float;',
-      '  IF @hi < @lo',
-      '  BEGIN',
-      '    SET @swap = @lo;',
-      '    SET @lo = @hi;',
-      '    SET @hi = @swap;',
-      '  END;',
-      '  IF @hi - @lo < 1E-12 SET @hi = @lo + CASE WHEN @lo = 0 THEN 1 ELSE ABS(@lo) / 10 END;',
-      '  SET @power = FLOOR(LOG10((@hi - @lo) / 8)) - 1;',
-      '  WHILE 1 = 1',
-      '  BEGIN',
-      '    SET @k = 1;',
-      '    WHILE @k <= 4',
-      '    BEGIN',
-      '      SET @step = CHOOSE(@k, 1, 2, 4, 5) * POWER(CAST(10 AS float), @power);',
-      '      SET @bottom = FLOOR(@lo / @step + 1E-9) * @step;',
-      '      SET @top = CEILING(@hi / @step - 1E-9) * @step;',
-      '      IF (@top - @bottom) / @step <= 8.000001 RETURN CASE @part WHEN 0 THEN @bottom WHEN 1 THEN @top ELSE @step END;',
-      '      SET @k = @k + 1;',
-      '    END;',
-      '    SET @power = @power + 1;',
-      '  END;',
-      '  RETURN NULL;',
-      'END',
-    ].join('\n'));
-    return ['From', 'To', 'Step'].map((part, i) => {
-      const name = this.fieldNames.make(`${chartName}_Axis${part}`);
-      this.queryFormulas.set(`chart:${name}`, {
-        name, sql: `${scale}(${extreme('MIN')}, ${extreme('MAX')}, ${i})`, type: 'number', text: '', formula: chartName,
-        comment: `chart ${chartName}: its value axis, ${['from', 'to', 'step'][i]} (as Crystal scales it over the values)`,
-      });
-      return name;
-    });
+    const names = ['From', 'To', 'Step'].map((part) => this.fieldNames.make(`${chartName}_Axis${part}`));
+    const bounds = ['Lo', 'Hi'].map((part) => this.fieldNames.make(`${chartName}_Axis${part}`));
+    this.queryFormulas.set(`chart:${bounds[0]}`, { name: bounds[0]!, sql: extreme('MIN'), type: 'number', text: '', formula: chartName, comment: `chart ${chartName}: its smallest value` });
+    this.queryFormulas.set(`chart:${bounds[1]}`, { name: bounds[1]!, sql: extreme('MAX'), type: 'number', text: '', formula: chartName, comment: `chart ${chartName}: its largest value` });
+    this.axisScales.push({ names, lo: bounds[0]!, hi: bounds[1]! });
+    return names;
   }
 
   /** Each bar's place among a chart's categories, in its order (a column of the query); its name. */
@@ -3526,6 +3493,22 @@ class RdlBuilder {
       text = `SELECT\n${select},\n  ${others.operation}(${column}) OVER (PARTITION BY ${partition}) AS ${this.quote(others.total)}\n${from.join('\n')}${where ? `\nWHERE ${where.sql}` : ''}`;
       text = `SELECT q.*,\n  DENSE_RANK() OVER (${outerPartition}ORDER BY q.${this.quote(others.total)} ${others.descending ? 'DESC' : 'ASC'}, q.${this.quote(others.group.name)}) AS ${this.quote(others.rank)}\nFROM (\n${text}\n) AS q`;
     }
+    for (const scale of this.axisScales) {
+      const lo = `q.${this.quote(scale.lo)}`;
+      const hi = `CASE WHEN q.${this.quote(scale.hi)} - ${lo} < 1E-12 THEN ${lo} + CASE WHEN ${lo} = 0 THEN 1 ELSE ABS(${lo}) / 10 END ELSE q.${this.quote(scale.hi)} END`;
+      const alias = `a${this.axisScales.indexOf(scale) + 1}`;
+      text = [
+        `SELECT q.*, ${scale.names.map((n, i) => `${alias}.${['[From]', '[To]', '[Step]'][i]} AS ${this.quote(n)}`).join(', ')}`,
+        `FROM (\n${text}\n) AS q`,
+        'CROSS APPLY (',
+        '  SELECT TOP 1 FLOOR(r.lo / s.v + 1E-9) * s.v AS [From], CEILING(r.hi / s.v - 1E-9) * s.v AS [To], s.v AS [Step]',
+        `  FROM (SELECT ${lo} AS lo, ${hi} AS hi) AS r`,
+        '  CROSS APPLY (SELECT m.k * POWER(CAST(10 AS float), FLOOR(LOG10((r.hi - r.lo) / 8)) - 1 + p.n) AS v FROM (VALUES (1), (2), (4), (5)) AS m(k) CROSS JOIN (VALUES (0), (1), (2), (3)) AS p(n)) AS s',
+        '  WHERE CEILING(r.hi / s.v - 1E-9) - FLOOR(r.lo / s.v + 1E-9) <= 8.000001',
+        '  ORDER BY s.v',
+        `) AS ${alias}`,
+      ].join('\n');
+    }
     return {
       text,
       parameters: where?.parameters ?? [],
@@ -3874,6 +3857,7 @@ class RdlBuilder {
           ...datasetFields.map((f) => el('Field', { Name: f.name }, el('rd:TypeName', TYPE_NAMES[f.type] ?? 'System.String'), el('DataField', query.fieldsFromAll ? f.column : f.name))),
           ...[...this.sqlExpressions.values()].map((e) => el('Field', { Name: e.name }, el('rd:TypeName', 'System.Object'), el('DataField', e.name))),
           ...[...this.queryFormulas.values()].map((f) => el('Field', { Name: f.name }, el('rd:TypeName', SQL_TYPE_NAMES[f.type]), el('DataField', f.name))),
+          ...this.axisScales.flatMap((a) => a.names).map((n) => el('Field', { Name: n }, el('rd:TypeName', SQL_TYPE_NAMES.number), el('DataField', n))),
           ...[...this.nextColumns.values()].map((n) => el('Field', { Name: n.name }, el('rd:TypeName', TYPE_NAMES[n.field.type] ?? 'System.Object'), el('DataField', n.name))),
           ...(this.othersGroup && !query.fieldsFromAll ? [
             el('Field', { Name: this.othersGroup.total }, el('rd:TypeName', 'System.Decimal'), el('DataField', this.othersGroup.total)),

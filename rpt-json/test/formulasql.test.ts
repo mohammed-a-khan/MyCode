@@ -148,12 +148,14 @@ describe('a team template without custom code', () => {
       { kind: 'chart', name: 'Bars', position: { x: 0, y: 0 }, size: { width: 4000, height: 2800 }, chart: { family: 0, graphType: 0, values: ['Sum of Orders.Amount'], onChangeOf: 'Orders.Name' } }] }] }] };
     const { rdl, sqlFunctions } = await convert(definition);
     assert.ok(!rdl.includes('<Code>'), 'no custom code');
-    assert.match(rdl, /dbo\.\[P_ChartScale\]\(CAST\(ISNULL\(MIN\(\[Orders\]\.\[Amount\]\) OVER \(\), 0\) AS float\), CAST\(ISNULL\(MAX\(\[Orders\]\.\[Amount\]\) OVER \(\), 0\) AS float\), 0\) AS \[Bars_AxisFrom\]/);
+    assert.match(rdl, /CAST\(ISNULL\(MIN\(\[Orders\]\.\[Amount\]\) OVER \(\), 0\) AS float\) AS \[Bars_AxisLo\]/);
+    assert.match(rdl, /SELECT q\.\*, a1\.\[From\] AS \[Bars_AxisFrom\], a1\.\[To\] AS \[Bars_AxisTo\], a1\.\[Step\] AS \[Bars_AxisStep\]\nFROM \([\s\S]*\) AS q\nCROSS APPLY \([\s\S]*\) AS a1/);
+    assert.match(rdl, /<Field Name="Bars_AxisStep">/);
     assert.match(rdl, /DENSE_RANK\(\) OVER \(ORDER BY \[Orders\]\.\[Name\]\) AS \[Bars_Point\]/);
     assert.match(rdl, /<Color>=Choose\(\(Fields!Bars_Point\.Value - 1\) Mod 10 \+ 1, "#/);
     assert.match(rdl, /<Value>=Min\(Fields!Bars_Point\.Value\)<\/Value>/, 'the bars in the order their colours follow');
     assert.match(rdl, /First\(Fields!Bars_AxisFrom\.Value\)/);
-    assert.match(sqlFunctions?.join('\n') ?? '', /CREATE FUNCTION dbo\.\[P_ChartScale\]\(@lo float, @hi float, @part int\)/);
+    assert.ok(!rdl.includes('ChartScale') && !(sqlFunctions ?? []).some((f) => f.includes('ChartScale')), 'no function of the report to make in the database');
     // Outside a template: Crystal's scale and colours by custom code, as before.
     const plain = (await convert(definition, false)).rdl;
     assert.ok(plain.includes('Code.CrAxis(') && plain.includes('Code.CrPointColor('));

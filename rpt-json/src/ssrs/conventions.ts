@@ -786,6 +786,40 @@ function parentOf(root: XmlElement, target: XmlElement): XmlElement {
   return [root, ...descendants(root)].find((e) => e.children.includes(target))!;
 }
 
+function headingLinesTogether(tablix: XmlElement): void {
+  const kinds = rowLeaves(tablix).map((l) => l.kind);
+  const rows = rowsOf(tablix);
+  const byColumn = (row: XmlElement) => {
+    const out = new Map<number, XmlElement>();
+    let c = 0;
+    for (const cell of cellsOf(row)) {
+      const contents = child(cell, 'CellContents');
+      if (!contents) continue;
+      const span = Number(textOf(child(contents, 'ColSpan')) || 1);
+      const it = cellItem(cell);
+      if (it?.name === 'Textbox' && !isBlank(it)) out.set(span === 1 ? c : -1 - c, it);
+      c += span;
+    }
+    return out;
+  };
+  for (let r = 0; r + 1 < rows.length; r++) {
+    if (kinds[r] !== 'heading' || kinds[r + 1] !== 'heading') continue;
+    const upper = byColumn(rows[r]!);
+    const lower = byColumn(rows[r + 1]!);
+    if (upper.size < 2 || [...upper.keys()].some((c) => c < 0 || !lower.has(c))) continue;
+    if ([...upper.values()].some((t) => /Fields!/.test(valueOf(t)) && !/^=\s*(First|Last)\(/i.test(valueOf(t)))) continue;
+    for (const t of upper.values()) {
+      setChild(ownStyle(t), 'VerticalAlign', 'Bottom');
+      setChild(ownStyle(t), 'PaddingBottom', '0pt');
+    }
+    for (const c of upper.keys()) {
+      const t = lower.get(c)!;
+      setChild(ownStyle(t), 'VerticalAlign', 'Top');
+      setChild(ownStyle(t), 'PaddingTop', '0pt');
+    }
+  }
+}
+
 /** Each row's leaf member of the row hierarchy and what the row is. */
 function rowLeaves(tablix: XmlElement): Leaf[] {
   const out: Leaf[] = [];
@@ -2248,6 +2282,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
   const chartTitles = conv.style?.roles.chartTitle ? titlesOverCharts(report) : new Map<XmlElement, XmlElement>();
   for (const tb of chartTitles.keys()) roles.set(tb, 'chartTitle');
   if (conv.style) applyStyleRoles(report, conv.style, roles, tableCells, unbanded, bandRows, review, dataSources[0]?.attributes.Name ?? conv.dataSource?.name ?? '');
+  for (const tablix of descendants(report).filter((e) => e.name === 'Tablix')) headingLinesTogether(tablix);
   for (const [tb, chart] of chartTitles) {
     const hide = textOf(child(chart, 'Visibility/Hidden'));
     const fill = child(ownStyle(tb), 'BackgroundColor');
@@ -2616,7 +2651,7 @@ function fitTablix(tablix: XmlElement): number {
       }
       // (Text in the house's fonts, worked out when the report runs: the designer draws it at its default size, and
       // a row shorter than that cuts it off there.)
-      if (item.name === 'Textbox' && designText && !isBlank(item)) need = Math.max(need, textHeight(item, true, fixedText(item) ? cellWidth : undefined)!);
+      if (item.name === 'Textbox' && designText && !isBlank(item)) need = Math.max(need, textHeight(item, true, fixedText(item) && kinds[r] !== 'heading' ? cellWidth : undefined)!);
     }
     if (need > height + 0.001) {
       setChild(row, 'Height', inch(need));
