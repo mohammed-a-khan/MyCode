@@ -598,6 +598,19 @@ describe('spacing and edges in the template', () => {
     assert.equal(new Set(descendants(out).filter((e) => e.name === 'Group').map((e) => e.attributes.Name)).size, descendants(out).filter((e) => e.name === 'Group').length);
   });
 
+  it('starts a chart frame on a new page after a table that starts its own page, not after one that does not', () => {
+    type XmlNode = ReturnType<typeof parseXml>;
+    const chart = (n: string) => `<Chart Name="${n}"><ChartCategoryHierarchy><ChartMembers><ChartMember><Label /></ChartMember></ChartMembers></ChartCategoryHierarchy><ChartSeriesHierarchy><ChartMembers><ChartMember><Label /></ChartMember></ChartMembers></ChartSeriesHierarchy><ChartData><ChartSeriesCollection><ChartSeries Name="S"><ChartDataPoints><ChartDataPoint><ChartDataPointValues><Y>=Sum(Fields!v.Value)</Y></ChartDataPointValues></ChartDataPoint></ChartDataPoints></ChartSeries></ChartSeriesCollection></ChartData><ChartAreas><ChartArea Name="Default" /></ChartAreas><DataSetName>Rows</DataSetName><Top>0in</Top><Left>0in</Left><Height>1.5in</Height><Width>10in</Width></Chart>`;
+    const framed = (name: string, top: number, inner: string, extra = '') => `<Rectangle Name="${name}"><ReportItems>${inner}</ReportItems>${extra}<Top>${top}in</Top><Left>0in</Left><Height>1.5in</Height><Width>10in</Width><Style><Border><Style>None</Style></Border></Style></Rectangle>`;
+    const own = framed('Own', 0, grid('Listed', [5, 5]), '<PageBreak><BreakLocation>Start</BreakLocation></PageBreak>');
+    const shared = framed('Shared', 3, grid('Other', [5, 5]));
+    const out = parseXml(applyConventions(doc(own + framed('After', 1.5, chart('Plot')) + shared + framed('Beside', 4.5, chart('Plot2')), 6), 'Parts', styled).rdl);
+    const charts = descendants(out).filter((e) => e.name === 'Chart');
+    const breaksOf = (chart: XmlNode) => descendants(out).filter((e) => e.name === 'Rectangle' && descendants(e).includes(chart) && textOf(child(e, 'PageBreak/BreakLocation')) === 'Start');
+    assert.equal(breaksOf(charts[0]!).length, 1);
+    assert.equal(breaksOf(charts[1]!).length, 0);
+  });
+
   it('keeps the two lines of a two-line heading together, one line high each', () => {
     const cell = (name: string, v: string) => `<TablixCell><CellContents><Textbox Name="${name}"><CanGrow>true</CanGrow><Paragraphs><Paragraph><TextRuns><TextRun><Value>${v}</Value><Style><FontSize>8pt</FontSize><FontWeight>Bold</FontWeight></Style></TextRun></TextRuns><Style><TextAlign>Center</TextAlign></Style></Paragraph></Paragraphs><Style><PaddingTop>2pt</PaddingTop><PaddingBottom>2pt</PaddingBottom></Style></Textbox></CellContents></TablixCell>`;
     const row = (h: number, cells: string[]) => `<TablixRow><Height>${h}in</Height><TablixCells>${cells.join('')}</TablixCells></TablixRow>`;

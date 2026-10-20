@@ -2099,6 +2099,18 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       const items = child(box, 'ReportItems');
       box.children.splice(items ? box.children.indexOf(items) + 1 : 0, 0, el('KeepTogether', 'true'));
     }
+    for (const holder of descendants(body).filter((e) => e.name === 'ReportItems')) {
+      const frames = childElements(holder).filter((e) => e.name === 'Rectangle' && child(e, 'Top')).sort((a, b) => len(a, 'Top') - len(b, 'Top'));
+      frames.forEach((frame, i) => {
+        const before = frames[i - 1];
+        if (!before || child(frame, 'PageBreak') || !descendants(frame).some((d) => d.name === 'Chart') || descendants(frame).some((d) => d.name === 'Tablix')) return;
+        const broken = [before, ...descendants(before).filter((d) => d.name === 'Rectangle')].find((r) => /^Start/.test(textOf(child(r, 'PageBreak/BreakLocation'))));
+        if (!broken || !descendants(broken).some((d) => d.name === 'Tablix')) return;
+        const off = child(broken, 'PageBreak/Disabled');
+        const items = child(frame, 'ReportItems');
+        frame.children.splice(items ? frame.children.indexOf(items) + 1 : 0, 0, el('PageBreak', el('BreakLocation', 'Start'), off ? el('Disabled', textOf(off)) : null));
+      });
+    }
     // (Then nothing is left over anything else at its full size: what lies lower moves below.)
     const bottom = unpile(child(body, 'ReportItems'));
     if (bottom > len(body, 'Height')) setChild(body, 'Height', inch(bottom));
