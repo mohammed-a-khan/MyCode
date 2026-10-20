@@ -2185,7 +2185,7 @@ class RdlBuilder {
         const n = `CountDistinct(${categoryExpression})`;
         const slot = `${Math.max(0.5, box.width - 0.6).toFixed(2)} / IIf(${n} < 1, 1, ${n})`;
         const length = `Max(Len(CStr(${categoryExpression}))) * 0.04`;
-        return `=IIf(${length} + 0.04 <= ${slot}, 0, IIf(${length} * 0.71 > 3 * ${slot}, -90, -45))`;
+        return `=IIf(${length} + 0.04 <= ${slot}, 0, IIf(${length} * 0.71 > 2.5 * ${slot}, -90, -45))`;
       })()
       : undefined;
     const axis = (title: string | undefined, kind: 'category' | 'value', format?: string) => el('ChartAxis', { Name: 'Primary' },
