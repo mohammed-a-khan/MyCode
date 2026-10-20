@@ -167,7 +167,7 @@ describe('sections of a report made of many parts', () => {
     const main = { ...empty, parameters: params, page: { orientation: 'landscape', paperSize: 1 }, layout: [
       { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 0, suppressed: true, objects: [] }] },
       { name: 'DetailArea1', sections: [{ name: 'D', height: 0, suppressed: true, objects: [] }] },
-      { name: 'ReportFooterArea1', sections: [{ name: 'RF1', height: 1000, objects: [panel, heading, whole(1, 400), whole(2, 420)] }] }] };
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF1', height: 1000, objects: [panel, heading, whole(1, 400), whole(2, 420), { kind: 'line', name: 'Divider', position: { x: 8020, y: 350 }, size: { width: 0, height: 600 }, border: { sides: [1, 0, 0, 0], width: 20 } }] }] }] };
     const right = listing('second');
     const moved = { ...right, layout: right.layout.map((a) => ({ ...a, sections: a.sections.map((x) => ({ ...x, objects: (x.objects as { position: { x: number; y: number } }[]).map((o) => ({ ...o, position: { x: o.position.x + 8000, y: o.position.y } })) })) })) };
     const models = [{ storage: '', definition: main }, { storage: 'Subdocument 2', definition: listing('first'), dataSource: table('first', 'table', fields) },
@@ -177,6 +177,7 @@ describe('sections of a report made of many parts', () => {
     for (const p of parts) {
       const doc = parseXml(p.rdl);
       const inch = (e: XmlElement, name: string) => parseFloat(textOf(child(e, name)));
+      assert.ok(descendants(doc).every((e) => !['Left', 'Top', 'Width', 'Height'].includes(e.name) || !textOf(e).startsWith('-')));
       const framed = descendants(doc).filter((e) => e.name === 'Rectangle' && /Solid/.test(textOf(child(e, 'Style/Border/Style'))));
       assert.equal(framed.length, 1);
       assert.ok(inch(framed[0]!, 'Width') < 7, `width ${inch(framed[0]!, 'Width')}`);
