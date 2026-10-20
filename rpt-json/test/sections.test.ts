@@ -4,7 +4,7 @@ import { applyConventions, readConventions } from '../src/ssrs/conventions.ts';
 import { standaloneParts } from '../src/ssrs/convert.ts';
 import { diagnoseRdl } from '../src/ssrs/diagnose.ts';
 import { convertToRdl } from '../src/ssrs/rdl.ts';
-import { child, childElements, descendants, parseXml, textOf } from '../src/ssrs/xml.ts';
+import { child, childElements, descendants, parseXml, textOf, type XmlElement } from '../src/ssrs/xml.ts';
 import { alignToRules } from '../src/ssrs/align.ts';
 
 const conventions = readConventions(JSON.stringify({ names: { table: '{S}_Tab_{n}', title: '{S}_SchTitle_Txt', heading: '{T}_{col}_ColTxt', value: '{T}_{col}_ColVal', blank: '{T}_blnk{n}', group: '{S}_grp_{n}' } }));
@@ -157,6 +157,33 @@ describe('sections of a report made of many parts', () => {
     assert.ok(boxed(inFrame) >= 1);
     assert.equal(boxed(alone), 0);
     for (const doc of [alone, inFrame]) assert.ok(descendants(doc).some((e) => e.name === 'Tablix' && descendants(e).some((v) => v.name === 'Value' && /Fields!name\.Value/.test(textOf(v)))));
+  });
+
+  it('frames a part sharing its panel with another only around its own content', () => {
+    const fields = ['name', 'owner_key'];
+    const panel = { kind: 'box', name: 'Panel', position: { x: 0, y: 0 }, size: { width: 15000, height: 1200 }, border: { sides: [1, 1, 1, 1], width: 20 } };
+    const heading = text('Above', 'Panel heading', 0, 40, 15000, 260);
+    const whole = (n: number, y: number) => ({ ...subreport(n), position: { x: 0, y }, size: { width: 15000, height: 300 } });
+    const main = { ...empty, parameters: params, page: { orientation: 'landscape', paperSize: 1 }, layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 0, suppressed: true, objects: [] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 0, suppressed: true, objects: [] }] },
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF1', height: 1000, objects: [panel, heading, whole(1, 400), whole(2, 420)] }] }] };
+    const right = listing('second');
+    const moved = { ...right, layout: right.layout.map((a) => ({ ...a, sections: a.sections.map((x) => ({ ...x, objects: (x.objects as { position: { x: number; y: number } }[]).map((o) => ({ ...o, position: { x: o.position.x + 8000, y: o.position.y } })) })) })) };
+    const models = [{ storage: '', definition: main }, { storage: 'Subdocument 2', definition: listing('first'), dataSource: table('first', 'table', fields) },
+      { storage: 'Subdocument 3', definition: moved, dataSource: table('second', 'table', fields) }];
+    const parts = standaloneParts(models as never, 'Parts', { formulasInQuery: true, rulesAsText: true, partsFormat: 'report', reshape: (rdl, name, extra) => applyConventions(rdl, name, conventions, extra?.prefix, { sqlFunctions: extra?.sqlFunctions }) });
+    assert.equal(parts.length, 2);
+    for (const p of parts) {
+      const doc = parseXml(p.rdl);
+      const inch = (e: XmlElement, name: string) => parseFloat(textOf(child(e, name)));
+      const framed = descendants(doc).filter((e) => e.name === 'Rectangle' && /Solid/.test(textOf(child(e, 'Style/Border/Style'))));
+      assert.equal(framed.length, 1);
+      assert.ok(inch(framed[0]!, 'Width') < 7, `width ${inch(framed[0]!, 'Width')}`);
+      assert.ok(descendants(framed[0]!).some((e) => e.name === 'Tablix'));
+      const title = descendants(framed[0]!).find((e) => e.name === 'Textbox' && descendants(e).some((v) => v.name === 'Value' && textOf(v) === 'Panel heading'))!;
+      assert.ok(inch(title, 'Left') + inch(title, 'Width') <= inch(framed[0]!, 'Width') + 0.001);
+    }
   });
 
   it('writes each part a report prints as a report of its own, in print order, named and laid out as the template asks', () => {

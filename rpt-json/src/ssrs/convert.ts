@@ -156,10 +156,24 @@ export function standaloneParts(models: ReportModel[], baseName: string, options
   const mainModel = models.find((m) => !m.storage)!;
   const framed = (entry: (typeof order)[number], model: ReportModel, reportName: string) => {
     const o = entry.object;
-    const S = { l: o.position?.x ?? 0, t: o.position?.y ?? 0, r: (o.position?.x ?? 0) + (o.size?.width ?? 0), b: (o.position?.y ?? 0) + (o.size?.height ?? 0) };
-    const box = (q: ReportObject) => ({ l: q.position?.x ?? 0, t: q.position?.y ?? 0, r: (q.position?.x ?? 0) + (q.size?.width ?? 0), b: (q.position?.y ?? 0) + (q.size?.height ?? 0) });
+    const frame = (q: ReportObject) => ({ l: q.position?.x ?? 0, t: q.position?.y ?? 0, r: (q.position?.x ?? 0) + (q.size?.width ?? 0), b: (q.position?.y ?? 0) + (q.size?.height ?? 0) });
+    const used = (q: ReportObject) => {
+      const F = frame(q);
+      if (q.kind !== 'subreport' || options.partsFormat !== 'report') return { ...F, shift: 0 };
+      const inner = models.find((m) => m.storage === `Subdocument ${q.subreport?.index}`)?.definition;
+      const shown = (inner?.layout ?? []).flatMap((a) => a.sections).filter((s) => !s.suppressed || s.conditions?.suppress)
+        .flatMap((s) => s.objects).filter((i) => (!i.suppressed || i.conditions?.suppress) && ((i.size?.width ?? 0) > 0 || (i.size?.height ?? 0) > 0));
+      if (!shown.length) return { ...F, shift: 0 };
+      const lo = Math.max(0, Math.min(...shown.map((i) => i.position?.x ?? 0)));
+      const hi = Math.min(F.r - F.l, Math.max(...shown.map((i) => (i.position?.x ?? 0) + (i.size?.width ?? 0))));
+      return hi - lo > 0 ? { ...F, l: F.l + lo, r: F.l + hi, shift: lo } : { ...F, shift: 0 };
+    };
+    const box = (q: ReportObject) => { const { shift: _s, ...B } = used(q); return B; };
+    const S = box(o);
+    const shift = used(o).shift;
     const others = entry.section.objects.filter((q) => q !== o && !q.suppressed && q.kind !== 'subreport');
     const R = { ...S };
+    const over: ReportObject[] = [];
     if (options.partsFormat === 'report') {
       const around = others.filter((q) => q.kind === 'box' && box(q).l <= S.l + 30 && box(q).r >= S.r - 30 && box(q).t <= S.t + 30 && box(q).b >= S.b - 30)
         .sort((a, b) => (box(a).r - box(a).l) * (box(a).b - box(a).t) - (box(b).r - box(b).l) * (box(b).b - box(b).t))[0];
@@ -169,33 +183,39 @@ export function standaloneParts(models: ReportModel[], baseName: string, options
         ...entry.section.objects.filter((q) => q !== o && q.kind === 'subreport' && across(q)).flatMap((q) => [box(q).l, box(q).r])];
       R.l = Math.max(around ? box(around).l : S.l, ...edges.filter((x) => x <= S.l + 30));
       R.r = Math.min(around ? box(around).r : S.r, ...edges.filter((x) => x >= S.r - 30));
-      const titles = others.filter((q) => (q.kind === 'text' || q.kind === 'field') && box(q).b <= S.t + 72 && box(q).b >= S.t - 864 && Math.min(box(q).r, R.r) - Math.max(box(q).l, R.l) > 0);
+      const titles = others.filter((q) => (q.kind === 'text' || q.kind === 'field') && box(q).b <= S.t + 72 && box(q).b >= S.t - 864 && Math.min(box(q).r, R.r) - Math.max(box(q).l, R.l) >= Math.min(box(q).r - box(q).l, R.r - R.l) / 2);
+      over.push(...titles);
       R.t = Math.min(S.t, around ? box(around).t : S.t, ...titles.map((q) => box(q).t));
       R.b = Math.max(S.b, around ? box(around).b : S.b);
     }
     const inside = (q: ReportObject) => { const B = box(q); const mid = (B.l + B.r) / 2; return mid >= R.l && mid <= R.r && B.t >= R.t - 30 && B.b <= R.b + 30; };
-    const kept = options.partsFormat === 'report' ? others.filter((q) => q.kind === 'box' || q.kind === 'line' ? Math.min(box(q).r, R.r) - Math.max(box(q).l, R.l) >= (q.size?.width ? 1 : 0) && box(q).t < R.b + 30 && box(q).b > R.t - 30 : inside(q)) : [];
+    const kept = options.partsFormat === 'report' ? others.filter((q) => q.kind === 'box' || q.kind === 'line' ? Math.min(box(q).r, R.r) - Math.max(box(q).l, R.l) >= (q.size?.width ? 1 : 0) && box(q).t < R.b + 30 && box(q).b > R.t - 30 : inside(q) || over.includes(q)) : [];
     const place = (q: ReportObject): ReportObject => {
       const B = box(q);
-      const l = q.kind === 'box' || q.kind === 'line' ? Math.max(B.l, R.l) : B.l;
-      const r = q.kind === 'box' || q.kind === 'line' ? Math.min(B.r, R.r) : B.r;
+      const l = Math.max(B.l, R.l);
+      const r = Math.min(B.r, R.r);
       const t = q.kind === 'box' || q.kind === 'line' ? Math.max(B.t, R.t) : B.t;
       const b = q.kind === 'box' || q.kind === 'line' ? Math.min(B.b, R.b) : B.b;
       const { conditions: _c, ...rest } = q;
       return { ...rest, position: { x: l - R.l, y: t - R.t }, size: { width: r - l, height: b - t } };
     };
     const { conditions: _c, ...part } = o;
-    const objects = [...kept.map(place), { ...part, suppressed: false, ...(options.partsFormat === 'report' ? {} : { border: undefined }), position: { x: S.l - R.l, y: S.t - R.t } }];
+    const objects = [...kept.map(place), { ...part, suppressed: false, ...(options.partsFormat === 'report' ? {} : { border: undefined }), position: { x: S.l - R.l, y: S.t - R.t }, ...(options.partsFormat === 'report' ? { size: { width: S.r - S.l, height: S.b - S.t } } : {}) }];
+    const low = Math.max(S.b, ...kept.filter((q) => q.kind !== 'box' && q.kind !== 'line').map((q) => box(q).b)) - R.t;
+    const grown = objects.map((q) => (q.kind === 'box' || (q.kind === 'line' && !q.size?.width)) && (q.position?.y ?? 0) + (q.size?.height ?? 0) >= low - 30
+      ? { ...q, size: { width: q.size?.width ?? 0, height: Math.max(q.size?.height ?? 0, low + 15 - (q.position?.y ?? 0)) } } : q);
     const reads = objects.some((q) => q.field && !q.field.startsWith('@') && !q.field.startsWith('?') && q.field.includes('.'));
     const definition = {
       ...main, page: main.page,
       layout: [
-        { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: R.b - R.t, objects }] },
-        { name: 'DetailArea1', sections: [{ name: 'D', height: 0, suppressed: true, objects: [] }] },
+        ...(options.partsFormat === 'report'
+          ? [{ name: 'DetailArea1', sections: [{ name: 'D', height: 0, suppressed: true, objects: [] }] }, { name: 'ReportFooterArea1', sections: [{ name: 'RF', height: low, objects: grown }] }]
+          : [{ name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: R.b - R.t, objects }] }, { name: 'DetailArea1', sections: [{ name: 'D', height: 0, suppressed: true, objects: [] }] }]),
       ],
     };
     const links = (model.definition?.parameters ?? []).filter((p) => /^Pm-/i.test(p.name)).map((p) => ({ parameter: sanitizeName(p.name), field: p.name.slice(3) }));
-    const info: SubreportInfo = { name: reportName, links, parameters: (model.definition?.parameters ?? []).map((p) => p.name), definition: model.definition, dataSource: model.dataSource, images: imagesOf?.(model.storage) };
+    const moved = shift && model.definition ? { ...model.definition, layout: model.definition.layout.map((a) => ({ ...a, sections: a.sections.map((s) => ({ ...s, objects: s.objects.map((i) => ({ ...i, position: { x: Math.max(0, (i.position?.x ?? 0) - shift), y: i.position?.y ?? 0 } })) })) })) } : model.definition;
+    const info: SubreportInfo = { name: reportName, links, parameters: (model.definition?.parameters ?? []).map((p) => p.name), definition: moved, dataSource: model.dataSource, images: imagesOf?.(model.storage) };
     return convertToRdl(definition as never, reads ? mainModel.dataSource : { connections: [], tables: [], links: [] } as never, {
       reportName,
       connectionString: options.connectionString,
