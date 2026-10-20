@@ -40,6 +40,7 @@ Usage:
                    [--shared-datasource <name>] [--template <house.rdl>] [--separate-subreports]
                    [--page-number] [--parameter name=value]... [--chart-axis-format <format>] [--house <style.json>]
                    [--conventions <conventions.json> [--prefix <short name>]] [--split-subreports [--parts-format standalone|report]]
+                   [--rdl-only]
                                             Convert to SSRS .rdl files (+ subreports) and a review checklist;
                                             a folder converts every .rpt in it and its subfolders, each written
                                             to the same subfolder of the output folder;
@@ -62,6 +63,8 @@ Usage:
                                             --parts-format standalone (the default) lays each part out as it
                                             designs itself, at the size the report gives it; report lays it out
                                             exactly as the report prints it, in its box with its title and rules
+                                            --rdl-only writes the .rdl files alone: no review checklist, no .sql
+                                            or .code.vb beside them, no check.txt
   rpt-json to-rdl  --template <house.rdl> --combine <output.rdl> <input.rpt|folder>...
                                             Combine several reports into one .rdl, one block per report
   rpt-json headers <input.rpt|input.json|folder> [output-file] [--json | --csv] [--all]
@@ -217,6 +220,7 @@ async function main(argv: string[]): Promise<number> {
     const splitSubreports = takeFlag(args, '--split-subreports');
     const partsFormat = takeOption(args, '--parts-format');
     if (partsFormat !== undefined && partsFormat !== 'standalone' && partsFormat !== 'report') throw new Error('to-rdl: --parts-format is standalone or report');
+    const rdlOnly = takeFlag(args, '--rdl-only');
     const pageNumber = takeFlag(args, '--page-number');
     const chartAxisFormat = takeOption(args, '--chart-axis-format');
     let parameterValues: Record<string, string> | undefined;
@@ -308,7 +312,7 @@ async function main(argv: string[]): Promise<number> {
       const outputDir = resolve(output, '..');
       await mkdir(outputDir, { recursive: true });
       await writeFile(output, report.rdl);
-      await writeFile(output.replace(/\.rdl$/i, '.review.md'), reviewMarkdown(files.map((f) => basename(f)).join(', '), [{ ...report, fileName: basename(output) }]));
+      if (!rdlOnly) await writeFile(output.replace(/\.rdl$/i, '.review.md'), reviewMarkdown(files.map((f) => basename(f)).join(', '), [{ ...report, fileName: basename(output) }]));
       console.error(`OK   ${output}: ${documents.length} report(s) combined, ${report.review.length} review item(s)`);
       return 0;
     }
@@ -347,14 +351,15 @@ async function main(argv: string[]): Promise<number> {
         for (const report of reports) {
           if (report.rdl) await writeFile(join(targetDir, report.fileName), report.rdl);
           // Files beside it (a team template's stored procedure, its custom code).
+          if (rdlOnly) continue;
           for (const [ending, text] of Object.entries(report.files ?? {})) await writeFile(join(targetDir, report.fileName.replace(/\.rdl$/i, ending)), text);
           if (report.rdl && reshape) for (const ending of ['.code.vb', '.sql'].filter((e) => !(report.files ?? {})[e])) await unlink(join(targetDir, report.fileName.replace(/\.rdl$/i, ending))).catch(() => undefined);
         }
         const reviewPath = join(targetDir, `${reports[0]?.fileName.replace(/\.rdl$/, '') ?? base}.review.md`);
-        await writeFile(reviewPath, reviewMarkdown(basename(file), reports));
+        if (!rdlOnly) await writeFile(reviewPath, reviewMarkdown(basename(file), reports));
         const items = reports.reduce((n, r) => n + r.review.length, 0);
         console.error(`OK   ${file}: ${reports.filter((r) => r.rdl).length} report(s), ${items} review item(s)`);
-        for (const report of reports.filter((r) => r.rdl)) {
+        for (const report of reports.filter((r) => r.rdl && !rdlOnly)) {
           const findings = checkConverted(report.rdl, report.files, !!conventionsPath, standardParameters);
           const shown = join(folder, report.fileName);
           checks.push(diagnosisText(shown, findings));
@@ -366,11 +371,11 @@ async function main(argv: string[]): Promise<number> {
           if (parts.length) await mkdir(partsDir, { recursive: true });
           for (const part of parts) {
             if (part.rdl) await writeFile(join(partsDir, part.fileName), part.rdl);
-            for (const [ending, text] of Object.entries(part.files ?? {})) await writeFile(join(partsDir, part.fileName.replace(/\.rdl$/i, ending)), text);
+            if (!rdlOnly) for (const [ending, text] of Object.entries(part.files ?? {})) await writeFile(join(partsDir, part.fileName.replace(/\.rdl$/i, ending)), text);
           }
-          if (parts.length) await writeFile(join(partsDir, `${base}_parts.review.md`), reviewMarkdown(basename(file), parts));
+          if (parts.length && !rdlOnly) await writeFile(join(partsDir, `${base}_parts.review.md`), reviewMarkdown(basename(file), parts));
           console.error(parts.length ? `OK   ${file}: ${parts.filter((r) => r.rdl).length} part(s) written on their own in ${partsDir}` : `NOTE ${file}: no parts to write on their own`);
-          for (const part of parts.filter((r) => r.rdl)) {
+          for (const part of parts.filter((r) => r.rdl && !rdlOnly)) {
             const findings = checkConverted(part.rdl, part.files, !!conventionsPath, standardParameters);
             const shown = join(folder, `${base}_parts`, part.fileName);
             checks.push(diagnosisText(shown, findings));
