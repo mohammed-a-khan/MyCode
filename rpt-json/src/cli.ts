@@ -39,7 +39,7 @@ Usage:
   rpt-json to-rdl  <input.rpt|input.json|folder> [output-dir] [--connection "<connection string>"]
                    [--shared-datasource <name>] [--template <house.rdl>] [--separate-subreports]
                    [--page-number] [--parameter name=value]... [--chart-axis-format <format>] [--house <style.json>]
-                   [--conventions <conventions.json> [--prefix <short name>]] [--split-subreports]
+                   [--conventions <conventions.json> [--prefix <short name>]] [--split-subreports [--parts-format standalone|report]]
                                             Convert to SSRS .rdl files (+ subreports) and a review checklist;
                                             a folder converts every .rpt in it and its subfolders, each written
                                             to the same subfolder of the output folder;
@@ -58,7 +58,10 @@ Usage:
                                             its datasets run their queries themselves; <name>.sql drafts the
                                             procedures to put in their place;
                                             --split-subreports also writes each part the report prints as a
-                                            report of its own, in <name>_parts, numbered in print order
+                                            report of its own, in <name>_parts, numbered in print order;
+                                            --parts-format standalone (the default) lays each part out as it
+                                            designs itself, at the size the report gives it; report lays it out
+                                            exactly as the report prints it, in its box with its title and rules
   rpt-json to-rdl  --template <house.rdl> --combine <output.rdl> <input.rpt|folder>...
                                             Combine several reports into one .rdl, one block per report
   rpt-json headers <input.rpt|input.json|folder> [output-file] [--json | --csv] [--all]
@@ -212,6 +215,8 @@ async function main(argv: string[]): Promise<number> {
     const sharedDataSource = takeOption(args, '--shared-datasource');
     const separateSubreports = takeFlag(args, '--separate-subreports');
     const splitSubreports = takeFlag(args, '--split-subreports');
+    const partsFormat = takeOption(args, '--parts-format');
+    if (partsFormat !== undefined && partsFormat !== 'standalone' && partsFormat !== 'report') throw new Error('to-rdl: --parts-format is standalone or report');
     const pageNumber = takeFlag(args, '--page-number');
     const chartAxisFormat = takeOption(args, '--chart-axis-format');
     let parameterValues: Record<string, string> | undefined;
@@ -356,7 +361,7 @@ async function main(argv: string[]): Promise<number> {
           console.error(`CHECK ${shown}: ${diagnosisLine(findings)}`);
         }
         if (splitSubreports) {
-          const parts = convertSubreportsStandalone(doc, base, { connectionString, sharedDataSource, pageNumber, parameterValues, chartAxisFormat, restyle, reshape, formulasInQuery: !!conventionsPath, rulesAsText: !!conventionsPath }, prefix);
+          const parts = convertSubreportsStandalone(doc, base, { connectionString, sharedDataSource, pageNumber, parameterValues, chartAxisFormat, restyle, reshape, formulasInQuery: !!conventionsPath, rulesAsText: !!conventionsPath, partsFormat: partsFormat ?? 'standalone' }, prefix);
           const partsDir = join(targetDir, `${base}_parts`);
           if (parts.length) await mkdir(partsDir, { recursive: true });
           for (const part of parts) {

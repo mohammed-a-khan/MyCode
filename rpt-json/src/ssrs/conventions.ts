@@ -820,6 +820,20 @@ function headingLinesTogether(tablix: XmlElement): void {
   }
 }
 
+function drawnEdges(box: XmlElement): boolean {
+  return /solid|dashed|dotted|double/i.test(textOf(child(box, 'Style/Border/Style'))) || ['LeftBorder', 'RightBorder'].some((side) => /solid|dashed|dotted|double/i.test(textOf(child(box, `Style/${side}/Style`))));
+}
+
+function freeSpan(item: XmlElement, siblings: XmlElement[], width: number): [number, number] | undefined {
+  const t = len(item, 'Top');
+  const b = t + len(item, 'Height');
+  const l = len(item, 'Left');
+  const r = l + len(item, 'Width');
+  const beside = siblings.filter((e) => e !== item && child(e, 'Top') && len(e, 'Top') < b - 0.001 && len(e, 'Top') + len(e, 'Height') > t + 0.001);
+  if (beside.some((e) => len(e, 'Left') < r - 0.001 && len(e, 'Left') + len(e, 'Width') > l + 0.001)) return undefined;
+  return [Math.max(0, ...beside.map((e) => len(e, 'Left') + len(e, 'Width')).filter((x) => x <= l + 0.001)), Math.min(width, ...beside.map((e) => len(e, 'Left')).filter((x) => x >= r - 0.001))];
+}
+
 /** Each row's leaf member of the row hierarchy and what the row is. */
 function rowLeaves(tablix: XmlElement): Leaf[] {
   const out: Leaf[] = [];
@@ -1747,6 +1761,29 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
         const start = cells.indexOf(first);
         if (span < 2 || span >= total || cells.length !== total) continue;
         const contents = child(first, 'CellContents')!;
+        const solid = (cell: XmlElement | undefined, side: string) => /solid|dashed|dotted|double/i.test(textOf(child(childElements(cell ? cellItem(cell) ?? el('x') : el('x'), 'Style')[0] ?? el('x'), `${side}/Style`)));
+        const held = cellItem(first);
+        if (start === 0 && cells.slice(span).some((x) => solid(x, 'LeftBorder') || solid(x, 'RightBorder')) && held && !child(held, 'Visibility')) {
+          let text = held.name === 'Textbox' ? held : undefined;
+          const inner = held.name === 'Rectangle' ? childElements(child(held, 'ReportItems') ?? el('x')).filter((e) => ITEMS.has(e.name)) : [];
+          if (inner.length === 1 && inner[0]!.name === 'Textbox') {
+            text = inner[0]!;
+            pad(text, { left: len(text, 'Left'), top: ruledAbove(text) ? 0 : len(text, 'Top') });
+            unplace(text);
+            const copyOf = (e: XmlElement): XmlElement => (childElements(e).length ? el(e.name, ...childElements(e).map(copyOf)) : el(e.name, textOf(e)));
+            for (const side of ['LeftBorder', 'RightBorder', 'TopBorder', 'BottomBorder', 'BackgroundColor']) {
+              const border = child(childElements(held, 'Style')[0] ?? el('x'), side);
+              if (border && !child(ownStyle(text), side)) ownStyle(text).children.push(copyOf(border));
+            }
+            contents.children = contents.children.map((x) => (x === held ? text! : x));
+          }
+          if (text) {
+            removeChildren(contents, ['ColSpan']);
+            const filled = Array.from({ length: span - 1 }, (_, k) => el('TablixCell', el('CellContents', newTextbox(`__ruled_${k}`, '', '0pt'))));
+            child(row, 'TablixCells')!.children = [first, ...filled, ...cells.slice(span)];
+            continue;
+          }
+        }
         if (start > 0) {
           let it = cellItem(first)!;
           if (it.name === 'Rectangle' && !child(it, 'Visibility') && !drawnAs(it)) {
@@ -2101,11 +2138,15 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     }
     for (const holder of descendants(body).filter((e) => e.name === 'ReportItems')) {
       const frames = childElements(holder).filter((e) => e.name === 'Rectangle' && child(e, 'Top')).sort((a, b) => len(a, 'Top') - len(b, 'Top'));
-      frames.forEach((frame, i) => {
-        const before = frames[i - 1];
+      const owner = parentOf(body, holder);
+      frames.forEach((frame) => {
+        const before = frames.filter((f) => len(f, 'Top') + 0.001 < len(frame, 'Top')).pop();
         if (!before || child(frame, 'PageBreak') || !descendants(frame).some((d) => d.name === 'Chart') || descendants(frame).some((d) => d.name === 'Tablix')) return;
-        const broken = [before, ...descendants(before).filter((d) => d.name === 'Rectangle')].find((r) => /^Start/.test(textOf(child(r, 'PageBreak/BreakLocation'))));
-        if (!broken || !descendants(broken).some((d) => d.name === 'Tablix')) return;
+        const starts = (r: XmlElement) => /^Start/.test(textOf(child(r, 'PageBreak/BreakLocation')));
+        const inside = [before, ...descendants(before).filter((d) => d.name === 'Rectangle' || d.name === 'Tablix')].find(starts);
+        const first = !child(frame, 'Visibility') && frames.filter((f) => descendants(f).some((d) => d.name === 'Tablix'))[0] === before && owner.name === 'Rectangle' && starts(owner);
+        const broken = inside && (inside.name === 'Tablix' || descendants(inside).some((d) => d.name === 'Tablix')) ? inside : first ? owner : undefined;
+        if (!broken) return;
         const off = child(broken, 'PageBreak/Disabled');
         const items = child(frame, 'ReportItems');
         frame.children.splice(items ? frame.children.indexOf(items) + 1 : 0, 0, el('PageBreak', el('BreakLocation', 'Start'), off ? el('Disabled', textOf(off)) : null));
@@ -2302,18 +2343,32 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
   for (const tablix of descendants(report).filter((e) => e.name === 'Tablix')) headingLinesTogether(tablix);
   for (const [tb, chart] of chartTitles) {
     const items = parentOf(report, tb);
-    const holder = parentOf(report, items);
+    let holder = parentOf(report, items);
     if (roles.get(tb) !== 'chartTitle' || holder.name !== 'Rectangle' || !child(holder, 'Width') || childElements(items, 'Chart').length !== 1 || !childElements(items, 'Chart').includes(chart)) continue;
-    const t = len(tb, 'Top');
-    const b = t + len(tb, 'Height');
-    const l = len(tb, 'Left');
-    const r = l + len(tb, 'Width');
-    const beside = childElements(items).filter((e) => e !== tb && e !== chart && child(e, 'Top') && len(e, 'Top') < b - 0.001 && len(e, 'Top') + len(e, 'Height') > t + 0.001);
-    const from = Math.max(0, ...beside.map((e) => len(e, 'Left') + len(e, 'Width')).filter((x) => x <= l + 0.001));
-    const to = Math.min(len(holder, 'Width'), ...beside.map((e) => len(e, 'Left')).filter((x) => x >= r - 0.001));
-    if (beside.some((e) => len(e, 'Left') < r - 0.001 && len(e, 'Left') + len(e, 'Width') > l + 0.001) || to - from <= r - l) continue;
-    setChild(tb, 'Left', inch(from));
-    setChild(tb, 'Width', inch(to - from));
+    const chain: XmlElement[] = [];
+    for (let box = holder, k = 0; k < 4 && !drawnEdges(box); k++) {
+      const outer = parentOf(report, parentOf(report, box));
+      if (outer.name !== 'Rectangle' || !child(outer, 'Width')) break;
+      chain.push(box);
+      box = outer;
+    }
+    const panel = chain.length ? parentOf(report, parentOf(report, chain[chain.length - 1]!)) : holder;
+    if (chain.length && drawnEdges(panel)) {
+      for (const box of chain.reverse()) {
+        const outer = parentOf(report, parentOf(report, box));
+        const span = freeSpan(box, childElements(child(outer, 'ReportItems')!), len(outer, 'Width'));
+        if (!span) break;
+        const shift = len(box, 'Left') - span[0];
+        for (const e of childElements(child(box, 'ReportItems') ?? el('x')).filter((x) => child(x, 'Left'))) setChild(e, 'Left', inch(len(e, 'Left') + shift));
+        setChild(box, 'Left', inch(span[0]));
+        setChild(box, 'Width', inch(span[1] - span[0]));
+      }
+      holder = parentOf(report, items);
+    }
+    const span = freeSpan(tb, childElements(items).filter((e) => e !== chart), len(holder, 'Width'));
+    if (!span || span[1] - span[0] <= len(tb, 'Width')) continue;
+    setChild(tb, 'Left', inch(span[0]));
+    setChild(tb, 'Width', inch(span[1] - span[0]));
   }
   for (const [tb, chart] of chartTitles) {
     const hide = textOf(child(chart, 'Visibility/Hidden'));

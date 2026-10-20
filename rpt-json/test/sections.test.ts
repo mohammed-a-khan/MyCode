@@ -137,6 +137,28 @@ describe('sections of a report made of many parts', () => {
     assert.ok(inch('Left') >= 9.65 - 0.001 && inch('Left') + inch('Width') <= 10.5 + 0.001, `left ${inch('Left')}`);
   });
 
+  it('writes a part as it designs itself, or as the report prints it in its frame', () => {
+    const fields = ['name', 'owner_key'];
+    const framed = { kind: 'box', name: 'Frame', position: { x: 100, y: 0 }, size: { width: 7000, height: 1900 }, border: { sides: [1, 1, 1, 1], width: 20 } };
+    const heading = text('Above', 'Frame heading', 200, 60, 6800, 260);
+    const placed = { ...subreport(1), position: { x: 200, y: 400 }, size: { width: 4000, height: 300 }, border: { sides: [1, 1, 1, 1], width: 20 } };
+    const main = { ...empty, parameters: params, page: { orientation: 'landscape', paperSize: 1 }, layout: [
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 0, suppressed: true, objects: [] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 0, suppressed: true, objects: [] }] },
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF1', height: 2000, objects: [framed, heading, placed] }] }] };
+    const models = [{ storage: '', definition: main }, { storage: 'Subdocument 2', definition: listing('first'), dataSource: table('first', 'table', fields) }];
+    const write = (format: 'standalone' | 'report') => parseXml(standaloneParts(models as never, 'Parts', { formulasInQuery: true, rulesAsText: true, partsFormat: format, reshape: (rdl, name, extra) => applyConventions(rdl, name, conventions, extra?.prefix, { sqlFunctions: extra?.sqlFunctions }) })[0]!.rdl);
+    const alone = write('standalone');
+    const inFrame = write('report');
+    const shows = (doc: ReturnType<typeof parseXml>, value: string) => descendants(doc).some((e) => e.name === 'Value' && textOf(e) === value);
+    assert.ok(!shows(alone, 'Frame heading'));
+    assert.ok(shows(inFrame, 'Frame heading'));
+    const boxed = (doc: ReturnType<typeof parseXml>) => descendants(doc).filter((e) => e.name === 'Rectangle' && /Solid/.test(textOf(child(e, 'Style/Border/Style')))).length;
+    assert.ok(boxed(inFrame) >= 1);
+    assert.equal(boxed(alone), 0);
+    for (const doc of [alone, inFrame]) assert.ok(descendants(doc).some((e) => e.name === 'Tablix' && descendants(e).some((v) => v.name === 'Value' && /Fields!name\.Value/.test(textOf(v)))));
+  });
+
   it('writes each part a report prints as a report of its own, in print order, named and laid out as the template asks', () => {
     const fields = ['name', 'owner_key'];
     const main = { ...empty, parameters: params, page: { orientation: 'landscape', paperSize: 1 }, layout: [
@@ -609,6 +631,38 @@ describe('spacing and edges in the template', () => {
     const breaksOf = (chart: XmlNode) => descendants(out).filter((e) => e.name === 'Rectangle' && descendants(e).includes(chart) && textOf(child(e, 'PageBreak/BreakLocation')) === 'Start');
     assert.equal(breaksOf(charts[0]!).length, 1);
     assert.equal(breaksOf(charts[1]!).length, 0);
+    const section = `<Rectangle Name="Sec"><ReportItems>${framed('Own2', 0, grid('Listed2', [5, 5]))}${framed('After2', 1.5, chart('Plot3'))}</ReportItems><PageBreak><BreakLocation>Start</BreakLocation></PageBreak><Top>1.5in</Top><Left>0in</Left><Height>3in</Height><Width>10in</Width><Style><Border><Style>None</Style></Border></Style></Rectangle>`;
+    const joint = parseXml(applyConventions(doc(framed('Lead', 0, grid('First', [5, 5])) + section, 5), 'Parts', styled).rdl);
+    const plot = descendants(joint).find((e) => e.name === 'Chart')!;
+    const holders = descendants(joint).filter((e) => e.name === 'Rectangle' && descendants(e).includes(plot) && textOf(child(e, 'PageBreak/BreakLocation')) === 'Start');
+    assert.ok(holders.some((e) => !descendants(e).some((d) => d.name === 'Tablix')), 'the chart, sharing a box that starts a page with the table above it, starts the next page');
+  });
+
+  it('stretches a chart title band across its bordered panel through a box between them', () => {
+    const plot = `<Chart Name="Plot"><ChartCategoryHierarchy><ChartMembers><ChartMember><Label /></ChartMember></ChartMembers></ChartCategoryHierarchy><ChartSeriesHierarchy><ChartMembers><ChartMember><Label /></ChartMember></ChartMembers></ChartSeriesHierarchy><ChartData><ChartSeriesCollection><ChartSeries Name="S"><ChartDataPoints><ChartDataPoint><ChartDataPointValues><Y>=Sum(Fields!v.Value)</Y></ChartDataPointValues></ChartDataPoint></ChartDataPoints></ChartSeries></ChartSeriesCollection></ChartData><ChartAreas><ChartArea Name="Default" /></ChartAreas><DataSetName>Rows</DataSetName><Top>0.226in</Top><Left>0in</Left><Height>2in</Height><Width>2.75in</Width></Chart>`;
+    const inner = box('Inner', 0.06, 0.02, 2.75, 2.25, text('Head', 'Spread by kind', 0.021, 0.032, 2.708, 0.194) + plot);
+    const out = parseXml(applyConventions(doc(box('Panel', 0, 0, 2.879, 2.3, inner, '<Border><Style>Solid</Style></Border>')), 'Parts', styled).rdl);
+    const head = valued(out, 'Spread by kind');
+    const panel = descendants(out).filter((e) => e.name === 'Rectangle' && /Solid/.test(textOf(child(e, 'Style/Border/Style'))) && descendants(e).includes(head)).pop()!;
+    let left = num(head, 'Left');
+    for (let e = holderOf(out, head), k = 0; e && e !== panel && k < 5; e = holderOf(out, e), k++) left += num(e, 'Left');
+    assert.ok(left < 0.001, String(left));
+    assert.ok(Math.abs(left + num(head, 'Width') - num(panel, 'Width')) < 0.001, `${num(head, 'Width')} ${num(panel, 'Width')}`);
+  });
+
+  it('keeps the column lines of a table through a heading row that names one group', () => {
+    const tb = (n: string, v: string, side = '') => `<Textbox Name="${n}"><Paragraphs><Paragraph><TextRuns><TextRun><Value>${v}</Value></TextRun></TextRuns></Paragraph></Paragraphs><Style>${side}</Style></Textbox>`;
+    const ruled = '<LeftBorder><Style>Solid</Style></LeftBorder>';
+    const cell = (inner: string, span = 1) => `<TablixCell><CellContents>${inner}${span > 1 ? `<ColSpan>${span}</ColSpan>` : ''}</CellContents></TablixCell>`;
+    const rect = (n: string, side = '') => `<Rectangle Name="${n}"><ReportItems /><Style><Border><Style>None</Style></Border>${side}</Style></Rectangle>`;
+    const group = `<Rectangle Name="G"><ReportItems>${tb('GT', '=Fields!g.Value').replace('<Style>', '<Top>0in</Top><Left>0.05in</Left><Height>0.18in</Height><Width>1.5in</Width><Style>')}</ReportItems><Style><Border><Style>None</Style></Border></Style></Rectangle>`;
+    const rows = `<TablixRow><Height>0.2in</Height><TablixCells>${cell(group, 2)}<TablixCell />${cell(rect('R3', ruled))}</TablixCells></TablixRow><TablixRow><Height>0.2in</Height><TablixCells>${cell(tb('V1', '=Fields!a.Value'))}${cell(tb('V2', '=Fields!b.Value'))}${cell(tb('V3', '=Fields!c.Value', ruled))}</TablixCells></TablixRow>`;
+    const table = `<Tablix Name="Ruled"><TablixBody><TablixColumns>${'<TablixColumn><Width>2in</Width></TablixColumn>'.repeat(3)}</TablixColumns><TablixRows>${rows}</TablixRows></TablixBody><TablixColumnHierarchy><TablixMembers>${'<TablixMember />'.repeat(3)}</TablixMembers></TablixColumnHierarchy><TablixRowHierarchy><TablixMembers><TablixMember><Group Name="Ruled_G"><GroupExpressions><GroupExpression>=Fields!g.Value</GroupExpression></GroupExpressions></Group><TablixMembers><TablixMember><KeepWithGroup>After</KeepWithGroup></TablixMember><TablixMember><Group Name="Ruled_D" /></TablixMember></TablixMembers></TablixMember></TablixMembers></TablixRowHierarchy><DataSetName>Rows</DataSetName><Top>0in</Top><Left>0in</Left><Height>0.4in</Height><Width>6in</Width></Tablix>`;
+    const out = parseXml(applyConventions(doc(table), 'Parts', styled).rdl);
+    const named = descendants(out).find((e) => e.name === 'TablixRow' && descendants(e).some((v) => v.name === 'Value' && textOf(v) === '=Fields!g.Value'))!;
+    const cells = childElements(child(named, 'TablixCells')!, 'TablixCell');
+    assert.ok(!cells.some((c) => Number(textOf(child(c, 'CellContents/ColSpan')) || 1) > 1), 'the group name keeps to its own column');
+    assert.ok(cells.some((c) => descendants(c).some((e) => e.name === 'LeftBorder' && /Solid/.test(textOf(child(e, 'Style'))))), 'the column line crosses the row');
   });
 
   it('keeps the two lines of a two-line heading together, one line high each', () => {
