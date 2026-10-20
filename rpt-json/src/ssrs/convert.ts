@@ -115,6 +115,7 @@ function finish(rdl: string, review: ReviewNote[], reportName: string, sqlFuncti
     const gone = (n: ReviewNote) => [...n.message.matchAll(/\bCode\.(\w+)/g)].some((m) => !new RegExp(`\\bCode\\.(\\w+_)?${m[1]}\\b`).test(out ?? ''));
     review.splice(0, review.length, ...review.filter((n) => !settled.has(n.item) && !shaped.settles?.test(n.item) && !gone(n)), ...shaped.review);
   }
+  out = out && out.replace(/<(Left|Top)>-[^<]*<\/(Left|Top)>/g, '<$1>0in</$1>');
   return { out, files };
 }
 
@@ -181,8 +182,8 @@ export function standaloneParts(models: ReportModel[], baseName: string, options
       const edges = [...others.filter((q) => q.kind === 'line' && !(q.size?.width) && across(q)).map((q) => box(q).l),
         ...others.filter((q) => q.kind === 'box' && across(q)).flatMap((q) => [box(q).l, box(q).r]),
         ...entry.section.objects.filter((q) => q !== o && q.kind === 'subreport' && across(q)).flatMap((q) => [box(q).l, box(q).r])];
-      R.l = Math.max(around ? box(around).l : S.l, ...edges.filter((x) => x <= S.l + 30));
-      R.r = Math.min(around ? box(around).r : S.r, ...edges.filter((x) => x >= S.r - 30));
+      R.l = Math.min(S.l, Math.max(around ? box(around).l : S.l, ...edges.filter((x) => x <= S.l + 30)));
+      R.r = Math.max(S.r, Math.min(around ? box(around).r : S.r, ...edges.filter((x) => x >= S.r - 30)));
       const titles = others.filter((q) => (q.kind === 'text' || q.kind === 'field') && box(q).b <= S.t + 72 && box(q).b >= S.t - 864 && Math.min(box(q).r, R.r) - Math.max(box(q).l, R.l) >= Math.min(box(q).r - box(q).l, R.r - R.l) / 2);
       over.push(...titles);
       R.t = Math.min(S.t, around ? box(around).t : S.t, ...titles.map((q) => box(q).t));
