@@ -130,6 +130,7 @@ declare module 'node:fs' {
   export function existsSync(path: string): boolean;
   export function mkdirSync(path: string, options?: { recursive?: boolean }): string | undefined;
   export function rmSync(path: string, options?: { recursive?: boolean; force?: boolean }): void;
+  export function mkdtempSync(prefix: string): string;
   export function statSync(path: string): { isDirectory(): boolean; isFile(): boolean; size: number };
   export function createWriteStream(path: string): WritableLike;
 }

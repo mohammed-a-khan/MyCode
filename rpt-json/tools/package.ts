@@ -1,10 +1,11 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync, readdirSync } from 'node:fs';
-import { join, posix, resolve } from 'node:path';
+import { dirname, join, posix, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { stripTypeScriptTypes } from 'node:module';
 import { deflateRawSync } from 'node:zlib';
 import { randomBytes } from 'node:crypto';
 import { zipFiles } from '../src/ui/zip.ts';
+import { readBranding, type Branding } from '../src/ui/house.ts';
 
 const APP = 'Report Converter';
 const root = resolve(import.meta.dirname, '..');
@@ -14,6 +15,8 @@ const outDir = resolve(root, 'dist', APP);
 const keep = process.argv.includes('--keep-bundle');
 const plain = process.argv.includes('--plain');
 const withoutConventions = process.argv.includes('--no-conventions');
+const internal = process.argv.includes('--internal');
+const tabs = internal ? undefined : ['convert', 'json'];
 
 function fail(message: string): never {
   console.error(`\nBuild failed: ${message}`);
@@ -239,11 +242,13 @@ function __dynamic(spec, from) {
 }
 `;
   const body = modules.map((m) => `__defs[${JSON.stringify(m.file)}] = function (exports, __imp, __dyn, __dynP) {\n${m.code}\n};`).join('\n');
-  const house = conventions ? `globalThis.houseConventions = ${JSON.stringify(conventions)};\n` : '';
+  let house = conventions ? `globalThis.houseConventions = ${JSON.stringify(conventions)};\n` : '';
+  if (tabs) house += `globalThis.appTabs = ${JSON.stringify(tabs)};\n`;
+  if (branding) house += `globalThis.houseBranding = ${JSON.stringify(branding)};\n`;
   return `(function (require) {\n'use strict';\n${house}${runtime}\n${body}\n__req(${JSON.stringify(entry)});\n})`;
 }
 
-function icon(): Uint8Array {
+function icon(color: [number, number, number]): Uint8Array {
   const size = 32;
   const pixels = new Uint8Array(size * size * 4);
   const set = (x: number, y: number, rgb: [number, number, number]) => {
@@ -251,7 +256,7 @@ function icon(): Uint8Array {
     const at = (row * size + x) * 4;
     pixels[at] = rgb[2]; pixels[at + 1] = rgb[1]; pixels[at + 2] = rgb[0]; pixels[at + 3] = 255;
   };
-  for (let y = 2; y < 30; y++) for (let x = 5; x < 27; x++) set(x, y, [31, 111, 235]);
+  for (let y = 2; y < 30; y++) for (let x = 5; x < 27; x++) set(x, y, color);
   for (const line of [9, 14, 19, 24]) for (let x = 9; x < (line === 24 ? 18 : 23); x++) { set(x, line, [255, 255, 255]); set(x, line + 1, [255, 255, 255]); }
   const mask = new Uint8Array(size * 4);
   const header = new Uint8Array(40);
@@ -355,6 +360,21 @@ if (conventionsFile && !withoutConventions) {
 } else if (!withoutConventions) {
   fail('house-style/conventions.json was not found in the project folder. Put the team conventions there, or build with --no-conventions.');
 }
+const brandingFile = [join(root, 'house-style', 'branding.json'), join(root, '..', 'house-style', 'branding.json')].find((f) => existsSync(f));
+let branding: Branding | undefined;
+if (brandingFile) {
+  try {
+    branding = readBranding(readFileSync(brandingFile, 'utf8'), dirname(brandingFile));
+  } catch (err) {
+    fail((err as Error).message);
+  }
+  console.log(`  branding   ${brandingFile} (packed inside the app)`);
+} else {
+  console.log('  branding   none (house-style/branding.json not found), the plain look is used');
+}
+console.log(internal ? '  tabs       all (internal build)' : '  tabs       Convert to SSRS, RPT and JSON (build with --internal for every tab)');
+const hex = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(branding?.colors.accent ?? '');
+const iconColor: [number, number, number] = hex ? [parseInt(hex[1]!, 16), parseInt(hex[2]!, 16), parseInt(hex[3]!, 16)] : [31, 111, 235];
 const code = plain ? bundle() : minify(bundle());
 const key = randomBytes(32);
 const packed = deflateRawSync(Buffer.from(code, 'utf8'), { level: 9 });
@@ -383,7 +403,7 @@ if (windows) {
     rmSync(work, { recursive: true, force: true });
     mkdirSync(work, { recursive: true });
     writeFileSync(join(work, 'Launcher.cs'), LAUNCHER);
-    writeFileSync(join(work, 'app.ico'), icon());
+    writeFileSync(join(work, 'app.ico'), icon(iconColor));
     const compile = (withIcon: boolean) => spawnSync(csc, ['/nologo', '/target:winexe', '/optimize+', `/out:${join(outDir, `${APP}.exe`)}`, ...(withIcon ? [`/win32icon:${join(work, 'app.ico')}`] : []), '/r:System.Windows.Forms.dll', join(work, 'Launcher.cs')], { encoding: 'utf8' });
     let built = compile(true);
     if (built.status !== 0) built = compile(false);

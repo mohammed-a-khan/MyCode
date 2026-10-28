@@ -8,8 +8,8 @@ import { spawn } from 'node:child_process';
 import { main } from '../cli.ts';
 import { readConventions } from '../ssrs/conventions.ts';
 import { compareReports, differencesCsv, summaryHtml, summaryText, verdict } from '../pdf/compare.ts';
-import { houseConventions } from './house.ts';
-import { page } from './page.ts';
+import { appTabs, houseBranding, houseConventions } from './house.ts';
+import { page, type Look } from './page.ts';
 import { parameterChoices } from './params.ts';
 import { zipFiles } from './zip.ts';
 
@@ -35,6 +35,8 @@ interface RunRequest {
 }
 
 const APP = 'Report Converter';
+const TAB_OF: Record<string, string> = { convert: 'convert', compare: 'compare', check: 'check', headers: 'headers', 'to-json': 'json', 'to-rpt': 'json', verify: 'json', inspect: 'diag', charts: 'diag', 'check-width': 'diag', layout: 'diag' };
+let look: Look = {};
 const jobs = new Map<string, Job>();
 const work = join(tmpdir(), `report-converter-${process.pid}-${randomBytes(4).toString('hex')}`);
 const settingsFile = join(process.env.APPDATA || join(homedir(), '.config'), APP, 'settings.json');
@@ -220,6 +222,7 @@ async function runCommand(job: Job, request: RunRequest): Promise<number> {
     await writeFile(path, data);
   };
   const swap = (rel: string, ext: string) => rel.replace(/\.[^./]+$/, '') + ext;
+  if (look.tabs && !look.tabs.includes(TAB_OF[request.command] ?? '')) throw new Error(`${request.command} is not part of this build.`);
   switch (request.command) {
     case 'convert': {
       needInput();
@@ -363,6 +366,30 @@ function powershell(script: string): Promise<string | null> {
 
 const quote = (s: string) => `'${s.replace(/'/g, "''")}'`;
 
+function windowsScript(source: string): Promise<string | null> {
+  return new Promise((done) => {
+    const file = join(work, `pick-${randomBytes(4).toString('hex')}.js`);
+    writeFile(file, source).then(() => {
+      const option = (name: string) => `${String.fromCharCode(47).repeat(2)}${name}`;
+      const child = spawn('cscript.exe', [option('nologo'), option('E:jscript'), file], { windowsHide: true });
+      const chunks: Buffer[] = [];
+      child.stdout.on('data', (c: Buffer) => chunks.push(c));
+      child.on('error', () => done(null));
+      child.on('exit', (code: number | null) => {
+        void rm(file, { force: true });
+        done(code === 0 ? Buffer.concat(chunks).toString('utf8').trim() : null);
+      });
+    }, () => done(null));
+  });
+}
+
+async function pickFolder(start: string): Promise<string[] | null> {
+  const picked = await windowsScript(`var f = new ActiveXObject("Shell.Application").BrowseForFolder(0, "Choose the folder", 0x51, 0);
+if (f) WScript.Echo(f.Self.Path); else WScript.Echo("");`);
+  if (picked !== null) return picked ? [picked] : [];
+  return pick('folder', '', false, start);
+}
+
 async function pick(kind: string, filter: string, multiple: boolean, start: string): Promise<string[] | null> {
   if (!isWindows) return null;
   const owner = '$o = New-Object System.Windows.Forms.Form -Property @{TopMost=$true};';
@@ -405,7 +432,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, token: string, 
   if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) return send(res, 403, 'Forbidden', 'text/plain');
   if (url.pathname === '/' || url.pathname === '/index.html') {
     if (url.searchParams.get('t') !== token) return send(res, 403, `Open ${APP} from its launcher.`, 'text/plain; charset=utf-8');
-    return send(res, 200, page(token, isWindows), 'text/html; charset=utf-8', { 'Content-Security-Policy': "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:" });
+    return send(res, 200, page(token, isWindows, look), 'text/html; charset=utf-8', { 'Content-Security-Policy': "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:" });
   }
   if (!url.pathname.startsWith('/api/')) return send(res, 404, 'Not found', 'text/plain');
   const given = req.headers['x-token'] ?? url.searchParams.get('t');
@@ -453,7 +480,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, token: string, 
         req.on('error', fail);
         req.pipe(stream);
       });
-      return json(res, { root, file: target });
+      return json(res, { root, file: target, sep });
     }
     if (route === 'reset-uploads' && req.method === 'POST') {
       const { job: id, area } = JSON.parse((await body(req)).toString('utf8')) as { job: string; area: string };
@@ -479,7 +506,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, token: string, 
     }
     if (route === 'pick' && req.method === 'POST') {
       const { kind, filter, multiple, start: from } = JSON.parse((await body(req)).toString('utf8')) as { kind: string; filter?: string; multiple?: boolean; start?: string };
-      const picked = await pick(kind, filter ?? '', !!multiple, text(from));
+      const picked = !isWindows ? null : kind === 'folder' ? await pickFolder(text(from)) : await pick(kind, filter ?? '', !!multiple, text(from));
       return json(res, picked === null ? { unsupported: true } : { paths: picked });
     }
     if (route === 'open' && req.method === 'POST') {
@@ -525,6 +552,7 @@ async function listen(server: ReturnType<typeof createServer>, port: number): Pr
 }
 
 export async function startUi(options: { open?: boolean; port?: number } = {}): Promise<string> {
+  look = { tabs: appTabs(), branding: houseBranding() };
   const token = randomBytes(18).toString('base64url');
   let port = 0;
   const server = createServer((req, res) => {

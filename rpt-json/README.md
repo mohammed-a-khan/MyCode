@@ -96,6 +96,29 @@ file, a copy of the build machine's Node as its runtime, and `Report Converter.e
 compiler of .NET Framework 4, which comes with Windows; where the .exe is blocked, the .cmd beside it starts the same
 app). Share the zip; people unzip it and double-click `Report Converter.exe`.
 
+A normal build shows only Convert to SSRS and RPT and JSON. `build-app.cmd --internal` builds the full app, which
+also has Data check, Check RDL files, Header text and Diagnostics. Tabs left out of a build are switched off in the
+app too, not only hidden. Running from the source always shows every tab.
+
+The look comes from `house-style/branding.json` beside the conventions, also packed inside the app when it is built
+(leave it out for the plain look). Every key is optional:
+
+```json
+{
+  "name": "Report Tools",
+  "tagline": "Report conversion",
+  "logo": "logo.png",
+  "font": "Arial, sans-serif",
+  "colors": { "header": "#203040", "headerText": "#ffffff", "accent": "#2060c0", "accentText": "#ffffff",
+              "background": "#f5f6f8", "panel": "#ffffff", "text": "#202530", "muted": "#606878", "line": "#dde2e8",
+              "soft": "#e8eef8", "nav": "#fafbfc" }
+}
+```
+
+`logo` is a .png, .jpg, .gif or .svg file next to `branding.json`, up to 512 KB; it is shown in the page header and
+as the page icon. Colours are given as `#rgb`, `#rrggbb` or `rgb(...)`; the accent also colours the .exe icon. The
+build stops with a message when a value is not one of these.
+
 To try it from the source instead: `npm run ui`.
 
 ## Data check
