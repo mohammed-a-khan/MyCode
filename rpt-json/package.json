@@ -14,6 +14,8 @@
   "scripts": {
     "test": "node --test \"test/**/*.test.ts\"",
     "rpt-json": "node src/cli.ts",
+    "ui": "node src/app.ts",
+    "package": "node --experimental-strip-types --no-warnings tools/package.ts",
     "typecheck": "tsc -p tsconfig.json",
     "build": "tsc -p tsconfig.build.json"
   }

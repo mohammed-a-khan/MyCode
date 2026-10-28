@@ -14,12 +14,14 @@ interface ImportMeta {
 
 type BufferEncoding = 'utf8' | 'utf-8' | 'hex' | 'base64' | 'latin1' | 'binary' | 'ascii' | 'utf16le';
 
+type BufferEncoding2 = BufferEncoding | 'base64url';
+
 declare class Buffer extends Uint8Array {
   static from(data: string, encoding?: BufferEncoding): Buffer;
   static from(data: ArrayLike<number> | Iterable<number>): Buffer;
   static from(data: ArrayBufferLike, byteOffset?: number, length?: number): Buffer;
   static concat(list: readonly Uint8Array[], totalLength?: number): Buffer;
-  toString(encoding?: BufferEncoding, start?: number, end?: number): string;
+  toString(encoding?: BufferEncoding2, start?: number, end?: number): string;
   equals(other: Uint8Array): boolean;
   readUInt32BE(offset?: number): number;
 }
@@ -49,12 +51,87 @@ declare const process: {
   exitCode: number | undefined;
   stdout: { write(text: string | Uint8Array): boolean };
   getBuiltinModule(id: string): unknown;
+  pid: number;
+  platform: string;
+  version: string;
+  execPath: string;
+  cwd(): string;
+  exit(code?: number): never;
+  on(event: string, listener: (...args: unknown[]) => void): unknown;
 };
+
+declare class URL {
+  constructor(input: string, base?: string);
+  readonly pathname: string;
+  readonly searchParams: { get(name: string): string | null };
+}
+
+interface TimerHandle {
+  unref?(): unknown;
+}
+declare function setTimeout(callback: () => void, ms?: number): TimerHandle;
+declare function setInterval(callback: () => void, ms?: number): TimerHandle;
+
+interface EventSource {
+  on(event: string, listener: (...args: never[]) => void): this;
+  once(event: string, listener: (...args: never[]) => void): this;
+  removeListener(event: string, listener: (...args: never[]) => void): this;
+}
+
+interface WritableLike extends EventSource {
+  write(chunk: string | Uint8Array): boolean;
+}
+
+declare module 'node:http' {
+  export interface IncomingMessage extends EventSource, AsyncIterable<Uint8Array> {
+    url?: string;
+    method?: string;
+    headers: Record<string, string | undefined>;
+    pipe<T extends WritableLike>(target: T): T;
+  }
+  export interface ServerResponse {
+    headersSent: boolean;
+    writeHead(status: number, headers?: Record<string, string>): this;
+    end(body?: string | Uint8Array): void;
+  }
+  export interface Server extends EventSource {
+    listen(port: number, host: string): this;
+    address(): { port: number } | string | null;
+  }
+  export function createServer(handler: (req: IncomingMessage, res: ServerResponse) => void): Server;
+}
+
+declare module 'node:os' {
+  export function homedir(): string;
+  export function tmpdir(): string;
+}
+
+declare module 'node:child_process' {
+  export interface ChildProcess extends EventSource {
+    stdout: EventSource;
+    stderr: EventSource;
+    unref(): void;
+  }
+  export function spawn(command: string, args: string[], options?: { windowsHide?: boolean; detached?: boolean; stdio?: string }): ChildProcess;
+  export function spawnSync(command: string, args: string[], options?: { encoding?: 'utf8' }): { status: number | null; stdout: string; stderr: string };
+}
+
+declare module 'node:module' {
+  export function stripTypeScriptTypes(code: string, options?: { mode?: 'strip' | 'transform' }): string;
+}
 
 declare module 'node:fs' {
   export function readFileSync(path: string): Buffer;
   export function readFileSync(path: string, encoding: BufferEncoding): string;
   export function readdirSync(path: string): string[];
+  export function writeFileSync(path: string, data: string | Uint8Array, options?: { mode?: number }): void;
+  export function appendFileSync(path: string, data: string): void;
+  export function copyFileSync(from: string, to: string): void;
+  export function existsSync(path: string): boolean;
+  export function mkdirSync(path: string, options?: { recursive?: boolean }): string | undefined;
+  export function rmSync(path: string, options?: { recursive?: boolean; force?: boolean }): void;
+  export function statSync(path: string): { isDirectory(): boolean; isFile(): boolean; size: number };
+  export function createWriteStream(path: string): WritableLike;
 }
 
 declare module 'node:fs/promises' {
@@ -66,6 +143,9 @@ declare module 'node:fs/promises' {
   export function stat(path: string): Promise<{ isDirectory(): boolean; isFile(): boolean; size: number }>;
   export function lstat(path: string): Promise<{ isDirectory(): boolean; isFile(): boolean; isSymbolicLink(): boolean; size: number }>;
   export function unlink(path: string): Promise<void>;
+  export function cp(from: string, to: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
+  export function rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
+  export function copyFile(from: string, to: string): Promise<void>;
 }
 
 declare module 'node:path' {
@@ -73,6 +153,10 @@ declare module 'node:path' {
   export function join(...paths: string[]): string;
   export function resolve(...paths: string[]): string;
   export function relative(from: string, to: string): string;
+  export function dirname(path: string): string;
+  export function extname(path: string): string;
+  export const sep: string;
+  export const posix: { normalize(path: string): string; join(...paths: string[]): string; dirname(path: string): string };
 }
 
 declare module 'node:zlib' {
@@ -82,7 +166,9 @@ declare module 'node:zlib' {
     maxOutputLength?: number;
   }
   export function inflateSync(data: string | Uint8Array, options?: ZlibOptions): Buffer;
+  export function inflateRawSync(data: string | Uint8Array, options?: ZlibOptions): Buffer;
   export function deflateSync(data: string | Uint8Array, options?: ZlibOptions): Buffer;
+  export function deflateRawSync(data: string | Uint8Array, options?: ZlibOptions): Buffer;
 }
 
 declare module 'node:crypto' {

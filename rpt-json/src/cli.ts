@@ -14,6 +14,7 @@ import { diagnoseRdl, diagnosisLine, diagnosisText, type Finding } from './ssrs/
 import { extractHeaders, formatHeadersCsv, formatHeadersText, type HeaderText } from './crystal/headers.ts';
 import { lstat, mkdir, readdir, stat, unlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { compareReports, differencesCsv, summaryHtml, summaryText, verdict } from './pdf/compare.ts';
 
 /**
  * Every .rpt in a folder and its subfolders, in name order, each with its subfolder relative to the top ("" for the
@@ -84,6 +85,10 @@ Usage:
                                             to-rdl writes the same check of every report to check.txt.
   rpt-json check-width <input.rdl>          List what in a converted .rdl reaches past the printable page or past
                                             what holds it (the cause of blank pages after every page)
+  rpt-json compare <original.pdf> <converted.pdf|folder>... [--out <folder>]
+                                            Data check: finds each converted report's part in the original
+                                            report's PDF and checks every amount, percent and date shown, to
+                                            the cent; writes data-check.txt, .csv and .html
   rpt-json verify  <input.rpt>              Round-trip rpt -> json -> rpt and compare every stream,
                                             then again with every encrypted stream re-encrypted
 
@@ -166,7 +171,7 @@ async function findFiles(top: string, pattern: RegExp): Promise<string[]> {
   return out.sort();
 }
 
-async function main(argv: string[]): Promise<number> {
+export async function main(argv: string[]): Promise<number> {
   // "--option=value" is the same as "--option value".
   const args = argv.flatMap((a) => (/^--[\w-]+=/.test(a) ? [a.slice(0, a.indexOf('=')), a.slice(a.indexOf('=') + 1)] : [a]));
   const command = args.shift();
@@ -507,15 +512,39 @@ async function main(argv: string[]): Promise<number> {
     return 0;
   }
 
+  if (command === 'compare') {
+    const outDir = takeOption(args, '--out');
+    const [original, ...converted] = positionals(args, 'compare', Infinity);
+    if (!original || !converted.length) throw new Error('compare needs the original report PDF and at least one converted report PDF (or a folder of them)');
+    const files: string[] = [];
+    for (const c of converted) files.push(...((await stat(c)).isDirectory() ? await findFiles(c, /\.pdf$/i) : [c]));
+    if (!files.length) throw new Error('no converted report PDFs to compare');
+    const { results, originalPages } = compareReports(await readFile(original), await Promise.all(files.map(async (f) => ({ name: basename(f), data: await readFile(f) }))));
+    const text = summaryText(results, basename(original), originalPages);
+    process.stdout.write(text);
+    if (outDir) {
+      await mkdir(outDir, { recursive: true });
+      await writeFile(join(outDir, 'data-check.txt'), text);
+      await writeFile(join(outDir, 'data-check.csv'), differencesCsv(results));
+      await writeFile(join(outDir, 'data-check.html'), summaryHtml(results, basename(original), originalPages));
+      console.error(`Wrote ${join(outDir, 'data-check.html')}, .csv and .txt`);
+    }
+    return results.every((r) => verdict(r) === 'MATCH') ? 0 : 1;
+  }
+
   console.error(`Unknown command "${command}"\n\n${USAGE}`);
   return 1;
 }
 
-main(process.argv.slice(2)).then(
-  (code) => { process.exitCode = code; },
-  (err: unknown) => {
-    console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
-    process.exitCode = 2;
-  },
-);
+export function runCli(argv: string[]): void {
+  main(argv).then(
+    (code) => { process.exitCode = code; },
+    (err: unknown) => {
+      console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 2;
+    },
+  );
+}
+
+if (process.argv[1] && /cli\.[cm]?[jt]s$/i.test(process.argv[1])) runCli(process.argv.slice(2));
 

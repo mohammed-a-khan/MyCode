@@ -74,6 +74,52 @@ node src/cli.ts verify   report.rpt                      # round-trip checks (se
 for f in reports/*.rpt; do node src/cli.ts verify "$f"; done
 ```
 
+## Desktop app
+
+The same tool with a page to click through instead of commands: convert one report, several or whole folders,
+split subreports, check, list header text, go to and from JSON, look inside reports, and check the converted
+reports' data against the original. It runs on the user's own computer only: a page opens in their browser, talking
+to the app on that computer, and nothing is installed or sent anywhere.
+
+The team conventions are not a choice on the page: the app always uses `house-style/conventions.json` from the
+project folder, packed inside the app when it is built (the folder is not kept in git). Users give only an optional
+prefix for the item names and an optional section id (converted as the value of the `section_id` parameter).
+
+Build it once on a Windows machine with Node 22.13 or newer, with the team conventions in place:
+
+```
+build-app.cmd
+```
+
+It writes `dist/Report Converter/` and `dist/Report Converter.zip`: the app packed into one compressed, scrambled
+file, a copy of the build machine's Node as its runtime, and `Report Converter.exe` to start it (made with the C#
+compiler of .NET Framework 4, which comes with Windows; where the .exe is blocked, the .cmd beside it starts the same
+app). Share the zip; people unzip it and double-click `Report Converter.exe`.
+
+To try it from the source instead: `npm run ui`.
+
+## Data check
+
+```
+node src/cli.ts compare <original.pdf> <converted.pdf|folder>... [--out <folder>]
+```
+
+Checks that converted reports show exactly the data of the original, to the cent. The original is the full report
+saved as one PDF (all its parts merged); each converted report is rendered on the report server with the same
+parameter values and saved as PDF. For each converted report the check:
+
+- reads the text of both PDFs (no other program needed), leaving out page headers and footers that repeat on every
+  page and column headings repeated after a page break;
+- finds the pages of the original that hold that report;
+- checks every amount, percent and date in reading order, exactly (decimal arithmetic, no rounding).
+
+It writes `data-check.html` (to read), `data-check.csv` (opens in Excel) and `data-check.txt`. Each report is a
+MATCH, has DIFFERENCES (a different value with the difference, or a value only on one side, with its row label and
+page numbers), or is NOT CHECKED (its content was not found in the original). The same value shown another way, such
+as (1.00) and -1.00 or 12.5% and 12.50%, is listed apart and does not count as a difference. Values of a chart the
+converted report draws as a picture cannot be read from its PDF and are listed as not compared. The sum of all
+amounts on both sides is given too. The command ends with 1 when any report needs a look.
+
 ## Converting to SSRS
 
 `to-rdl` writes one `.rdl` per report and a `<name>.review.md` checklist. Given a folder, it converts every `.rpt` in
