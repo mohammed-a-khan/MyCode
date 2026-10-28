@@ -960,6 +960,32 @@ describe('layout conversion', () => {
     assert.ok(review.some((r) => /kept together on a page/.test(r.message)));
   });
 
+  it('keeps a line along a row unbroken where the row\'s text is hidden', () => {
+    const definition: ReportDefinition = { ...emptyDefinition(), groups: ['Orders.Region'],
+      formulas: [{ name: 'Off', index: 1, kind: 'conditionalFormat', text: '{Orders.Amount} = 0', referencedFields: ['Orders.Amount'] },
+        { name: 'Group #1 Order', index: 2, kind: 'internal', text: '', referencedFields: ['Orders.Region'] }],
+      layout: [
+        ...['PageHeaderArea1', 'PageFooterArea1', 'ReportHeaderArea1', 'ReportFooterArea1'].map((name) => ({ name, sections: [{ name, height: 0, suppressed: true, objects: [] }] })),
+        { name: 'GroupHeaderArea1', sections: [{ name: 'GH', height: 240, objects: [{ kind: 'field', name: 'Head', field: 'Orders.Region', position: { x: 0, y: 0 }, size: { width: 2880, height: 200 } }] }] },
+        { name: 'GroupFooterArea1', sections: [{ name: 'GF', height: 375, objects: [
+          { kind: 'text', name: 'Label', text: 'TOTALS', position: { x: 300, y: 40 }, size: { width: 1200, height: 180 }, conditions: { suppress: { name: 'Off', index: 1 } } },
+          { kind: 'field', name: 'Sum', field: 'Sum of Orders.Amount', position: { x: 2880, y: 40 }, size: { width: 1440, height: 180 }, border: { sides: [0, 0, 1, 0], width: 20 }, conditions: { suppress: { name: 'Off', index: 1 } } },
+          { kind: 'line', name: 'Under', position: { x: 0, y: 315 }, size: { width: 4320, height: 0 }, border: { sides: [0, 0, 1, 0], width: 60 } }] }] },
+        { name: 'DetailArea1', sections: [{ name: 'D', height: 220, objects: [
+          { kind: 'field', name: 'Who', field: 'Orders.Customer', position: { x: 0, y: 0 }, size: { width: 2880, height: 200 } },
+          { kind: 'field', name: 'Amt', field: 'Orders.Amount', position: { x: 2880, y: 0 }, size: { width: 1440, height: 200 } }] }] }] };
+    const root = parseXml(convertToRdl(definition, source, { reportName: 'R' }).rdl);
+    const label = descendants(root).find((e) => e.name === 'Textbox' && descendants(e).some((v) => v.name === 'Value' && /TOTALS/.test(textOf(v))))!;
+    const sum = descendants(root).find((e) => e.name === 'Textbox' && descendants(e).some((v) => v.name === 'Value' && /Sum\(Fields!Amount/.test(textOf(v))))!;
+    for (const box of [label, sum]) {
+      assert.ok(!child(box, 'Visibility'), 'stays in place, so the line along its row is drawn');
+      assert.match(descendants(box).find((v) => v.name === 'Value')!.children.join(''), /^=IIf\(\(Fields!Amount\.Value = 0\), Nothing, /);
+      assert.equal(textOf(child(box, 'Style/BottomBorder/Width')), '3.50pt');
+    }
+    assert.match(textOf(child(sum, 'Style/TopBorder/Style')), /^=IIf\(\(\(Fields!Amount\.Value = 0\)\) OrElse IsNothing\(Sum\(Fields!Amount\.Value\)\), "None", "Solid"\)$/);
+    assert.equal(textOf(child(sum, 'Style/TopBorder/Width')), '1.00pt');
+  });
+
   it('reads a group\'s name through the formula that names the group', () => {
     const definition: ReportDefinition = { ...emptyDefinition(), groups: ['Orders.Region'], groupNameFormulas: [{ field: 'Orders.Region', formula: 'Side' }],
       formulas: [

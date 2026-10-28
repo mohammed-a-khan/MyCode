@@ -1517,7 +1517,11 @@ class RdlBuilder {
     // A total's own rule: not drawn where the total is empty (a group with nothing to add up).
     // So is a field's own line in a row printed with or without records (no value when there are none).
     const total = obj?.kind === 'field' && (/^=\s*(Sum|Count|CountDistinct|Avg|Min|Max)\(/i.test(value) || (this.ungroupedRows && value.startsWith('='))) ? value.slice(1) : undefined;
-    const blankWhen = total && obj?.border && !obj.border.sides.every((side) => side > 0) ? `IsNothing(${total})` : undefined;
+    const ownBlank = total && obj?.border && !obj.border.sides.every((side) => side > 0) ? `IsNothing(${total})` : undefined;
+    const off = hidden && suppress ? `(${hidden.slice(1)}) OrElse (${suppress.slice(1)})` : (hidden ?? suppress)?.slice(1);
+    const keepsRule = !!off && off !== 'True' && !!(lines.top || lines.bottom || lines.left || lines.right);
+    const blankWhen = keepsRule ? (ownBlank ? `(${off}) OrElse ${ownBlank}` : off) : ownBlank;
+    const blanked = (v: string) => (keepsRule ? `=IIf(${off}, Nothing, ${v.startsWith('=') ? v.slice(1) : vbString(v)})` : v);
     // Formulas moving the object across (X position) and changing its width, in twips from its own place and size
     // (DefaultAttribute leaves them): the text moves within its box by as much (its left edge with X, its right edge
     // with X and the width), from where the object is in its cell (not the capped padding), in whole points (a size
@@ -1545,7 +1549,7 @@ class RdlBuilder {
       el('CanGrow', scope === 'page' ? 'false' : 'true'),
       el('KeepTogether', 'true'),
       el('Paragraphs', ...(paragraphs ?? [{ value, align: obj?.align }]).map((p) => el('Paragraph',
-        el('TextRuns', el('TextRun', el('Value', p.value), this.textRunStyle(obj, format, scope))),
+        el('TextRuns', el('TextRun', el('Value', blanked(p.value)), this.textRunStyle(obj, format, scope))),
         el('Style', p.align ? el('TextAlign', TEXT_ALIGN[p.align]) : null),
         indent ? el('LeftIndent', `${(indent / 20).toFixed(1)}pt`) : null))),
       hyperlink ? el('ActionInfo', el('Actions', el('Action', el('Hyperlink', hyperlink)))) : null,
@@ -1554,7 +1558,7 @@ class RdlBuilder {
       box ? el('Left', inches(box.left)) : null,
       box ? el('Height', inches(box.height)) : null,
       box ? el('Width', inches(box.width)) : null,
-      hidden || suppress ? el('Visibility', el('Hidden', hidden && suppress ? `=(${hidden.slice(1)}) OrElse (${suppress.slice(1)})` : (hidden ?? suppress)!)) : null,
+      (hidden || suppress) && !keepsRule ? el('Visibility', el('Hidden', hidden && suppress ? `=(${hidden.slice(1)}) OrElse (${suppress.slice(1)})` : (hidden ?? suppress)!)) : null,
       // Crystal draws text right up to the object's edges: SSRS's default 2pt padding would make it wrap sooner.
       el('Style', ...this.borderStyle(border, lines, lineFormulas, blankWhen),
         // Crystal keeps a text object's text a little inside its own border.
