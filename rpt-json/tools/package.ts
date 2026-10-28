@@ -335,14 +335,16 @@ function findCsc(): string | undefined {
   return undefined;
 }
 
-function filesUnder(dir: string, base = dir): string[] {
-  const out: string[] = [];
-  for (const name of readdirSync(dir).sort()) {
-    const path = join(dir, name);
-    if (statSync(path).isDirectory()) out.push(...filesUnder(path, base));
-    else out.push(path.slice(base.length + 1));
+function readLater(path: string): Uint8Array {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return readFileSync(path);
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (attempt >= 10 || (code !== 'EPERM' && code !== 'EBUSY' && code !== 'EACCES')) throw err;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500 * attempt);
+    }
   }
-  return out;
 }
 
 if (typeof stripTypeScriptTypes !== 'function') fail(`Node ${process.version} is too old to build the app: use Node 22.13 or newer.`);
@@ -430,7 +432,8 @@ writeFileSync(join(outDir, 'README.txt'), [
   '',
 ].join('\r\n'));
 
-const entries = filesUnder(outDir).map((rel) => ({ name: `${APP}/${rel.split(/[\\/]/).join('/')}`, data: readFileSync(join(outDir, rel)) }));
+const packedFiles = [`${APP}.exe`, `Start ${APP} (if the .exe is blocked).cmd`, 'start.sh', 'README.txt', `runtime/${nodeName}`, 'runtime/app.cjs', 'runtime/app.dat'];
+const entries = packedFiles.filter((rel) => existsSync(join(outDir, rel))).map((rel) => ({ name: `${APP}/${rel}`, data: readLater(join(outDir, rel)) }));
 const zipPath = resolve(root, 'dist', `${APP}.zip`);
 writeFileSync(zipPath, zipFiles(entries));
 console.log(`\nDone:\n  folder  ${outDir}\n  zip     ${zipPath} (${Math.round(statSync(zipPath).size / 1048576)} MB)\nShare the zip: people unzip it and start ${APP}.`);
