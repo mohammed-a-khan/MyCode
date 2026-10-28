@@ -506,8 +506,11 @@ class RdlBuilder {
     // Text objects show only the lines their height holds, as in Crystal.
     this.definition = { ...spread.definition, layout: spread.definition.layout.map((area) => ({ ...area,
       sections: area.sections.map((section) => ({ ...section, objects: section.objects.map(clippedText) })) })) };
+    const listsRows = classifyAreas(this.definition.layout).detail.some((d) => !d.suppressed || d.conditions?.suppress);
     for (const field of this.definition.groupsKeptTogether ?? []) {
-      this.note(`Group on ${field}`, 'is kept together on a page (Crystal Keep Group Together, read from the group record): a value that does not fit in what is left of a page starts the next; SSRS does this in print and PDF, its web viewer may not');
+      this.note(`Group on ${field}`, listsRows
+        ? 'is kept together in the report (Keep Group Together) and lists rows: after the first, each value with data starts a new page; the first starts under the headings, and one with no data (its first column empty on every row, such as a no-data line) follows on the same page'
+        : 'is kept together on a page (Keep Group Together, read from the group record): a value that does not fit in what is left of a page starts the next; SSRS does this in print and PDF, its web viewer may not');
     }
     if (spread.columns) {
       this.note('Layout', `${spread.columns} columns are placed by X position formulas (each read from the data); they are laid out side by side in their design order, so their places do not follow the data`);
@@ -606,6 +609,10 @@ class RdlBuilder {
     formula: (name) => (/^__shared_/i.test(name) ? sharedToken(name.slice(9).toLowerCase()) : this.formulaExpression(name) ?? undefined),
     parameter: (name) => this.parameterName(name),
     groupScope: (ref) => this.groupScopeOf(ref),
+    groupName: (ref) => {
+      const named = this.groupNamingFormula(ref);
+      return named ? this.formulaExpression(named) ?? undefined : undefined;
+    },
     dataset: () => this.dataset,
     runningTotal: (name) => this.runningTotalExpression(name, `Running total {#${name}}`),
     customFunction: (name) => this.customFunction(name),
@@ -839,7 +846,17 @@ class RdlBuilder {
       customFunction: (fn) => this.definition.formulas.find((f) => f.name.toLowerCase() === fn.toLowerCase() && isCustomFunction(f.text))?.text,
       addFunction: (fnKey, text) => this.addSqlFunction(fnKey, fnKey.startsWith('custom:') ? fnKey.slice(7) : fnKey === 'helper:splitpart' ? 'SplitPart' : fnKey === 'helper:splitpartnocase' ? 'SplitPartNoCase' : this.sqlFormulaName, text),
       variable: at ? (name) => this.printValue(name.toLowerCase(), at) : undefined,
+      groupName: (ref) => {
+        const named = this.groupNamingFormula(ref);
+        return named ? this.formulaSql(named) : undefined;
+      },
     });
+  }
+
+  private groupNamingFormula(ref: string): string | undefined {
+    const level = this.groupFields.findIndex((g) => g.toLowerCase() === ref.toLowerCase()) + 1;
+    if (!level) return undefined;
+    return this.definition.groupNameFormulas?.find((g) => g.field.toLowerCase() === ref.toLowerCase())?.formula;
   }
 
   /** A field of the query (a column, or a formula worked out in it, per record) as SQL, for windows over the rows. */
@@ -1434,27 +1451,30 @@ class RdlBuilder {
 
   /** Border and background elements for an item's Style. */
   private borderStyle(border: BorderInfo | undefined, extra: { top?: boolean; bottom?: boolean; left?: boolean; right?: boolean } = {}, formulas: { top?: string; bottom?: string; left?: string; right?: string } = {}, blankWhen?: string): XmlElement[] {
+    const at = { LeftBorder: 0, RightBorder: 1, TopBorder: 2, BottomBorder: 3 } as Record<string, number>;
     const side = (name: string, style: number, formula?: string, own = false) => {
+      const width = border?.sideWidths && at[name] !== undefined ? border.sideWidths[at[name]!] : border?.width;
+      const points = `${Math.max(0.25, (width ?? 20) / 20).toFixed(2)}pt`;
       if (!formula && own && blankWhen && BORDER_STYLES[style]) {
         // The object's own line, left out where its value is empty.
         return el(name,
           el('Color', border?.color ?? 'Black'),
           el('Style', `=IIf(${blankWhen}, "None", "${BORDER_STYLES[style]}")`),
-          el('Width', `${Math.max(0.25, ((border?.width ?? 20) / 20)).toFixed(2)}pt`));
+          el('Width', points));
       }
       if (formula) {
         // A line style formula decides the side's line; DefaultAttribute keeps the object's own.
         return el(name,
           el('Color', border?.color ?? 'Black'),
           el('Style', `=IIf(IsNothing(${formula}), "${BORDER_STYLES[style] ?? 'None'}", ${formula})`),
-          el('Width', `${Math.max(0.25, ((border?.width ?? 20) / 20)).toFixed(2)}pt`));
+          el('Width', points));
       }
       const lineStyle = BORDER_STYLES[style];
       if (!lineStyle) return null;
       return el(name,
         border?.color ? el('Color', border.color) : null,
         el('Style', lineStyle),
-        border?.width ? el('Width', `${Math.max(0.25, (border.width / 20)).toFixed(2)}pt`) : null);
+        width ? el('Width', points) : null);
     };
     const [sideLeft, sideRight, sideTop, sideBottom] = border?.sides ?? [0, 0, 0, 0];
     // Lines drawn along a table row become that row's top/bottom border; lines down the table, left/right borders.
@@ -1463,7 +1483,8 @@ class RdlBuilder {
     const left = extra.left && !sideLeft ? 1 : sideLeft;
     const right = extra.right && !sideRight ? 1 : sideRight;
     const conditional = !!(formulas.top || formulas.bottom || formulas.left || formulas.right);
-    const same = left === right && right === top && top === bottom && !conditional && !blankWhen;
+    const mixed = !!border?.sideWidths && new Set(border.sideWidths.filter((_, i) => [left, right, top, bottom][i])).size > 1;
+    const same = left === right && right === top && top === bottom && !conditional && !blankWhen && !mixed;
     const out: XmlElement[] = [];
     if (same && left > 0) out.push(side('Border', left)!);
     else {
@@ -2422,7 +2443,12 @@ class RdlBuilder {
     if (!ruled.top && !ruled.bottom && !ruled.left && !ruled.right) return border;
     // A line along the row keeps its own width (Crystal draws thick rules under headings).
     const along = (ruled.top || ruled.bottom) && ruled.width ? ruled.width + 10 : 0;
-    return { ...(border ?? { sides: [0, 0, 0, 0] }), width: Math.max(border?.width ?? 0, this.tableRuleWidth + 10, along) };
+    const rule = Math.max(border?.width ?? 0, this.tableRuleWidth + 10, along);
+    const own = border?.width ?? 20;
+    const sides = border?.sides ?? [0, 0, 0, 0];
+    const flags = [ruled.left, ruled.right, ruled.top, ruled.bottom];
+    const sideWidths = sides.map((style, i) => (flags[i] ? rule : style ? own : rule)) as [number, number, number, number];
+    return { ...(border ?? { sides: [0, 0, 0, 0] }), width: rule, sideWidths };
   }
 
   private ruledBorderObject(obj: ReportObject | undefined, ruled: { top?: boolean; bottom?: boolean; left?: boolean; right?: boolean; width?: number }): ReportObject | undefined {
@@ -3263,17 +3289,32 @@ class RdlBuilder {
         rows.push(...emptyRows);
         continue;
       }
+      const keptTogether = !!this.definition.groupsKeptTogether?.some((g) => g.toLowerCase() === field.toLowerCase());
+      const listsRows = areas.detail.some((d) => !d.suppressed || d.conditions?.suppress);
+      const ownBreak = pageBreak(areas.groupHeaders.get(level), areas.groupFooters.get(level));
+      let keptBreak: XmlElement | null = null;
+      if (!ownBreak && keptTogether && listsRows) {
+        const lead = areas.detail.filter((d) => !d.suppressed || d.conditions?.suppress).flatMap((d) => d.objects)
+          .filter((o) => o.kind === 'field' && o.field && !o.suppressed && !o.field.startsWith('@') && !/^(Sum|Count|Average|Maximum|Minimum) of /i.test(o.field))
+          .sort((a, b) => (a.position?.x ?? 0) - (b.position?.x ?? 0) || (a.position?.y ?? 0) - (b.position?.y ?? 0))[0];
+        const leadValue = lead ? this.fieldObjectValue(lead.field!, 'row', `Group ${level}`).expression : 'Nothing';
+        const empty = leadValue !== 'Nothing' ? `Sum(IIf(IsNothing(${leadValue}) OrElse Len(Trim(CStr(${leadValue}))) = 0, 0, 1)) = 0` : '';
+        const ordered = sortValue === `=${expression}`;
+        const first = ordered ? `(${expression}) = ${descending ? 'Max' : 'Min'}(${expression}, ${vbString(this.dataset)})` : '';
+        const off = [first ? `(${first})` : '', empty ? `(${empty})` : ''].filter(Boolean).join(' OrElse ');
+        keptBreak = el('PageBreak', el('BreakLocation', ordered ? 'Start' : 'Between'), off ? el('Disabled', `=${off}`) : null);
+      }
       member = el('TablixMember',
         el('Group', { Name: this.groupNames[level - 1] },
           el('GroupExpressions', el('GroupExpression', `=${expression}`)),
-          pageBreak(areas.groupHeaders.get(level), areas.groupFooters.get(level)),
+          ownBreak ?? keptBreak,
           filters.length ? el('Filters', ...filters) : null),
         el('SortExpressions', el('SortExpression', el('Value', sortValue), descending ? el('Direction', 'Descending') : null),
           // Groups sorted by a summary keep Crystal's order among equal summaries: by the group's own value.
           sortValue !== `=${expression}` ? el('SortExpression', el('Value', `=${expression}`), (fieldSort?.descending ?? groupOrder === 1) ? el('Direction', 'Descending') : null) : null),
         el('TablixMembers', ...headerMembers[level - 1], member, ...footerMembers[level - 1]),
         // Keep Group Together: a group that does not fit in what is left of the page starts on the next.
-        this.definition.groupsKeptTogether?.some((g) => g.toLowerCase() === field.toLowerCase()) ? el('KeepTogether', 'true') : null);
+        keptTogether && !listsRows ? el('KeepTogether', 'true') : null);
     }
 
     const left = twipsToInches(columns[0].x);

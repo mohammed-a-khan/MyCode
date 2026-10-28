@@ -1510,14 +1510,15 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           if (!r) return el('TablixCell', el('CellContents', newTextbox(`__rule_${c}`, '', '0pt')));
           const st = childElements(r.t, 'Style')[0]!;
           const border = child(st, 'TopBorder');
-          const hidden = textOf(child(r.t, 'Visibility/Hidden')).replace(/^=/, '').trim();
+          const holder = cellItem(cell);
+          const hidden = [r.t, ...(holder && holder !== r.t ? [holder] : [])].map((e) => textOf(child(e, 'Visibility/Hidden')).replace(/^=/, '').trim()).filter(Boolean).join(') OrElse (');
           const shownValue = valueOf(r.t).replace(/^=/, '').trim();
-          const off = [hidden && hidden !== 'false' ? `(${hidden})` : '', shownValue ? `IsNothing(${shownValue})` : ''].filter(Boolean).join(' OrElse ');
+          const off = [hidden && !/^false$/i.test(hidden) ? `(${hidden})` : '', shownValue ? `IsNothing(${shownValue})` : ''].filter(Boolean).join(' OrElse ');
           const line = el('Line', { Name: `__ruleLine_${c}` }, el('Top', inch(height - 0.01)), el('Left', inch(r.left)), el('Height', '0in'), el('Width', inch(r.width)),
             off ? el('Visibility', el('Hidden', `=${off}`)) : null,
             el('Style', el('Border', ...childElements(border ?? el('Border', el('Style', 'Solid'))).map((e) => structuredClone(e)))));
           const drawn = child(child(line, 'Style')!, 'Border')!;
-          setChild(drawn, 'Width', `${Math.max(1.5, (inches(textOf(child(drawn, 'Width'))) ?? 0) * 72).toFixed(2)}pt`);
+          setChild(drawn, 'Width', `${Math.max(0.75, (inches(textOf(child(drawn, 'Width'))) ?? 0) * 72).toFixed(2)}pt`);
           removeChildren(st, ['TopBorder']);
           setChild(st, 'VerticalAlign', 'Top');
           setChild(st, 'PaddingTop', '0pt');

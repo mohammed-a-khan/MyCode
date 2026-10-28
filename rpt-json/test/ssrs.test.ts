@@ -946,11 +946,31 @@ describe('layout conversion', () => {
     const definition: ReportDefinition = { ...emptyDefinition(), groups: ['Orders.Region'], groupsKeptTogether: ['Orders.Region'], layout: [
       { name: 'DetailArea1', sections: [{ name: 'D', height: 220, objects: [{ kind: 'field', name: 'Amt', field: 'Orders.Amount', position: { x: 0, y: 0 }, size: { width: 1440, height: 200 } }] }] },
     ] };
-    const { rdl, review } = convertToRdl(definition, source, { reportName: 'K' });
+    const listed = convertToRdl(definition, source, { reportName: 'K' });
+    assert.ok(!/<KeepTogether>true<\/KeepTogether>\s*<\/TablixMember>/.test(listed.rdl));
+    assert.ok(listed.review.some((r) => /lists rows: after the first, each value with data starts a new page/.test(r.message)));
+    assert.match(listed.rdl, /<PageBreak>\s*<BreakLocation>Start<\/BreakLocation>\s*<Disabled>=\(\(Fields!Region\.Value\) = Min\(Fields!Region\.Value, "DataSet1"\)\) OrElse \(Sum\(IIf\(IsNothing\(Fields!Amount\.Value\) OrElse Len\(Trim\(CStr\(Fields!Amount\.Value\)\)\) = 0, 0, 1\)\) = 0\)<\/Disabled>\s*<\/PageBreak>/);
+    const totalsOnly: ReportDefinition = { ...definition, layout: [
+      { name: 'GroupFooterArea1', sections: [{ name: 'GF', height: 220, objects: [{ kind: 'field', name: 'Sum', field: 'Orders.Amount', position: { x: 0, y: 0 }, size: { width: 1440, height: 200 } }] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 220, suppressed: true, objects: [] }] },
+    ] };
+    const { rdl, review } = convertToRdl(totalsOnly, source, { reportName: 'K' });
     assert.match(rdl, /<\/TablixMembers>\s*<KeepTogether>true<\/KeepTogether>\s*<\/TablixMember>/);
-    // No page break of its own: a value moves to the next page only when it does not fit (as Crystal does).
     assert.ok(!/<PageBreak>/.test(rdl));
     assert.ok(review.some((r) => /kept together on a page/.test(r.message)));
+  });
+
+  it('reads a group\'s name through the formula that names the group', () => {
+    const definition: ReportDefinition = { ...emptyDefinition(), groups: ['Orders.Region'], groupNameFormulas: [{ field: 'Orders.Region', formula: 'Side' }],
+      formulas: [
+        { name: 'Side', kind: 'formula', text: 'if {Orders.Region} = "N" then "North Side" else "South Side"', referencedFields: ['Orders.Region'], valueType: 'string' },
+        { name: 'Note', kind: 'formula', text: '"NO " + Left (GroupName ({Orders.Region}), 5)', referencedFields: ['Orders.Region'], valueType: 'string' }],
+      layout: [{ name: 'DetailArea1', sections: [{ name: 'D', height: 220, objects: [{ kind: 'field', name: 'Msg', field: '@Note', position: { x: 0, y: 0 }, size: { width: 2880, height: 200 } }] }] }] };
+    const plain = convertToRdl(definition, source, { reportName: 'G' }).rdl;
+    assert.match(plain, /Left\(\(Fields!F_Side\.Value\), 5\)|Left\(\(IIf\(/);
+    assert.ok(!/Left\(Fields!Region\.Value, 5\)/.test(plain));
+    const inQuery = convertToRdl(definition, source, { reportName: 'G', formulasInQuery: true }).rdl;
+    assert.match(inQuery, /LEFT\(CASE[\s\S]*?North Side[\s\S]*?END, 5\)/);
   });
 
   it('gives a message shown on some rows only a row of its own, hidden where it is blank', () => {

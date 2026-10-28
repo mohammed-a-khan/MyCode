@@ -165,6 +165,7 @@ export interface BorderInfo {
   background?: string;
   /** Line width in twips. */
   width?: number;
+  sideWidths?: [number, number, number, number];
 }
 
 export interface CrossTabInfo {

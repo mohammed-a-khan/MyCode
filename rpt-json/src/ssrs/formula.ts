@@ -17,6 +17,7 @@ export interface FormulaContext {
   parameter(name: string): string;
   /** SSRS group scope for a Crystal group field ("Table.Field"), used by aggregates. */
   groupScope?(fieldRef: string): string | undefined;
+  groupName?(fieldRef: string): string | undefined;
   /** Expression for a running total ({#name}), or undefined if unknown. */
   runningTotal?(name: string): string | undefined;
   /** VB name of a Crystal custom function (a formula written as "Function (...)"), or undefined. */
@@ -1722,8 +1723,11 @@ export class Emitter {
         return '(RowNumber(Nothing) = 1)';
       case 'onlastrecord':
         return '(RowNumber(Nothing) = CountRows("DataSet1"))';
-      case 'groupname':
+      case 'groupname': {
+        const named = args[0]?.t === 'field' ? this.ctx.groupName?.(args[0].ref) : undefined;
+        if (named) return `(${named})`;
         return args[0] ? this.emit(args[0]) : 'Nothing';
+      }
       case 'drilldowngrouplevel':
         this.note('uses DrillDownGroupLevel, which has no SSRS equivalent; 0 was used');
         return '0';
@@ -2292,6 +2296,7 @@ export interface FormulaSqlContext {
    * (a running total or count over the report's groups); undefined where it cannot be worked out so.
    */
   variable?(name: string): { sql: string; type: SqlType } | undefined;
+  groupName?(fieldRef: string): { sql: string; type: SqlType } | undefined;
 }
 
 /** What a print-time formula does with a variable kept from record to record. */
@@ -2647,6 +2652,11 @@ export function formulaToSql(source: string, ctx: FormulaSqlContext): { sql: str
         return asBool(cond({ t: 'call', name: 'IsNull', args }), '');
       case 'not':
         return asBool(`NOT (${cond(args[0]!)})`, nullWhen(args));
+      case 'groupname': {
+        const named = args[0]?.t === 'field' ? ctx.groupName?.(args[0].ref) : undefined;
+        if (named) return named;
+        return refuse('it shows a group\'s name, which is worked out in the report');
+      }
       case 'chr': case 'chrw': return { sql: `NCHAR(${whole(one())})`, type: 'string' };
       case 'uppercase': case 'ucase': return { sql: `UPPER(${text(one())})`, type: 'string' };
       case 'lowercase': case 'lcase': return { sql: `LOWER(${text(one())})`, type: 'string' };

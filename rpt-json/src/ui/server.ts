@@ -299,9 +299,10 @@ async function runCommand(job: Job, request: RunRequest): Promise<number> {
       const input = await staged(job, inputs);
       const command = request.command;
       const texts = lines(o.texts);
-      if (command === 'layout' && !texts.length && !o.sections) throw new Error('Give at least one text to look for, or tick "All sections".');
+      const scope = o.scope === 'texts' ? [] : o.scope === 'sections' ? ['--sections'] : ['--all'];
+      if (command === 'layout' && !texts.length && !scope.length) throw new Error('Give at least one text to look for, or choose to show every section.');
       return perFile(job, input, command === 'check-width' ? /\.rdl$/i : /\.(rpt|json)$/i, async (file, rel) => {
-        const args = command === 'layout' ? ['layout', file, ...texts, ...(o.sections ? ['--sections'] : [])] : [command, file];
+        const args = command === 'layout' ? ['layout', file, ...texts, ...scope] : [command, file];
         const { code, stdout } = await captured(job, args);
         if (code) throw new Error('failed');
         await writeOut(swap(rel, command === 'inspect' ? '.inspect.json' : `.${command}.txt`), stdout);

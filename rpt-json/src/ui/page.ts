@@ -124,8 +124,8 @@ var TABS = [
     input: { label: 'Files', filter: RPT + '|' + RDL, ext: /\\.(rpt|json|rdl)$/i },
     groups: [ { title: 'Options', fields: [
       { id: 'tool', type: 'select', label: 'Tool', options: [['inspect', 'Inspect: decoded details of a .rpt'], ['charts', 'Charts: how each chart is stored'], ['layout', 'Layout: sections and objects showing a text'], ['check-width', 'Widths: what in an .rdl reaches past the page']] },
-      { id: 'texts', type: 'textarea', label: 'Texts to look for', help: 'One per line. Use #N for subreport N.', showIf: 'tool=layout' },
-      { id: 'sections', type: 'check', label: 'All sections', showIf: 'tool=layout' } ] } ] },
+      { id: 'scope', type: 'select', label: 'Show', options: [['all', 'Everything: every section and object'], ['sections', 'Every section, objects only where a text is found'], ['texts', 'Only where one of the texts below is found']], showIf: 'tool=layout' },
+      { id: 'texts', type: 'textarea', label: 'Texts to look for', help: 'One per line. Use #N for subreport N. Optional unless only matches are shown.', showIf: 'tool=layout' } ] } ] },
 ];
 
 var settings = {};
