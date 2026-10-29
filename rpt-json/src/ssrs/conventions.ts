@@ -3196,8 +3196,8 @@ function summarize(tablix: XmlElement): void {
       const at = open.filter((k) => starts[k]! <= label.x + 0.01).pop() ?? 0;
       const inset = label.x - starts[at]!;
       let across = 1;
-      while (at > 0 && room(0) < need && at + across < valueCol && widths.slice(at, at + across).reduce((x, y) => x + y, 0) - inset < need) across++;
-      const spans = at > 0 && room(0) < need && across > 1 && widths.slice(at, at + across).reduce((x, y) => x + y, 0) - inset >= need && slots.slice(at, at + across).every((x) => x === undefined);
+      while (room(0) < need && at + across < valueCol && widths.slice(at, at + across).reduce((x, y) => x + y, 0) - inset < need) across++;
+      const spans = room(0) < need && across > 1 && widths.slice(at, at + across).reduce((x, y) => x + y, 0) - inset >= need && slots.slice(at, at + across).every((x) => x === undefined);
       const labelCol = spans ? at : room(0) >= need ? 0 : open.find((k) => starts[k]! + widths[k]! > label.x && room(k) >= need) ?? open.reduce((a, k) => (widths[k]! > widths[a]! ? k : a), 0);
       place(label, labelCol);
       labelAside = labelCol > 0;
@@ -3247,7 +3247,7 @@ function summarize(tablix: XmlElement): void {
       summaryNames.set(blank, `Txt_${++blanks}`);
       return el('TablixCell', el('CellContents', blank));
     });
-    if (before) for (const c of cells) { const st = childElements(cellItem(c)!, 'Style')[0]; if (st) { removeChildren(st, ['BottomBorder']); st.children.push(structuredClone(before.border)); } }
+    if (before) for (const c of cells) { const st = childElements(cellItem(c) ?? el('x'), 'Style')[0]; if (st) { removeChildren(st, ['BottomBorder']); st.children.push(structuredClone(before.border)); } }
     const built = el('TablixRow', el('Height', inch(Math.max(0.17, height))), el('TablixCells', ...cells));
     summaryHeights.set(built, Math.max(0.17, height));
     return built;
@@ -3329,10 +3329,10 @@ function summarize(tablix: XmlElement): void {
       const st = childElements(title, 'Style')[0];
       if (st) { st.children.push({ ...structuredClone(border), name: 'BottomBorder' }); continue; }
     }
-    if (border) for (const c of cellsOf(target)) { const st = childElements(cellItem(c)!, 'Style')[0]; if (st) { removeChildren(st, [side]); st.children.push(structuredClone(border)); } }
+    if (border) for (const c of cellsOf(target)) { const st = childElements(cellItem(c) ?? el('x'), 'Style')[0]; if (st) { removeChildren(st, [side]); st.children.push(structuredClone(border)); } }
     if (border && side === 'BottomBorder' && built.length > lines.length) for (const c of cellsOf(built[lines.length - 1]!)) {
-      const t = cellItem(c)!;
-      const st = childElements(t, 'Style')[0];
+      const t = cellItem(c);
+      const st = t && childElements(t, 'Style')[0];
       if (!st) continue;
       removeChildren(st, [side]);
       if (textOf(child(st, 'VerticalAlign')) === 'Bottom') {
