@@ -5064,15 +5064,6 @@ function applyStyleRoles(report: XmlElement, style: NonNullable<Conventions['sty
         setChild(s, prop, `=${expr(field(role, word))}`);
       }
     }
-    for (const prop of ['TextAlign'] as const) {
-      const word = style.props[prop];
-      if (!word) continue;
-      for (const p of descendants(tb).filter((e) => e.name === 'Paragraph')) {
-        let ps = child(p, 'Style');
-        if (!ps) p.children.push((ps = el('Style')));
-        setChild(ps, prop, `=${expr(field(role, word))}`);
-      }
-    }
     const own = ownStyle(tb);
     if (style.props.VerticalAlign && !underRule.has(tb)) setChild(own, 'VerticalAlign', `=${expr(field(role, style.props.VerticalAlign))}`);
     // Fills: a table's title, headings, group rows and totals take their role's; data rows the odd and even bands.

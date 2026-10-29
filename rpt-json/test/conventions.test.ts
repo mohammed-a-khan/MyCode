@@ -65,6 +65,15 @@ const conventions = readConventions(JSON.stringify({
 const byName = (root: XmlElement, name: string) => descendants(root).find((e) => e.attributes.Name === name);
 const valueIn = (e: XmlElement | undefined) => textOf(descendants(e ?? { name: '', attributes: {}, children: [] }).find((x) => x.name === 'Value'));
 
+describe('conventions keeping the alignment', () => {
+  it('leaves each text set across as the report had it, whatever the theme says', () => {
+    const aligned = { ...conventions, style: { ...conventions.style!, props: { ...conventions.style!.props, TextAlign: 'align' } } };
+    const out = parseXml(applyConventions(converted(), 'Orders', aligned).rdl);
+    const set = descendants(out).filter((e) => e.name === 'TextAlign').map((e) => textOf(e));
+    assert.ok(!set.some((v) => v.includes('align')), set.join(' | '));
+  });
+});
+
 describe('conventions', () => {
   const { rdl, review, settled } = applyConventions(converted(), 'Orders', conventions);
   const root = parseXml(rdl);
