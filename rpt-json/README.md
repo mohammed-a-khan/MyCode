@@ -30,6 +30,7 @@ node src/cli.ts to-json  report.rpt report.json          # full JSON (original b
 node src/cli.ts to-rpt   report.json rebuilt.rpt
 node src/cli.ts to-rdl   report.rpt out/                 # SSRS .rdl (+ subreports) and a review checklist
 node src/cli.ts to-rdl   reports/ out/                   # every .rpt in a folder and its subfolders
+node src/cli.ts to-rdl   "reports/sales_*_v2.rpt" out/    # every .rpt in that folder whose name matches (* any text, ? one letter)
 node src/cli.ts to-rdl   report.rpt out/ --house style.json                # Crystal layout, house fonts and colours
 node src/cli.ts to-rdl   report.rpt out/ --template house.rdl              # in the style of an existing report
 node src/cli.ts to-rdl   reports/ out/ --conventions team.json            # as a team's report templates

@@ -13,7 +13,7 @@ import { checkRdlWidths } from './ssrs/widthcheck.ts';
 import { diagnoseRdl, diagnosisLine, diagnosisText, type Finding } from './ssrs/diagnose.ts';
 import { extractHeaders, formatHeadersCsv, formatHeadersText, type HeaderText } from './crystal/headers.ts';
 import { lstat, mkdir, readdir, stat, unlink } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { compareReports, differencesCsv, summaryHtml, summaryText, verdict } from './pdf/compare.ts';
 
 /**
@@ -32,12 +32,24 @@ async function findReports(top: string, folder = ''): Promise<{ file: string; fo
   return found;
 }
 
+async function matchReports(pattern: string): Promise<{ file: string; folder: string }[]> {
+  const name = basename(pattern);
+  const dir = dirname(pattern);
+  const re = new RegExp(`^${name.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`, 'i');
+  const found: { file: string; folder: string }[] = [];
+  for (const entry of (await readdir(dir)).sort()) {
+    const path = join(dir, entry);
+    if (re.test(entry) && /\.(rpt|json)$/i.test(entry) && (await stat(path)).isFile()) found.push({ file: path, folder: '' });
+  }
+  return found;
+}
+
 const USAGE = `Crystal Reports .rpt <-> JSON converter
 
 Usage:
   rpt-json to-json <input.rpt> [output.json] [--hex] [--no-metadata] [--no-decode] [--no-original] [--compact]
   rpt-json to-rpt  <input.json> <output.rpt> [--no-verify] [--cfb-version 3|4]
-  rpt-json to-rdl  <input.rpt|input.json|folder> [output-dir] [--connection "<connection string>"]
+  rpt-json to-rdl  <input.rpt|input.json|folder|"name_*.rpt"> [output-dir] [--connection "<connection string>"]
                    [--shared-datasource <name>] [--template <house.rdl>] [--separate-subreports]
                    [--page-number] [--parameter name=value]... [--chart-axis-format <format>] [--house <style.json>]
                    [--conventions <conventions.json> [--prefix <short name>]] [--split-subreports [--parts-format standalone|report]]
@@ -295,7 +307,7 @@ export async function main(argv: string[]): Promise<number> {
       if (connectionString || sharedDataSource) console.error('NOTE --connection and --shared-datasource are ignored with --template: the template\'s data source is used');
     }
     // A folder: every .rpt in it and its subfolders.
-    const expandAll = async (path: string) => ((await stat(path)).isDirectory() ? findReports(path) : [{ file: path, folder: '' }]);
+    const expandAll = async (path: string) => (/[*?]/.test(basename(path)) ? matchReports(path) : (await stat(path)).isDirectory() ? findReports(path) : [{ file: path, folder: '' }]);
     const expand = async (path: string) => (await expandAll(path)).map((f) => f.file);
     const load = async (file: string) => {
       const raw = await readFile(file);
@@ -325,7 +337,7 @@ export async function main(argv: string[]): Promise<number> {
     const [input, outputDir = '.'] = positionals(args, 'to-rdl', 2);
     if (!input) throw new Error('to-rdl needs an input .rpt/.json file or a folder of .rpt files (subfolders included)');
     const inputs = await expandAll(input);
-    if (inputs.length === 0) throw new Error(`no .rpt files in ${input} or its subfolders`);
+    if (inputs.length === 0) throw new Error(/[*?]/.test(basename(input)) ? `no .rpt files match ${input}` : `no .rpt files in ${input} or its subfolders`);
     await mkdir(outputDir, { recursive: true });
     let failures = 0;
     // The check of every finished file, written together so a folder is judged from one short text.
