@@ -601,3 +601,49 @@ describe('a block of figures over a table with a narrow first column', () => {
     }
   });
 });
+
+describe('a single line of figures between a title and the headings', () => {
+  const T = 'Lots';
+  const box = (x: number, y: number, w: number, h: number) => ({ position: { x, y }, size: { width: w, height: h } });
+  const text = (name: string, value: string, x: number, y: number, w: number, h = 240, extra: Partial<ReportObject> = {}): ReportObject => ({ kind: 'text', name, text: value, style: { size: 8 }, ...box(x, y, w, h), ...extra });
+  const num = { format: { number: { decimals: 2, thousands: true, leadingZero: true, negative: 1, symbolType: 0, symbol: '$', symbolPosition: 0 } } };
+  const field = (name: string, f: string, x: number, y: number, w: number, h = 210, extra: Partial<ReportObject> = {}): ReportObject => ({ kind: 'field', name, field: f.startsWith('Sum of') ? f : `${T}.${f}`, style: { size: 8 }, ...box(x, y, w, h), ...extra });
+  const off = (name: string) => ({ name, sections: [{ name: name.slice(0, 2), height: 0, suppressed: true, objects: [] }] });
+  const rule = (name: string, y: number): ReportObject => ({ kind: 'line', name, ...box(0, y, 15263, 0), border: { sides: [0, 0, 1, 0], width: 60 } } as ReportObject);
+  const centred = { align: 'center' as const };
+  const def = {
+    ...emptyDefinition(), groups: ['@Whole'],
+    formulas: [{ kind: 'formula', name: 'Whole', index: 1, text: 'WhileReadingRecords; "All"', referencedFields: [], valueType: 'string' }],
+    layout: [
+      off('PageHeaderArea1'), off('PageFooterArea1'), off('ReportHeaderArea1'),
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF', height: 305, objects: [
+        field('SumA', `Sum of ${T}.amount`, 9855, 110, 1545, 180, { ...num, border: { sides: [0, 0, 1, 0], width: 20 } }), text('Totals', 'TOTALS:', 465, 110, 1845, 195)] }] },
+      { name: 'GroupHeaderArea1', sections: [{ name: 'GH', height: 2920, objects: [
+        text('Title', 'Lots in Hand', 60, 0, 14880, 288, { ...centred, style: { size: 11, bold: true } }), rule('Top', 280),
+        field('BaseLabel', 'label', 315, 1080, 4485, 240), field('Base', 'base', 5078, 1080, 1867, 195, num),
+        rule('Above', 1895), rule('Below', 2800),
+        text('NameHead', 'Lot Name', 315, 2260, 5265, 240, centred), text('CodeHead', 'Code', 6240, 2305, 1305, 240, centred), text('KindHead', 'Kind', 7800, 2290, 1710, 240, centred),
+        text('AmountHead', 'Amount', 9855, 2305, 1545, 240, centred), text('RestHead', 'Amount Left Over', 13230, 2080, 1650, 660, centred)] }] },
+      { name: 'GroupFooterArea1', sections: [{ name: 'GF', height: 0, suppressed: true, objects: [] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 270, objects: [
+        field('Mark', 'mark', 100, 0, 900, 240), field('Name', 'name', 1310, 30, 4900, 240), field('Code', 'code', 6560, 0, 1000, 240), field('Kind', 'kind', 8700, 0, 800, 240),
+        field('Amount', 'amount', 9855, 0, 1545, 180, num), field('Rest', 'rest', 13230, 0, 1650, 180, num)] }] },
+    ],
+  } as unknown as ReportDefinition;
+  const columns = ['label', 'base', 'mark', 'name', 'code', 'kind', 'amount', 'rest'];
+  const lots: DataSourceInfo = { connections: [], links: [], tables: [{ alias: T, name: T, kind: 'table', fields: columns.map((name) => ({ name, type: ['base', 'amount', 'rest'].includes(name) ? 'number' : 'string' })) }] };
+  const conv = readConventions(JSON.stringify({ names: { table: '{S}_Tab_{n}', title: '{S}_Title_Txt', heading: '{T}_{col}_ColTxt', value: '{T}_{col}_ColVal' } }));
+  const root = parseXml(applyConventions(convertToRdl(def, lots, { reportName: 'Lots', formulasInQuery: true, rulesAsText: true }).rdl, 'Lots', conv).rdl);
+
+  it('takes the text over it all as the title', () => {
+    assert.ok(descendants(root).some((e) => e.name === 'Textbox' && e.attributes.Name === 'Lots_Title_Txt' && valueIn(e) === 'Lots in Hand'));
+  });
+
+  it('starts the label where it starts, over the columns it reaches', () => {
+    const cell = descendants(root).find((e) => e.name === 'CellContents' && descendants(e).some((v) => v.name === 'Value' && textOf(v) === '=Fields!label.Value'));
+    assert.ok(cell);
+    assert.equal(textOf(child(cell!, 'ColSpan')), '2');
+    const row = descendants(root).find((e) => e.name === 'TablixRow' && descendants(e).includes(cell!))!;
+    assert.equal(childElements(child(row, 'TablixCells')!, 'TablixCell').findIndex((c) => descendants(c).includes(cell!)), 0);
+  });
+});

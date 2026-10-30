@@ -306,19 +306,33 @@ function restack(tablix: XmlElement, whole = false): void {
         const fits = shown.every((e) => len(e, 'Left') + len(e, 'Width') <= starts[home(e)]! + widths[c + home(e)]! + 0.06);
         const homes = new Set(texts.map(home));
         if (fits && homes.size >= 2 && new Set(shown.map(home)).size === shown.length) {
+          const from = new Map<XmlElement, number>();
+          for (const e of shown) {
+            const k = columnAt(starts, len(e, 'Left'));
+            const own = home(e);
+            if (k < own && !/^(right|center)$/i.test(textAlignOf(e)) && !texts.some((o) => o !== e && home(o) >= k && home(o) < own)) from.set(e, k);
+          }
+          const startOf = (e: XmlElement) => from.get(e) ?? home(e);
+          const covered = new Set<number>();
+          for (const [e, k] of from) for (let j = k + 1; j <= home(e); j++) covered.add(j);
           for (let k = 0; k < span; k++) {
-            const mine = texts.filter((e) => home(e) === k);
+            const target = cells[i + k]!;
+            removeChildren(target, ['CellContents']);
+            if (covered.has(k)) continue;
+            const mine = texts.filter((e) => startOf(e) === k);
+            const across = Math.max(1, ...mine.map((e) => home(e) - k + 1));
+            const room = widths.slice(c + k, c + k + across).reduce((a, b) => a + b, 0);
             for (const e of mine) {
               const left = Math.max(0, len(e, 'Left') - starts[k]!);
+              const end = len(e, 'Left') + len(e, 'Width') - starts[k]!;
+              const width = /^right$/i.test(textAlignOf(e)) && len(e, 'Left') < starts[k]! ? end : len(e, 'Width');
               setChild(e, 'Left', inch(left));
-              setChild(e, 'Width', inch(Math.max(0.01, Math.min(len(e, 'Width'), widths[c + k]! - left))));
+              setChild(e, 'Width', inch(Math.max(0.01, Math.min(width, room - left))));
             }
             const content = mine.length
               ? el('Rectangle', { Name: `${item!.attributes.Name ?? 'Rect'}_${k + 1}` }, el('ReportItems', ...mine), ...sidesOf(item!, k, span))
               : splitBlank(`__split_${k}`, item!, k, span);
-            const target = cells[i + k]!;
-            removeChildren(target, ['CellContents']);
-            target.children.push(el('CellContents', content));
+            target.children.push(el('CellContents', content, across > 1 ? el('ColSpan', String(across)) : null));
           }
         }
       }
@@ -1378,10 +1392,15 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       const spanWidth = only ? widths.slice(only.c, only.c + span).reduce((a, b) => a + b, 0) : 0;
       const words = tb ? fixedText(tb) : undefined;
       // (Over headings of its own: the next row is two or more fixed texts.)
-      const next = rowsOf(tablix).slice(1).find((r) => !emptyRow(r));
-      const under = next ? descendants(next).filter((e) => e.name === 'Textbox' && !isBlank(e)) : [];
-      const headingsUnder = under.filter((e) => fixedText(e) !== undefined).length >= 2
-        || (under.length >= 3 && under.some((e) => fixedText(e) !== undefined) && under.every((e) => !/\b(Sum|Count|Avg|RunningValue)\s*\(/i.test(valueOf(e))));
+      const headed = (row: XmlElement) => {
+        const under = descendants(row).filter((e) => e.name === 'Textbox' && !isBlank(e));
+        return under.filter((e) => fixedText(e) !== undefined).length >= 2
+          || (under.length >= 3 && under.some((e) => fixedText(e) !== undefined) && under.every((e) => !/\b(Sum|Count|Avg|RunningValue)\s*\(/i.test(valueOf(e))));
+      };
+      const following = rowsOf(tablix).slice(1).filter((r) => !emptyRow(r) && descendants(r).some((e) => e.name === 'Textbox' && !isBlank(e)));
+      const block = following.length > 1 && descendants(following[0]!).filter((e) => e.name === 'Textbox' && !isBlank(e)).length === 2
+        && descendants(following[0]!).some((e) => e.name === 'Textbox' && /Fields!\w+\.Value/.test(valueOf(e)));
+      const headingsUnder = (!!following[0] && headed(following[0])) || (block && headed(following[1]!));
       if (only && item && tb && words && words.trim().length > 3 && !/:\s*$/.test(words) && span >= 2 && headingsUnder
         && spanWidth >= 0.8 * tWidth && !child(item, 'Visibility')) {
         if (item !== tb) {
@@ -3156,8 +3175,8 @@ function summarize(tablix: XmlElement): void {
         const room = Math.max(0, widths[k]! - it.w);
         const left = Math.min(Math.max(0, it.x - starts[k]!), room);
         const runs = descendants(it.t).filter((e) => e.name === 'TextRun').slice(1).map((r) => textOf(child(r, 'Value'))).join('');
-        const keep = labelAside && it.right && isField(it.t) ? arialWidth(`000,000,000.00${runs}`, 8, true) * 1.05 + 0.1 : 0;
-        const right = Math.min(Math.max(0, starts[k]! + widths[k]! - it.x - it.w), it.right ? Math.max(room, widths[k]! - (labelAside ? Math.max(0.9, keep) : 1.3)) : room);
+        const keep = it.right && isField(it.t) ? arialWidth(`000,000,000.00${runs}`, 8, true) * 1.05 + 0.1 : 0;
+        const right = it.right && keep ? Math.max(0, Math.min(starts[k]! + widths[k]! - it.x - it.w, widths[k]! - Math.max(0.9, keep))) : Math.min(Math.max(0, starts[k]! + widths[k]! - it.x - it.w), it.right ? Math.max(room, widths[k]! - 1.3) : room);
         const at = (v: number) => `${Math.max(2, Math.round(v * 720) / 10)}pt`;
         const align = it.right ? 'right' : /center/i.test(textAlignOf(it.t)) ? 'center' : 'left';
         if (align !== 'right') setChild(st, 'PaddingLeft', at(left));
