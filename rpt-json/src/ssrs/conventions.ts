@@ -2555,7 +2555,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     for (const side of ['PaddingTop', 'PaddingBottom']) if (!textOf(child(st, side)).startsWith('=')) setChild(st, side, '0pt');
     setChild(st, 'VerticalAlign', 'Middle');
   }
-  for (const tablix of tablixes) { alignTotals(tablix); totalsOnValues(tablix); pairSides(tablix); }
+  for (const tablix of tablixes) { alignTotals(tablix); totalsOnValues(tablix); headingsOnOneLine(tablix); pairSides(tablix); }
   for (const tablix of tablixes) repeatTogether(tablix, root);
   for (const outer of childElements(descendants(report).find((e) => e.name === 'Body') ?? el('x'), 'ReportItems').flatMap((r) => childElements(r, 'Rectangle'))) liftWrapper(outer);
   const headed = new Map(tablixes.map((tablix) => [tablix, trimToHeadings(tablix)] as const));
@@ -3226,6 +3226,20 @@ function summarize(tablix: XmlElement): void {
         if (st) setChild(st, 'PaddingLeft', `${Math.max(2, Math.round(inset * 720) / 10)}pt`);
       }
       place(value, valueCol);
+      const vk = slots.indexOf(value.t);
+      const vst = childElements(value.t, 'Style')[0];
+      if (value.right && vk > 0 && vst) {
+        const tail = descendants(value.t).filter((e) => e.name === 'TextRun').slice(1).map((r) => textOf(child(r, 'Value'))).join('');
+        const fit = arialWidth(`000,000,000.00${tail}`, 8, true) * 1.05 + 0.1;
+        const gap = Math.max(0, starts[vk]! + widths[vk]! - value.x - value.w);
+        let k0 = vk;
+        while (k0 > 0 && slots[k0 - 1] === undefined && widths.slice(k0, vk + 1).reduce((x, y) => x + y, 0) - gap < fit) k0--;
+        if (k0 < vk && widths.slice(k0, vk + 1).reduce((x, y) => x + y, 0) - gap >= fit) {
+          for (let k = k0; k < vk; k++) slots[k] = value.t;
+          setChild(vst, 'PaddingLeft', '2pt');
+          setChild(vst, 'PaddingRight', `${Math.max(2, Math.round(gap * 720) / 10)}pt`);
+        }
+      }
     }
     for (const it of line) {
       if (label && (it === label || it === value)) continue;
@@ -3722,6 +3736,35 @@ function totalsOnValues(tablix: XmlElement): void {
           if (len(line, 'Height') === 0 && Math.abs(now - end) > 0.005 && Math.abs(now - end) <= 0.25 && end > left) setChild(line, 'Width', inch(end - left));
         }
       }
+    }
+  });
+}
+
+function headingsOnOneLine(tablix: XmlElement): void {
+  const leaves = rowLeaves(tablix);
+  const rows = rowsOf(tablix);
+  if (leaves.length !== rows.length) return;
+  const widths = widthsOf(tablix);
+  rows.forEach((row, i) => {
+    if (leaves[i]!.kind !== 'heading') return;
+    for (let j = 0, c = 0, cells = cellsOf(row); j < cells.length; j++) {
+      const contents = child(cells[j]!, 'CellContents');
+      if (!contents) continue;
+      const span = Number(textOf(child(contents, 'ColSpan')) || 1);
+      const tb = cellItem(cells[j]!);
+      const room = widths.slice(c, c + span).reduce((a, b) => a + b, 0);
+      c += span;
+      const text = tb?.name === 'Textbox' ? fixedText(tb) : undefined;
+      if (!tb || text === undefined || /\n/.test(text) || !/^center$/i.test(textAlignOf(tb))) continue;
+      const { size, bold } = drawnFont(tb, false);
+      const need = arialWidth(text.trim(), size, bold) * 1.05 + 0.04;
+      const left = paddingOf(tb, ['PaddingLeft']);
+      const right = paddingOf(tb, ['PaddingRight']);
+      const over = need - (room - left - right);
+      if (over <= 0.005 || need > room || left + right <= 0) continue;
+      const st = ownStyle(tb);
+      setChild(st, 'PaddingLeft', `${Math.round(Math.max(0, left - over * left / (left + right)) * 720) / 10}pt`);
+      setChild(st, 'PaddingRight', `${Math.round(Math.max(0, right - over * right / (left + right)) * 720) / 10}pt`);
     }
   });
 }

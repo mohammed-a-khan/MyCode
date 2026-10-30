@@ -647,3 +647,65 @@ describe('a single line of figures between a title and the headings', () => {
     assert.equal(childElements(child(row, 'TablixCells')!, 'TablixCell').findIndex((c) => descendants(c).includes(cell!)), 0);
   });
 });
+
+describe('figures marked (A), (B) over a narrow empty column, and groups named by a formula', () => {
+  const T = 'Lots';
+  const box = (x: number, y: number, w: number, h: number) => ({ position: { x, y }, size: { width: w, height: h } });
+  const text = (name: string, value: string, x: number, y: number, w: number, h = 240, extra: Partial<ReportObject> = {}): ReportObject => ({ kind: 'text', name, text: value, style: { size: 8 }, ...box(x, y, w, h), ...extra });
+  const num = { format: { number: { decimals: 2, thousands: true, leadingZero: true, negative: 1, symbolType: 0, symbol: '$', symbolPosition: 0 } } };
+  const field = (name: string, f: string, x: number, y: number, w: number, h = 210, extra: Partial<ReportObject> = {}): ReportObject => ({ kind: 'field', name, field: /^(@|Sum of|Group #)/.test(f) ? f : `${T}.${f}`, style: { size: 8 }, ...box(x, y, w, h), ...extra });
+  const off = (name: string) => ({ name, sections: [{ name: name.slice(0, 2), height: 0, suppressed: true, objects: [] }] });
+  const rule = (name: string, y: number): ReportObject => ({ kind: 'line', name, ...box(0, y, 15263, 0), border: { sides: [0, 0, 1, 0], width: 60 } } as ReportObject);
+  const centred = { align: 'center' as const };
+  const under = { border: { sides: [0, 0, 0, 1], width: 20 } } as Partial<ReportObject>;
+  const def = {
+    ...emptyDefinition(), groups: ['@Whole', `${T}.kind`],
+    formulas: [
+      { kind: 'formula', name: 'Whole', index: 1, text: 'WhileReadingRecords; "All"', referencedFields: [], valueType: 'string' },
+      { kind: 'formula', name: 'KindName', index: 2, text: `if {${T}.kind} = "PB" then "Part Held" else if {${T}.kind} = "DB" then "Held Back"`, referencedFields: [`${T}.kind`], valueType: 'string' },
+    ],
+    layout: [
+      off('PageHeaderArea1'), off('PageFooterArea1'), off('ReportHeaderArea1'), { name: 'ReportFooterArea1', sections: [{ name: 'RF', height: 5, objects: [] }] },
+      { name: 'GroupHeaderArea1', sections: [{ name: 'GH', height: 2920, objects: [
+        text('Title', 'Lots in Hand', 60, 0, 14880, 288, { ...centred, style: { size: 11, bold: true } }), rule('Top', 280),
+        text('CalcHead', 'CALCULATION', 8565, 435, 1275, 240, under), text('RatioHead', 'RATIO', 11760, 425, 900, 240, under),
+        field('BaseLabel', 'label', 315, 720, 4485, 240), field('Base', 'base', 5078, 720, 1867, 195, num), text('MarkA', '(A)', 7200, 720, 420),
+        text('PartLabel', 'Part Held:', 315, 1090, 4485), field('Part', 'part', 5040, 1090, 1905, 195, num), text('MarkB', '(B)', 7200, 1090, 420), text('Calc', '(B)/(A)', 8880, 1090, 630),
+        rule('Above', 1895), rule('Below', 2800),
+        text('NameHead', 'Lot Name', 315, 2260, 5265, 240, centred), text('CodeHead', 'Code', 5580, 2305, 1305, 240, centred), text('KindHead', 'Kind', 6855, 2305, 1710, 240, centred),
+        text('FlagHead', 'Flagged Holding', 8565, 2305, 1275, 240, centred), text('AmountHead', 'Amount', 9855, 2305, 1545, 240, centred)] }] },
+      { name: 'GroupFooterArea1', sections: [{ name: 'GF', height: 0, suppressed: true, objects: [] }] },
+      { name: 'GroupHeaderArea2', sections: [{ name: 'GH2', height: 240, objects: [field('KindLabel', 'Group #2 Name', 0, 0, 6780, 240)] }] },
+      { name: 'GroupFooterArea2', sections: [{ name: 'GF2', height: 240, objects: [field('Total', `Sum of ${T}.amount`, 9641, 50, 1759, 180, num)] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 270, objects: [
+        field('Code', 'code', 5580, 30, 1200, 240), field('Sort', 'sort', 6780, 30, 1785, 240), field('Amount', 'amount', 9840, 30, 1560, 180, num),
+        field('Name', 'name', 465, 30, 4928, 240), field('Flag', 'flag', 8640, 30, 1200, 240)] }] },
+    ],
+  } as unknown as ReportDefinition;
+  const columns = ['label', 'base', 'part', 'code', 'sort', 'amount', 'name', 'flag', 'kind'];
+  const lots: DataSourceInfo = { connections: [], links: [], tables: [{ alias: T, name: T, kind: 'table', fields: columns.map((name) => ({ name, type: ['base', 'part', 'amount'].includes(name) ? 'number' : 'string' })) }] };
+  const converted = convertToRdl(def, lots, { reportName: 'Lots', formulasInQuery: true, rulesAsText: true });
+  const conv = readConventions(JSON.stringify({ names: { table: '{S}_Tab_{n}', heading: '{T}_{col}_ColTxt', value: '{T}_{col}_ColVal' } }));
+  const root = parseXml(applyConventions(converted.rdl, 'Lots', conv).rdl);
+  const box2 = (value: string) => descendants(root).find((e) => e.name === 'Textbox' && descendants(e).some((v) => v.name === 'Value' && textOf(v) === value))!;
+  const contentsOf = (tb: XmlElement) => descendants(root).find((e) => e.name === 'CellContents' && childElements(e).includes(tb))!;
+  const pts = (tb: XmlElement, side: string) => Number(textOf(child(childElements(tb, 'Style')[0]!, side)).replace('pt', ''));
+
+  it('lets a figure take the empty column before it, ending where it ended', () => {
+    for (const value of ['=Fields!base.Value', '=Fields!part.Value']) {
+      const tb = box2(value);
+      assert.equal(textOf(child(contentsOf(tb), 'ColSpan')), '2', value);
+      assert.ok(pts(tb, 'PaddingRight') > 20, value);
+    }
+  });
+
+  it('keeps a centred heading on one line in its column', () => {
+    const tb = box2('Flagged Holding');
+    assert.ok(pts(tb, 'PaddingRight') < 10, String(pts(tb, 'PaddingRight')));
+  });
+
+  it('names a group by the one unused formula that names its values', () => {
+    assert.ok(converted.rdl.includes('F_KindName') || converted.rdl.includes('"Part Held"'));
+    assert.ok(converted.review.some((n) => n.item === 'Group 2' && /KindName/.test(n.message)));
+  });
+});

@@ -3953,6 +3953,23 @@ class RdlBuilder {
       const expression = level ? this.formulaExpression(named.formula) : null;
       if (level && expression) this.groupDisplay.set(level, expression);
     }
+    const objects = def.layout.flatMap((a) => a.sections.flatMap((s) => s.objects));
+    const shownRefs = objects.flatMap((o) => [o.field ?? '', ...(o.embeddedFields ?? []), ...(o.runs ?? []).map((r) => ('field' in r ? r.field : ''))]).map((r) => r.toLowerCase());
+    const conditionNames = objects.flatMap((o) => Object.values(o.conditions ?? {}).map((c) => c.name.toLowerCase()))
+      .concat(def.layout.flatMap((a) => a.sections.flatMap((s) => Object.values(s.conditions ?? {}).map((c) => c.name.toLowerCase()))));
+    const otherTexts = [...def.formulas.map((f) => f.text), ...Object.values(def.selectionFormulas ?? {}).map(String)].join('\n').toLowerCase();
+    for (const [i, field] of this.groupFields.entries()) {
+      const level = i + 1;
+      if (this.groupDisplay.has(level) || def.groupNameFormulas?.some((g) => g.field.toLowerCase() === field.toLowerCase())) continue;
+      if (!shownRefs.some((r) => new RegExp(`^group #${level}( name)?$`).test(r))) continue;
+      const candidates = def.formulas.filter((f) => f.kind === 'formula' && /"/.test(f.text) && /^\s*(if|select)\b/i.test(f.text)
+        && f.referencedFields.length === 1 && f.referencedFields[0]!.toLowerCase() === field.toLowerCase()
+        && !shownRefs.includes(`@${f.name.toLowerCase()}`) && !conditionNames.includes(f.name.toLowerCase()) && !otherTexts.includes(`{@${f.name.toLowerCase()}}`));
+      const expression = candidates.length === 1 ? this.formulaExpression(candidates[0]!.name) : null;
+      if (!expression) continue;
+      this.groupDisplay.set(level, expression);
+      this.note(`Group ${level}`, `its name is shown by {@${candidates[0]!.name}}, the one formula naming the values of ${field} that the report does not use elsewhere; check it is the group's name formula`);
+    }
     for (const p of def.parameters) this.parameterName(p.name);
   }
 
