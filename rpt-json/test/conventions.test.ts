@@ -550,3 +550,54 @@ describe('conventions', () => {
     assert.throws(() => readConventions('{"names": {"tabel": "x"}}'), /unknown entry "tabel"/);
   });
 });
+
+describe('a block of figures over a table with a narrow first column', () => {
+  const T = 'Lots';
+  const box = (x: number, y: number, w: number, h: number) => ({ position: { x, y }, size: { width: w, height: h } });
+  const text = (name: string, value: string, x: number, y: number, w: number, h = 240, extra: Partial<ReportObject> = {}): ReportObject => ({ kind: 'text', name, text: value, style: { size: 8 }, ...box(x, y, w, h), ...extra });
+  const num = { format: { number: { decimals: 2, thousands: true, leadingZero: true, negative: 1, symbolType: 0, symbol: '$', symbolPosition: 0 } } };
+  const field = (name: string, f: string, x: number, y: number, w: number, h = 210, extra: Partial<ReportObject> = {}): ReportObject => ({ kind: 'field', name, field: f.startsWith('@') || f.startsWith('Sum of') ? f : `${T}.${f}`, style: { size: 8 }, ...box(x, y, w, h), ...extra });
+  const off = (name: string) => ({ name, sections: [{ name: name.slice(0, 2), height: 0, suppressed: true, objects: [] }] });
+  const rule = (name: string, y: number): ReportObject => ({ kind: 'line', name, ...box(0, y, 15263, 0), border: { sides: [0, 0, 1, 0], width: 60 } } as ReportObject);
+  const def = {
+    ...emptyDefinition(), groups: ['@Whole'],
+    formulas: [
+      { kind: 'formula', name: 'Whole', index: 1, text: 'WhileReadingRecords; "All"', referencedFields: [], valueType: 'string' },
+      { kind: 'formula', name: 'Share', index: 2, text: `if {${T}.base} > 0 then {${T}.part}/{${T}.base}*100 else 0`, referencedFields: [`${T}.base`, `${T}.part`], valueType: 'number' },
+    ],
+    layout: [
+      off('PageHeaderArea1'), off('PageFooterArea1'), off('ReportHeaderArea1'),
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF', height: 305, objects: [
+        field('SumA', `Sum of ${T}.amount`, 10451, 110, 1759, 180, { ...num, border: { sides: [0, 0, 1, 0], width: 20 } }),
+        field('SumB', `Sum of ${T}.rest`, 12585, 105, 2055, 180, { ...num, border: { sides: [0, 0, 1, 0], width: 20 } }),
+        text('Totals', 'TOTALS:', 465, 110, 1845, 195)] }] },
+      { name: 'GroupHeaderArea1', sections: [{ name: 'GH', height: 2625, objects: [
+        text('Title', 'Lots in Hand', 0, 10, 14880, 288, { style: { size: 12, bold: true } }), rule('Top', 280),
+        text('CalcHead', 'CALCULATION', 8565, 435, 1275, 240, { border: { sides: [0, 0, 0, 1], width: 20 } }),
+        text('RatioHead', 'RATIO', 11760, 425, 900, 240, { border: { sides: [0, 0, 0, 1], width: 20 } }),
+        field('BaseLabel', 'label', 315, 720, 4485, 240), field('Base', 'base', 5078, 720, 1867, 195, num), text('MarkA', '(A)', 7200, 720, 420),
+        text('PartLabel', 'All Lots Held Back:', 315, 1090, 4485), field('Part', 'part', 5078, 1090, 1867, 195, num), text('MarkB', '(B)', 7200, 1080, 420),
+        text('Calc', '(B)/(A)', 8880, 1090, 630), field('Ratio', '@Share', 11760, 1090, 900, 240),
+        rule('Above', 1575), rule('Below', 2480),
+        text('NameHead', 'Lot Name', 1193, 1950, 5115, 240, { align: 'left' }), text('CodeHead', 'Code', 5963, 1950, 1635), text('KindHead', 'Kind', 8100, 1950, 1995),
+        text('AmountHead', 'Amount', 10890, 1920, 1320, 420), text('RestHead', 'Amount Left Over', 13080, 1680, 1920, 660)] }] },
+      { name: 'GroupFooterArea1', sections: [{ name: 'GF', height: 0, suppressed: true, objects: [] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 270, objects: [
+        field('Mark', 'mark', 100, 0, 900, 240), field('Code', 'code', 5963, 0, 1635, 240), field('Kind', 'kind', 8100, 0, 1995, 240),
+        field('Amount', 'amount', 10440, 0, 1770, 180, num), field('Rest', 'rest', 12825, 0, 1815, 180, num), field('Name', 'name', 1193, 30, 5115, 240)] }] },
+    ],
+  } as unknown as ReportDefinition;
+  const columns = ['label', 'base', 'part', 'mark', 'code', 'kind', 'amount', 'rest', 'name'];
+  const lots: DataSourceInfo = { connections: [], links: [], tables: [{ alias: T, name: T, kind: 'table', fields: columns.map((name) => ({ name, type: ['base', 'part', 'amount', 'rest'].includes(name) ? 'number' : 'string' })) }] };
+  const conv = readConventions(JSON.stringify({ names: { table: '{S}_Tab_{n}', heading: '{T}_{col}_ColTxt', value: '{T}_{col}_ColVal' } }));
+  const root = parseXml(applyConventions(convertToRdl(def, lots, { reportName: 'Lots', formulasInQuery: true, rulesAsText: true }).rdl, 'Lots', conv).rdl);
+  const cellOf = (value: string) => descendants(root).find((e) => e.name === 'CellContents' && descendants(e).some((v) => v.name === 'Value' && textOf(v) === value));
+
+  it('keeps a fixed label of the block over the columns it reaches, from where it starts', () => {
+    for (const label of ['All Lots Held Back:', '=Fields!label.Value']) {
+      const cell = cellOf(label);
+      assert.ok(cell, label);
+      assert.equal(textOf(child(cell!, 'ColSpan')), '2', label);
+    }
+  });
+});

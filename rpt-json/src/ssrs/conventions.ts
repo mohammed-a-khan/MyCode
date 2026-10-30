@@ -1590,7 +1590,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
             tb = text;
           }
         }
-        if (span < 2 || span >= columns || !tb || tb.name !== 'Textbox' || fixedText(tb) === undefined) continue;
+        if (span < 2 || span >= columns || !tb || tb.name !== 'Textbox' || fixedText(tb) === undefined || /_HdrTxt$/.test(summaryNames.get(tb) ?? '')) continue;
         // (Too long for its first column: on more lines, where the row has room for them.)
         const lines = Math.ceil(textWidth(tb, true) / Math.max(0.01, widths[c]!) - 0.01);
         const sizes = descendants(tb).filter((e) => e.name === 'FontSize' && !textOf(e).startsWith('=')).map((e) => (inches(textOf(e)) ?? 0) * 72);
@@ -2536,7 +2536,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     for (const side of ['PaddingTop', 'PaddingBottom']) if (!textOf(child(st, side)).startsWith('=')) setChild(st, side, '0pt');
     setChild(st, 'VerticalAlign', 'Middle');
   }
-  for (const tablix of tablixes) { alignTotals(tablix); pairSides(tablix); }
+  for (const tablix of tablixes) { alignTotals(tablix); totalsOnValues(tablix); pairSides(tablix); }
   for (const tablix of tablixes) repeatTogether(tablix, root);
   for (const outer of childElements(descendants(report).find((e) => e.name === 'Body') ?? el('x'), 'ReportItems').flatMap((r) => childElements(r, 'Rectangle'))) liftWrapper(outer);
   const headed = new Map(tablixes.map((tablix) => [tablix, trimToHeadings(tablix)] as const));
@@ -3657,6 +3657,52 @@ function alignTotals(tablix: XmlElement): void {
       if (!st || TOTALLED.test(valueOf(t))) continue;
       setChild(st, 'VerticalAlign', 'Top');
       setChild(st, 'PaddingTop', top);
+    }
+  });
+}
+
+function totalsOnValues(tablix: XmlElement): void {
+  const leaves = rowLeaves(tablix);
+  const rows = rowsOf(tablix);
+  if (leaves.length !== rows.length) return;
+  const widths = widthsOf(tablix);
+  const spanOf = (cell: XmlElement) => Number(textOf(child(child(cell, 'CellContents') ?? el('x'), 'ColSpan')) || 1);
+  const byColumn = (row: XmlElement) => {
+    const out = new Map<number, XmlElement>();
+    for (let i = 0, c = 0, cells = cellsOf(row); i < cells.length; i++) {
+      if (!child(cells[i]!, 'CellContents')) continue;
+      const span = spanOf(cells[i]!);
+      const it = cellItem(cells[i]!);
+      if (span === 1 && it) out.set(c, it);
+      c += span;
+    }
+    return out;
+  };
+  const edge = new Map<number, number>();
+  rows.forEach((row, i) => {
+    if (leaves[i]!.kind !== 'detail') return;
+    for (const [c, it] of byColumn(row)) {
+      if (edge.has(c) || it.name !== 'Textbox' || !/Fields!\w+\.Value/.test(valueOf(it)) || textAlignOf(it) !== 'Right') continue;
+      edge.set(c, paddingOf(it, ['PaddingRight']));
+    }
+  });
+  rows.forEach((row, i) => {
+    if (leaves[i]!.kind !== 'total' && leaves[i]!.kind !== 'subtotal') return;
+    for (const [c, it] of byColumn(row)) {
+      const right = edge.get(c);
+      if (right === undefined) continue;
+      if (it.name === 'Textbox' && TOTALLED.test(valueOf(it)) && textAlignOf(it) === 'Right') {
+        const own = paddingOf(it, ['PaddingRight']);
+        if (Math.abs(own - right) > 0.005 && Math.abs(own - right) <= 0.25) setChild(ownStyle(it), 'PaddingRight', `${Math.round(right * 720) / 10}pt`);
+      } else if (it.name === 'Rectangle') {
+        const lines = childElements(child(it, 'ReportItems') ?? el('x'), 'Line');
+        for (const line of lines) {
+          const end = widths[c]! - right;
+          const left = len(line, 'Left');
+          const now = left + len(line, 'Width');
+          if (len(line, 'Height') === 0 && Math.abs(now - end) > 0.005 && Math.abs(now - end) <= 0.25 && end > left) setChild(line, 'Width', inch(end - left));
+        }
+      }
     }
   });
 }
