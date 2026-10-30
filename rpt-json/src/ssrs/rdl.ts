@@ -3963,13 +3963,24 @@ class RdlBuilder {
       if (this.groupDisplay.has(level) || def.groupNameFormulas?.some((g) => g.field.toLowerCase() === field.toLowerCase())) continue;
       const bare = (r: string) => r.replace(/[{}\s]/g, '').toLowerCase();
       if (!shownRefs.some((r) => new RegExp(`^group #${level}( name)?$`).test(r) || bare(r) === `groupname(${bare(field)})`)) continue;
-      const candidates = def.formulas.filter((f) => f.kind === 'formula' && /"/.test(f.text) && /^\s*(if|select)\b/i.test(f.text)
-        && f.referencedFields.length > 0 && f.referencedFields.every((r) => bare(r) === bare(field))
+      const namesValues = (f: FormulaInfo) => /"/.test(f.text) && /^\s*(if|select)\b/i.test(f.text)
+        && f.referencedFields.length > 0 && f.referencedFields.every((r) => bare(r) === bare(field));
+      const own = def.formulas.filter((f) => f.kind === 'internal' && f.name.toLowerCase() === `group #${level} name` && namesValues(f) && /\bthen\s*"/i.test(f.text));
+      const named = def.formulas.filter((f) => f.kind === 'formula' && namesValues(f)
         && !shownRefs.includes(`@${f.name.toLowerCase()}`) && !conditionNames.includes(f.name.toLowerCase()) && !otherTexts.includes(`{@${f.name.toLowerCase()}}`));
+      const attached = def.formulas.filter((f) => f.kind === 'conditionalFormat' && namesValues(f) && /\bthen\s*"/i.test(f.text)
+        && !conditionNames.includes(f.name.toLowerCase()));
+      const candidates = own.length === 1 ? own : named.length === 1 ? named : !named.length && attached.length === 1 ? attached : [];
       const expression = candidates.length === 1 ? this.formulaExpression(candidates[0]!.name) : null;
-      if (!expression) continue;
+      if (!expression) {
+        const several = [...named, ...attached];
+        if (several.length > 1) this.note(`Group ${level}`, `shows the value of ${field} as its name; ${several.map((f) => `{@${f.name}}`).join(', ')} each turn its values into text, so if one of them is the group's name formula, set the group header's expression to it`);
+        continue;
+      }
       this.groupDisplay.set(level, expression);
-      this.note(`Group ${level}`, `its name is shown by {@${candidates[0]!.name}}, the one formula naming the values of ${field} that the report does not use elsewhere; check it is the group's name formula`);
+      this.note(`Group ${level}`, own.length === 1
+        ? `its name is shown by the group's own name formula: ${candidates[0]!.text.replace(/\s+/g, ' ').trim()}`
+        : `its name is shown by {@${candidates[0]!.name}}, the one formula naming the values of ${field} that the report does not use elsewhere; check it is the group's name formula`);
     }
     for (const p of def.parameters) this.parameterName(p.name);
   }

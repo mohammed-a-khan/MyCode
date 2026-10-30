@@ -718,3 +718,33 @@ describe('figures marked (A), (B) over a narrow empty column, and groups named b
     assert.ok(converted.review.some((n) => n.item === 'Group 2' && /KindName/.test(n.message)));
   });
 });
+
+describe('group names given by a formula kept with the group', () => {
+  const T = 'Lots';
+  const box = (x: number) => ({ position: { x, y: 0 }, size: { width: 1800, height: 240 } });
+  const build = (formulas: object[]) => convertToRdl({
+    ...emptyDefinition(), groups: [`${T}.kind`], formulas,
+    layout: [
+      { name: 'GroupHeaderArea1', sections: [{ name: 'GH', height: 240, objects: [{ kind: 'field', name: 'G', field: 'Group #1 Name', ...box(0) }] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [{ kind: 'field', name: 'A', field: `${T}.amount`, ...box(2000) }] }] },
+    ],
+  } as unknown as ReportDefinition, { connections: [], links: [], tables: [{ alias: T, name: T, kind: 'table', fields: [{ name: 'kind', type: 'string' }, { name: 'amount', type: 'number' }] }] }, { reportName: 'Lots' });
+  const naming = (name: string, kind: string) => ({ kind, name, index: 1, text: `if {${T}.kind} = "PB" then "Part Held" else "Other"`, referencedFields: [`${T}.kind`], valueType: 'string' });
+
+  it("shows the group's own name formula", () => {
+    const { rdl, review } = build([naming('Group #1 Name', 'internal')]);
+    assert.ok(rdl.includes('"Part Held"'));
+    assert.ok(review.some((n) => n.item === 'Group 1' && /own name formula/.test(n.message)));
+  });
+
+  it('shows a name formula attached to the group', () => {
+    const { rdl } = build([naming('Group_Name', 'conditionalFormat')]);
+    assert.ok(rdl.includes('"Part Held"'));
+  });
+
+  it('lists the formulas that could name the group when more than one could', () => {
+    const { rdl, review } = build([naming('First', 'formula'), naming('Second', 'formula')]);
+    assert.ok(!rdl.includes('"Part Held"'));
+    assert.ok(review.some((n) => n.item === 'Group 1' && /\{@First\}, \{@Second\}/.test(n.message)));
+  });
+});
