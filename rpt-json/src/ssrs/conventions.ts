@@ -2555,7 +2555,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     for (const side of ['PaddingTop', 'PaddingBottom']) if (!textOf(child(st, side)).startsWith('=')) setChild(st, side, '0pt');
     setChild(st, 'VerticalAlign', 'Middle');
   }
-  for (const tablix of tablixes) { alignTotals(tablix); totalsOnValues(tablix); headingsOnOneLine(tablix); pairSides(tablix); }
+  for (const tablix of tablixes) { alignTotals(tablix); totalsUnderFigures(tablix); totalsOnValues(tablix); headingsOnOneLine(tablix); pairSides(tablix); }
   for (const tablix of tablixes) repeatTogether(tablix, root);
   for (const outer of childElements(descendants(report).find((e) => e.name === 'Body') ?? el('x'), 'ReportItems').flatMap((r) => childElements(r, 'Rectangle'))) liftWrapper(outer);
   const headed = new Map(tablixes.map((tablix) => [tablix, trimToHeadings(tablix)] as const));
@@ -3691,6 +3691,112 @@ function alignTotals(tablix: XmlElement): void {
       setChild(st, 'VerticalAlign', 'Top');
       setChild(st, 'PaddingTop', top);
     }
+  });
+}
+
+function totalsUnderFigures(tablix: XmlElement): void {
+  const leaves = rowLeaves(tablix);
+  const rows = rowsOf(tablix);
+  if (leaves.length !== rows.length) return;
+  const widths = widthsOf(tablix);
+  const spanOf = (cell: XmlElement) => Number(textOf(child(child(cell, 'CellContents') ?? el('x'), 'ColSpan')) || 1);
+  const placed = (row: XmlElement) => cellsOf(row).map((cell, at) => ({ cell, at, span: spanOf(cell), item: cellItem(cell) })).filter((p) => child(p.cell, 'CellContents'));
+  const drawn = (item: XmlElement) => descendants(item).some((e) => /^(Top|Bottom|Left|Right)?Border$/.test(e.name) && /solid|dashed|dotted|double/i.test(textOf(child(e, 'Style'))));
+  const blank = (p: ReturnType<typeof placed>[number]) => p.span === 1 && !!p.item && p.item.name === 'Textbox' && isBlank(p.item) && !drawn(p.item) && !child(p.item, 'Visibility');
+  const ruled = (p: ReturnType<typeof placed>[number]) => p.span === 1 && p.item?.name === 'Rectangle'
+    && childElements(child(p.item, 'ReportItems') ?? el('x')).every((e) => e.name === 'Line') && childElements(child(p.item, 'ReportItems') ?? el('x')).length > 0;
+  const figures = new Map<string, { at: number; span: number; item: XmlElement }>();
+  rows.forEach((row, i) => {
+    if (leaves[i]!.kind === 'total' || leaves[i]!.kind === 'subtotal') return;
+    for (const p of placed(row)) {
+      const f = p.item?.name === 'Textbox' ? /^=Fields!(\w+)\.Value$/.exec(valueOf(p.item).trim())?.[1] : undefined;
+      if (f && !figures.has(f)) figures.set(f, { at: p.at, span: p.span, item: p.item! });
+    }
+  });
+  const rebuild = (row: XmlElement, moves: Map<number, { at: number; span: number }>, fit?: (p: ReturnType<typeof placed>[number], to: { at: number; span: number }) => void): boolean => {
+    const cells = cellsOf(row);
+    const all = placed(row);
+    const owner: (number | undefined)[] = [];
+    for (const p of all) for (let c = p.at; c < p.at + p.span; c++) owner[c] = p.at;
+    const target: (number | undefined)[] = [];
+    for (const [from, to] of moves) for (let c = to.at; c < to.at + to.span; c++) {
+      if (target[c] !== undefined) return false;
+      target[c] = from;
+    }
+    const spare: ReturnType<typeof placed> = [];
+    const kept = new Set<number>();
+    for (const p of all) {
+      if (moves.has(p.at)) continue;
+      const hit = Array.from({ length: p.span }, (_, k) => target[p.at + k]).some((t) => t !== undefined);
+      if (!hit) { kept.add(p.at); continue; }
+      if (!blank(p) && !(ruled(p) && moves.size)) return false;
+      if (blank(p)) spare.push(p);
+      else return false;
+    }
+    const out: XmlElement[] = [];
+    for (let c = 0; c < cells.length; c++) {
+      const from = target[c];
+      if (from !== undefined) {
+        const to = moves.get(from)!;
+        if (c === to.at) {
+          const p = all.find((x) => x.at === from)!;
+          const contents = child(p.cell, 'CellContents')!;
+          removeChildren(contents, ['ColSpan']);
+          if (to.span > 1) contents.children.push(el('ColSpan', String(to.span)));
+          fit?.(p, to);
+          out.push(p.cell);
+        } else out.push(el('TablixCell'));
+      } else if (owner[c] !== undefined && kept.has(owner[c]!)) out.push(cells[c]!);
+      else {
+        const filler = spare.shift();
+        if (!filler) return false;
+        removeChildren(child(filler.cell, 'CellContents')!, ['ColSpan']);
+        out.push(filler.cell);
+      }
+    }
+    child(row, 'TablixCells')!.children = out;
+    return true;
+  };
+  rows.forEach((row, i) => {
+    if (leaves[i]!.kind !== 'total' && leaves[i]!.kind !== 'subtotal') return;
+    const moves = new Map<number, { at: number; span: number }>();
+    const under = new Map<number, XmlElement>();
+    for (const p of placed(row)) {
+      if (p.item?.name !== 'Textbox') continue;
+      const f = /^=\s*(?:Sum|Avg|Min|Max)\(Fields!(\w+)\.Value\b/i.exec(valueOf(p.item).trim())?.[1];
+      const fig = f ? figures.get(f) : undefined;
+      if (!fig || (fig.at === p.at && fig.span === p.span)) continue;
+      moves.set(p.at, { at: fig.at, span: fig.span });
+      under.set(p.at, fig.item);
+    }
+    if (!moves.size) return;
+    const before = structuredClone(child(row, 'TablixCells')!);
+    const fitText = (p: ReturnType<typeof placed>[number]) => {
+      const fig = under.get(p.at)!;
+      const style = ownStyle(p.item!);
+      for (const side of ['PaddingLeft', 'PaddingRight']) {
+        const v = textOf(child(childElements(fig, 'Style')[0] ?? el('x'), side));
+        if (v) setChild(style, side, v);
+      }
+    };
+    if (!rebuild(row, moves, fitText)) { child(row, 'TablixCells')!.children = before.children; return; }
+    const above = rows[i - 1];
+    if (!above || i === 0 || leaves[i - 1]!.kind !== leaves[i]!.kind) return;
+    const lines = placed(above).filter((p) => moves.has(p.at) && ruled(p));
+    if (!lines.length || placed(above).some((p) => !ruled(p) && !blank(p))) return;
+    const ruleMoves = new Map([...moves].filter(([from]) => lines.some((p) => p.at === from)));
+    const saved = structuredClone(child(above, 'TablixCells')!);
+    const fitLine = (p: ReturnType<typeof placed>[number], to: { at: number; span: number }) => {
+      const fig = under.get(p.at)!;
+      const width = widths.slice(to.at, to.at + to.span).reduce((a, b) => a + b, 0);
+      const left = paddingOf(fig, ['PaddingLeft']);
+      const right = paddingOf(fig, ['PaddingRight']);
+      for (const line of childElements(child(p.item!, 'ReportItems')!, 'Line')) {
+        setChild(line, 'Left', inch(left));
+        setChild(line, 'Width', inch(Math.max(0.01, width - left - right)));
+      }
+    };
+    if (!rebuild(above, ruleMoves, fitLine)) child(above, 'TablixCells')!.children = saved.children;
   });
 }
 

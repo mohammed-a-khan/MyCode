@@ -775,3 +775,68 @@ describe('a group named by a formula written with single quotes', () => {
     assert.ok(review.some((n) => n.item === 'Group 2' && /Naming/.test(n.message)));
   });
 });
+
+describe('figures listed in a group header, with totals in the report footer', () => {
+  const T = 'Lots';
+  const box = (x: number, y: number, w: number, h: number) => ({ position: { x, y }, size: { width: w, height: h } });
+  const text = (name: string, value: string, x: number, y: number, w: number, h = 240, extra: Partial<ReportObject> = {}): ReportObject => ({ kind: 'text', name, text: value, style: { size: 8 }, ...box(x, y, w, h), ...extra } as ReportObject);
+  const num = { align: 'right', format: { number: { decimals: 2, thousands: true, leadingZero: true, negative: 1, symbolType: 0, symbol: '$', symbolPosition: 0 } } } as Partial<ReportObject>;
+  const field = (name: string, f: string, x: number, y: number, w: number, h = 240, extra: Partial<ReportObject> = {}): ReportObject => ({ kind: 'field', name, field: /^(@|Sum of|Group #)/.test(f) ? f : `${T}.${f}`, style: { size: 8 }, ...box(x, y, w, h), ...extra } as ReportObject);
+  const rule = (name: string, y: number): ReportObject => ({ kind: 'line', name, ...box(0, y, 15263, 0), border: { sides: [0, 0, 1, 0], width: 60 } } as ReportObject);
+  const over = { border: { sides: [0, 0, 1, 0], width: 20 } } as Partial<ReportObject>;
+  const off = (name: string) => ({ name, sections: [{ name: name.slice(0, 2), height: 0, suppressed: true, objects: [] }] });
+  const centred = { align: 'center' } as Partial<ReportObject>;
+  const def = {
+    ...emptyDefinition(), groups: ['@Whole', `${T}.name`],
+    formulas: [
+      { kind: 'formula', name: 'Whole', index: 1, text: 'WhileReadingRecords; "All"', referencedFields: [], valueType: 'string' },
+      { kind: 'internal', name: 'Group #1 Order', index: 2, text: 'if IsNull ({@Whole}) then 2 else 2', referencedFields: ['@Whole'] },
+      { kind: 'formula', name: 'Empty', index: 3, text: `if {${T}.id} = 0 then "Nothing held"`, referencedFields: [`${T}.id`], valueType: 'string' },
+    ],
+    layout: [
+      { name: 'PageHeaderArea1', sections: [{ name: 'PH', height: 328, objects: [text('Top', 'Top of page', 4, 0, 15310, 308)] }] },
+      off('PageFooterArea1'), off('ReportHeaderArea1'),
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF', height: 305, objects: [
+        field('SumA', `Sum of ${T}.amount`, 10451, 110, 1759, 180, { ...over, ...num }), field('SumB', `Sum of ${T}.less`, 12585, 105, 2055, 180, { ...over, ...num }),
+        text('Tot', 'TOTALS:', 465, 110, 1845, 195)] }] },
+      { name: 'GroupHeaderArea1', sections: [{ name: 'GH1', height: 2600, objects: [
+        text('Title', 'Lots in Hand', 0, 10, 14880, 288, centred), rule('R1', 280), rule('R2', 1575), rule('R3', 2480),
+        text('CodeHead', 'Code', 5963, 1950, 1635, 240, centred), text('KindHead', 'Kind', 8100, 1950, 1995, 240, centred),
+        text('AmountHead', 'Amount', 10890, 1920, 1320, 420, centred), text('LessHead', 'Amount less held', 13080, 1680, 1920, 660, centred),
+        text('NameHead', 'Name', 1193, 1950, 5115, 240, centred), text('MarkA', '(A)', 7200, 720, 420), text('MarkB', '(B)', 7200, 1080, 420),
+        field('Base', 'base', 5078, 720, 1867, 195, num), field('Part', 'part', 5078, 1090, 1867, 195, num), field('BaseLabel', 'label', 315, 720, 4485)] }] },
+      off('GroupFooterArea1'),
+      { name: 'GroupHeaderArea2', sections: [{ name: 'GH2', height: 240, objects: [
+        field('Name', 'Group #2', 690, 0, 4763, 230), field('Code', 'code', 5963, 0, 1635), field('Kind', 'kind', 8100, 0, 1995),
+        field('Amount', 'amount', 10515, 0, 1770, 240, num), field('Less', 'less', 12960, 0, 1815, 240, num), field('Note', '@Empty', 465, 0, 6885, 210)] }] },
+      off('GroupFooterArea2'), off('DetailArea1'),
+    ],
+  } as unknown as ReportDefinition;
+  const columns = ['name', 'code', 'kind', 'amount', 'less', 'id', 'base', 'part', 'label'];
+  const lots: DataSourceInfo = { connections: [], links: [], tables: [{ alias: T, name: T, kind: 'table', fields: columns.map((name) => ({ name, type: ['amount', 'less', 'id', 'base', 'part'].includes(name) ? 'number' : 'string' })) }] };
+  const converted = convertToRdl(def, lots, { reportName: 'Lots', formulasInQuery: true, rulesAsText: true });
+  const conv = readConventions(JSON.stringify({ names: { table: '{S}_Tab_{n}', heading: '{T}_{col}_ColTxt', value: '{T}_{col}_ColVal' } }));
+  const root = parseXml(applyConventions(converted.rdl, 'Lots', conv).rdl);
+  const tablix = descendants(root).find((e) => e.name === 'Tablix')!;
+  const place = (value: string) => {
+    for (const row of descendants(tablix).filter((e) => e.name === 'TablixRow')) {
+      const cells = childElements(child(row, 'TablixCells')!, 'TablixCell');
+      const at = cells.findIndex((c) => descendants(c).some((v) => v.name === 'Value' && textOf(v) === value));
+      if (at >= 0) return { at, span: Number(textOf(child(cells[at]!, 'CellContents/ColSpan')) || 1), count: cells.length };
+    }
+    return undefined;
+  };
+
+  it('puts each total under the columns of the figure it adds up', () => {
+    for (const [figure, total] of [['=Fields!amount.Value', '=Sum(Fields!amount.Value)'], ['=Fields!less.Value', '=Sum(Fields!less.Value)']]) {
+      const f = place(figure)!;
+      const t = place(total)!;
+      assert.deepEqual({ at: t.at, span: t.span }, { at: f.at, span: f.span }, total);
+    }
+  });
+
+  it('hides the row kept for records when the report lists none', () => {
+    const details = descendants(tablix).find((e) => e.name === 'TablixMember' && child(e, 'Group') && !child(e, 'Group/GroupExpressions'))!;
+    assert.equal(textOf(child(details, 'Visibility/Hidden')), 'true');
+  });
+});

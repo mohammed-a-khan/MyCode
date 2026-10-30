@@ -3154,13 +3154,15 @@ class RdlBuilder {
       const blank = (s: SectionInfo) => area.startsWith('Group') && !s.suppressed && (s.height ?? 0) >= 60 && !suppressedWhenBlank(s);
       const withContent = (sections ?? []).filter((s) => s.objects.length > 0 || blank(s));
       const list = withContent.length === 0 && always ? [{ name: `${name} (empty)`, objects: [] } as SectionInfo] : withContent;
+      const idle = withContent.length === 0 && always && (sections ?? []).every((s) => s.suppressed || !(s.height ?? 0));
       list.forEach((section, i) => {
         const r = this.tableRow(columns, section, list.length > 1 ? `${name}_${i + 1}` : name, area, minHeight);
         height += r.height;
         for (const row of [r.row, ...(r.more ?? []).map((m) => m.row)]) {
           rows.push(row);
+          const hidden = r.hidden ?? (idle ? 'true' : undefined);
           members.push(el('TablixMember',
-            r.hidden ? el('Visibility', el('Hidden', r.hidden)) : null,
+            hidden ? el('Visibility', el('Hidden', hidden)) : null,
             keepWith ? el('KeepWithGroup', keepWith) : null));
         }
       });
