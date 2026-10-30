@@ -3965,8 +3965,9 @@ class RdlBuilder {
       if (this.groupDisplay.has(level) || def.groupNameFormulas?.some((g) => g.field.toLowerCase() === field.toLowerCase())) continue;
       const bare = (r: string) => r.replace(/[{}\s]/g, '').toLowerCase();
       if (!shownRefs.some((r) => new RegExp(`^group #${level}( name)?$`).test(r) || bare(r) === `groupname(${bare(field)})`)) continue;
+      const readsOf = (f: FormulaInfo) => (f.referencedFields.length ? f.referencedFields : [...f.text.matchAll(/\{\s*([^{}@?#\s][^{}]*)\}/g)].map((m) => m[1]!));
       const namesValues = (f: FormulaInfo) => /["']/.test(f.text) && /^\s*(if|select)\b/i.test(f.text)
-        && f.referencedFields.length > 0 && f.referencedFields.every((r) => bare(r) === bare(field));
+        && readsOf(f).length > 0 && readsOf(f).every((r) => bare(r) === bare(field));
       const own = def.formulas.filter((f) => f.kind === 'internal' && f.name.toLowerCase() === `group #${level} name` && namesValues(f) && /\bthen\s*["']/i.test(f.text));
       const named = def.formulas.filter((f) => f.kind === 'formula' && namesValues(f)
         && !shownRefs.includes(`@${f.name.toLowerCase()}`) && !conditionNames.includes(f.name.toLowerCase()) && !otherTexts.includes(`{@${f.name.toLowerCase()}}`));

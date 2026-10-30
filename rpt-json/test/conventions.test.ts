@@ -756,15 +756,15 @@ describe('a group named by a formula written with single quotes', () => {
     ...emptyDefinition(), groups: ['@Whole', `${T}.kind`], groupNameFormulas: [{ field: '@Whole', formula: 'Whole' }],
     formulas: [
       { kind: 'formula', name: 'Whole', index: 1, text: 'WhileReadingRecords; "All"', referencedFields: [], valueType: 'string' },
-      { kind: 'formula', name: 'Naming', index: 2, text: `if {${T}.kind}='PB' then 'Part Held' else if {${T}.kind}='DB' then 'Held Back'`, referencedFields: [`${T}.kind`], valueType: 'string' },
+      { kind: 'formula', name: 'Naming', index: 2, text: `if {${T}.kind}='PB' then 'Part Held' else if {${T}.kind}='DB' then 'Held Back'`, referencedFields: [], valueType: 'string' },
       { kind: 'formula', name: 'Empty', index: 3, text: `if {${T}.id} = 0 and {${T}.kind}='PB' then 'Nothing held'`, referencedFields: [`${T}.id`, `${T}.kind`], valueType: 'string' },
       { kind: 'internal', name: 'Group #2 Order', index: 4, text: `if IsNull ({${T}.kind}) then 0 else if {${T}.kind} = "PB" then -3 else 0`, referencedFields: [`${T}.kind`] },
-      { kind: 'internal', name: 'Group #1 Order', index: 5, text: 'if IsNull ({@Whole}) then 2 else 2', referencedFields: [] },
+      { kind: 'internal', name: 'Group #1 Order', index: 5, text: 'if IsNull ({@Whole}) then 2 else 2', referencedFields: ['@Whole'] },
     ],
     layout: [
       { name: 'GroupHeaderArea1', sections: [{ name: 'GH1', height: 240, objects: [{ kind: 'text', name: 'Head', text: 'Lots', ...box(0) }] }] },
       { name: 'GroupHeaderArea2', sections: [{ name: 'GH2', height: 240, objects: [{ kind: 'field', name: 'G', field: 'Group #2', ...box(0) }] }] },
-      { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [{ kind: 'field', name: 'A', field: `${T}.amount`, ...box(2000) }] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [{ kind: 'field', name: 'A', field: `${T}.amount`, ...box(2000) }, { kind: 'field', name: 'E', field: '@Empty', ...box(4000) }] }] },
     ],
   } as unknown as ReportDefinition;
   const source: DataSourceInfo = { connections: [], links: [], tables: [{ alias: T, name: T, kind: 'table', fields: ['kind', 'id', 'amount'].map((name) => ({ name, type: name === 'kind' ? 'string' : 'number' })) }] };
