@@ -804,7 +804,8 @@ describe('figures listed in a group header, with totals in the report footer', (
         text('CodeHead', 'Code', 5963, 1950, 1635, 240, centred), text('KindHead', 'Kind', 8100, 1950, 1995, 240, centred),
         text('AmountHead', 'Amount', 10890, 1920, 1320, 420, centred), text('LessHead', 'Amount less held', 13080, 1680, 1920, 660, centred),
         text('NameHead', 'Name', 1193, 1950, 5115, 240, centred), text('MarkA', '(A)', 7200, 720, 420), text('MarkB', '(B)', 7200, 1080, 420),
-        field('Base', 'base', 5078, 720, 1867, 195, num), field('Part', 'part', 5078, 1090, 1867, 195, num), field('BaseLabel', 'label', 315, 720, 4485)] }] },
+        field('Base', 'base', 5078, 720, 1867, 195, num), field('Part', 'part', 5078, 1090, 1867, 195, num), field('BaseLabel', 'label', 315, 720, 4485),
+        text('WorkHead', 'WORKED', 8565, 435, 1275, 240, { ...centred, border: { sides: [0, 0, 0, 1], width: 20 } } as Partial<ReportObject>), text('Work', '(B)/(A)', 8880, 1090, 630, 240, centred)] }] },
       off('GroupFooterArea1'),
       { name: 'GroupHeaderArea2', sections: [{ name: 'GH2', height: 240, objects: [
         field('Name', 'Group #2', 690, 0, 4763, 230), field('Code', 'code', 5963, 0, 1635), field('Kind', 'kind', 8100, 0, 1995),
@@ -833,6 +834,15 @@ describe('figures listed in a group header, with totals in the report footer', (
       const t = place(total)!;
       assert.deepEqual({ at: t.at, span: t.span }, { at: f.at, span: f.span }, total);
     }
+  });
+
+  it('keeps a centred figure under the centred heading above it', () => {
+    assert.equal(place('(B)/(A)')!.at, place('WORKED')!.at);
+  });
+
+  it('lists the group rows that show the records as the table\'s data', () => {
+    const amount = descendants(tablix).find((e) => e.name === 'Textbox' && descendants(e).some((v) => v.name === 'Value' && textOf(v) === '=Fields!amount.Value'))!;
+    assert.match(amount.attributes.Name ?? '', /_ColVal$/);
   });
 
   it('hides the row kept for records when the report lists none', () => {

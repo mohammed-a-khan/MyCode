@@ -851,11 +851,18 @@ function freeSpan(item: XmlElement, siblings: XmlElement[], width: number): [num
 /** Each row's leaf member of the row hierarchy and what the row is. */
 function rowLeaves(tablix: XmlElement): Leaf[] {
   const out: Leaf[] = [];
+  const rows = rowsOf(tablix);
   const hasGroup = (m: XmlElement) => descendants(m).some((e) => e.name === 'Group');
   const walk = (members: XmlElement | undefined, level: number, details: boolean) => {
     const list = childElements(members ?? el('TablixMembers'), 'TablixMember');
     const firstDynamic = list.findIndex(hasGroup);
+    const dynamic = list.filter(hasGroup);
+    const only = dynamic.length === 1 ? dynamic[0]! : undefined;
+    const idle = !!only && !child(only, 'TablixMembers') && !!child(only, 'Group') && !child(child(only, 'Group')!, 'GroupExpressions')
+      && textOf(child(only, 'Visibility/Hidden')).trim().toLowerCase() === 'true';
     list.forEach((m, i) => {
+      if (idle && level > 0 && i < firstDynamic && !child(m, 'TablixMembers') && !child(m, 'Group')
+        && descendants(rows[out.length] ?? el('x')).some((e) => e.name === 'Value' && /Fields!\w+\.Value/.test(textOf(e)) && !TOTALLED.test(textOf(e)))) return out.push({ member: m, kind: 'detail' });
       const group = child(m, 'Group');
       const isDetails = details || (!!group && !child(group, 'GroupExpressions'));
       const nested = child(m, 'TablixMembers');
@@ -3259,7 +3266,7 @@ function summarize(tablix: XmlElement): void {
         summaryNames.set(it.t, paired ? `${paired}_HdrTxt` : `${snake(text ?? 'text') || 'text'}_Txt`);
       }
       const covered = text !== undefined && /center/i.test(textAlignOf(it.t)) ? widths.map((w, j) => j).filter((j) => Math.min(it.x + it.w, starts[j]! + widths[j]!) - Math.max(it.x, starts[j]!) >= widths[j]! / 2) : [];
-      place(it, covered.length > 1 && covered.every((j, m) => m === 0 || j === covered[m - 1]! + 1) && slots[covered[0]!] === undefined && !line.some((o) => o !== it && colOf(o) === covered[0]) ? covered[0]! : k);
+      place(it, covered.length > 1 && widths[k]! < it.w && covered.every((j, m) => m === 0 || j === covered[m - 1]! + 1) && slots[covered[0]!] === undefined && !line.some((o) => o !== it && colOf(o) === covered[0]) ? covered[0]! : k);
     }
     const top = line[0]!.y;
     const next = lines[li + 1]?.[0]?.y ?? y0;
