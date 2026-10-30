@@ -748,3 +748,30 @@ describe('group names given by a formula kept with the group', () => {
     assert.ok(review.some((n) => n.item === 'Group 1' && /\{@First\}, \{@Second\}/.test(n.message)));
   });
 });
+
+describe('a group named by a formula written with single quotes', () => {
+  const T = 'Lots';
+  const box = (x: number) => ({ position: { x, y: 0 }, size: { width: 1800, height: 240 } });
+  const def = {
+    ...emptyDefinition(), groups: ['@Whole', `${T}.kind`], groupNameFormulas: [{ field: '@Whole', formula: 'Whole' }],
+    formulas: [
+      { kind: 'formula', name: 'Whole', index: 1, text: 'WhileReadingRecords; "All"', referencedFields: [], valueType: 'string' },
+      { kind: 'formula', name: 'Naming', index: 2, text: `if {${T}.kind}='PB' then 'Part Held' else if {${T}.kind}='DB' then 'Held Back'`, referencedFields: [`${T}.kind`], valueType: 'string' },
+      { kind: 'formula', name: 'Empty', index: 3, text: `if {${T}.id} = 0 and {${T}.kind}='PB' then 'Nothing held'`, referencedFields: [`${T}.id`, `${T}.kind`], valueType: 'string' },
+      { kind: 'internal', name: 'Group #2 Order', index: 4, text: `if IsNull ({${T}.kind}) then 0 else if {${T}.kind} = "PB" then -3 else 0`, referencedFields: [`${T}.kind`] },
+      { kind: 'internal', name: 'Group #1 Order', index: 5, text: 'if IsNull ({@Whole}) then 2 else 2', referencedFields: [] },
+    ],
+    layout: [
+      { name: 'GroupHeaderArea1', sections: [{ name: 'GH1', height: 240, objects: [{ kind: 'text', name: 'Head', text: 'Lots', ...box(0) }] }] },
+      { name: 'GroupHeaderArea2', sections: [{ name: 'GH2', height: 240, objects: [{ kind: 'field', name: 'G', field: 'Group #2', ...box(0) }] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [{ kind: 'field', name: 'A', field: `${T}.amount`, ...box(2000) }] }] },
+    ],
+  } as unknown as ReportDefinition;
+  const source: DataSourceInfo = { connections: [], links: [], tables: [{ alias: T, name: T, kind: 'table', fields: ['kind', 'id', 'amount'].map((name) => ({ name, type: name === 'kind' ? 'string' : 'number' })) }] };
+
+  it('shows the formula in place of the raw value', () => {
+    const { rdl, review } = convertToRdl(def, source, { reportName: 'Lots' });
+    assert.ok(rdl.includes('"Part Held"'), 'name formula used');
+    assert.ok(review.some((n) => n.item === 'Group 2' && /Naming/.test(n.message)));
+  });
+});

@@ -3942,7 +3942,9 @@ class RdlBuilder {
       .map((f) => ({ level: Number(/^Group #(\d+) Order$/i.exec(f.name)?.[1] ?? 0), field: f.referencedFields[0] }))
       .filter((g) => g.level > 0 && g.field)
       .sort((a, b) => a.level - b.level);
-    const groups = orders.length ? orders.map((g) => g.field) : def.groups;
+    const byLevel = new Map(orders.map((g) => [g.level, g.field]));
+    const levels = Math.max(def.groups.length, ...orders.map((g) => g.level));
+    const groups = orders.length ? Array.from({ length: levels }, (_, i) => byLevel.get(i + 1) ?? def.groups[i]).filter((g): g is string => !!g) : def.groups;
     for (const [i, field] of groups.entries()) {
       this.groupFields.push(field);
       this.groupNames.push(this.itemNames.make(`Group${i + 1}_${field.split('.').pop()}`));
@@ -3963,12 +3965,12 @@ class RdlBuilder {
       if (this.groupDisplay.has(level) || def.groupNameFormulas?.some((g) => g.field.toLowerCase() === field.toLowerCase())) continue;
       const bare = (r: string) => r.replace(/[{}\s]/g, '').toLowerCase();
       if (!shownRefs.some((r) => new RegExp(`^group #${level}( name)?$`).test(r) || bare(r) === `groupname(${bare(field)})`)) continue;
-      const namesValues = (f: FormulaInfo) => /"/.test(f.text) && /^\s*(if|select)\b/i.test(f.text)
+      const namesValues = (f: FormulaInfo) => /["']/.test(f.text) && /^\s*(if|select)\b/i.test(f.text)
         && f.referencedFields.length > 0 && f.referencedFields.every((r) => bare(r) === bare(field));
-      const own = def.formulas.filter((f) => f.kind === 'internal' && f.name.toLowerCase() === `group #${level} name` && namesValues(f) && /\bthen\s*"/i.test(f.text));
+      const own = def.formulas.filter((f) => f.kind === 'internal' && f.name.toLowerCase() === `group #${level} name` && namesValues(f) && /\bthen\s*["']/i.test(f.text));
       const named = def.formulas.filter((f) => f.kind === 'formula' && namesValues(f)
         && !shownRefs.includes(`@${f.name.toLowerCase()}`) && !conditionNames.includes(f.name.toLowerCase()) && !otherTexts.includes(`{@${f.name.toLowerCase()}}`));
-      const attached = def.formulas.filter((f) => f.kind === 'conditionalFormat' && namesValues(f) && /\bthen\s*"/i.test(f.text)
+      const attached = def.formulas.filter((f) => f.kind === 'conditionalFormat' && namesValues(f) && /\bthen\s*["']/i.test(f.text)
         && !conditionNames.includes(f.name.toLowerCase()));
       const candidates = own.length === 1 ? own : named.length === 1 ? named : !named.length && attached.length === 1 ? attached : [];
       const expression = candidates.length === 1 ? this.formulaExpression(candidates[0]!.name) : null;
