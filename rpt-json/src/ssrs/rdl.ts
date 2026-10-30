@@ -3961,9 +3961,10 @@ class RdlBuilder {
     for (const [i, field] of this.groupFields.entries()) {
       const level = i + 1;
       if (this.groupDisplay.has(level) || def.groupNameFormulas?.some((g) => g.field.toLowerCase() === field.toLowerCase())) continue;
-      if (!shownRefs.some((r) => new RegExp(`^group #${level}( name)?$`).test(r))) continue;
+      const bare = (r: string) => r.replace(/[{}\s]/g, '').toLowerCase();
+      if (!shownRefs.some((r) => new RegExp(`^group #${level}( name)?$`).test(r) || bare(r) === `groupname(${bare(field)})`)) continue;
       const candidates = def.formulas.filter((f) => f.kind === 'formula' && /"/.test(f.text) && /^\s*(if|select)\b/i.test(f.text)
-        && f.referencedFields.length === 1 && f.referencedFields[0]!.toLowerCase() === field.toLowerCase()
+        && f.referencedFields.length > 0 && f.referencedFields.every((r) => bare(r) === bare(field))
         && !shownRefs.includes(`@${f.name.toLowerCase()}`) && !conditionNames.includes(f.name.toLowerCase()) && !otherTexts.includes(`{@${f.name.toLowerCase()}}`));
       const expression = candidates.length === 1 ? this.formulaExpression(candidates[0]!.name) : null;
       if (!expression) continue;
@@ -5077,7 +5078,7 @@ function tabIndent(obj: ReportObject): { text: string; indent: number } {
 
 function wrapSpaces(text: string, obj: ReportObject, part = false, align = obj.align, ends: { start: boolean; end: boolean } = { start: !part, end: !part }): string {
   const lineHeight = (obj.style?.size ?? 10) * 20 * 1.2;
-  if (!obj.size || obj.size.height < lineHeight * 1.8) return text.replace(/\u00a0/g, ' ');
+  if (!obj.size || obj.size.height < lineHeight * 1.8) return part && !ends.end ? text.replace(/\u00a0/g, ' ') : text.replace(/\u00a0/g, ' ').replace(/(\r?\n)+$/, '');
   const centred = align === 'center' || align === 'right';
   // Line ends of any kind (a lone carriage return too), tabs and wide or non-breaking spaces (SSRS keeps those
   // together on one line).

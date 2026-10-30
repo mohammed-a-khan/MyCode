@@ -673,7 +673,7 @@ describe('figures marked (A), (B) over a narrow empty column, and groups named b
         text('PartLabel', 'Part Held:', 315, 1090, 4485), field('Part', 'part', 5040, 1090, 1905, 195, num), text('MarkB', '(B)', 7200, 1090, 420), text('Calc', '(B)/(A)', 8880, 1090, 630),
         rule('Above', 1895), rule('Below', 2800),
         text('NameHead', 'Lot Name', 315, 2260, 5265, 240, centred), text('CodeHead', 'Code', 5580, 2305, 1305, 240, centred), text('KindHead', 'Kind', 6855, 2305, 1710, 240, centred),
-        text('FlagHead', 'Flagged Holding', 8565, 2305, 1275, 240, centred), text('AmountHead', 'Amount', 9855, 2305, 1545, 240, centred)] }] },
+        text('FlagHead', 'Flagged Holding\n', 8565, 2305, 1275, 240, centred), text('AmountHead', 'Amount', 9855, 2305, 1545, 240, centred)] }] },
       { name: 'GroupFooterArea1', sections: [{ name: 'GF', height: 0, suppressed: true, objects: [] }] },
       { name: 'GroupHeaderArea2', sections: [{ name: 'GH2', height: 240, objects: [field('KindLabel', 'Group #2 Name', 0, 0, 6780, 240)] }] },
       { name: 'GroupFooterArea2', sections: [{ name: 'GF2', height: 240, objects: [field('Total', `Sum of ${T}.amount`, 9641, 50, 1759, 180, num)] }] },
@@ -702,6 +702,15 @@ describe('figures marked (A), (B) over a narrow empty column, and groups named b
   it('keeps a centred heading on one line in its column', () => {
     const tb = box2('Flagged Holding');
     assert.ok(pts(tb, 'PaddingRight') < 10, String(pts(tb, 'PaddingRight')));
+  });
+
+  it('drops a line break ending a heading, so it sits on the line of the others', () => {
+    const tb = box2('Flagged Holding');
+    assert.equal(descendants(tb).filter((e) => e.name === 'Paragraph').length, 1);
+  });
+
+  it('ends a total where the figures over it end', () => {
+    assert.equal(pts(box2('=Sum(Fields!amount.Value)'), 'PaddingRight'), pts(box2('=Fields!amount.Value'), 'PaddingRight'));
   });
 
   it('names a group by the one unused formula that names its values', () => {

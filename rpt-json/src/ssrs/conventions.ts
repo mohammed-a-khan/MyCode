@@ -3726,14 +3726,14 @@ function totalsOnValues(tablix: XmlElement): void {
       if (right === undefined) continue;
       if (it.name === 'Textbox' && TOTALLED.test(valueOf(it)) && textAlignOf(it) === 'Right') {
         const own = paddingOf(it, ['PaddingRight']);
-        if (Math.abs(own - right) > 0.005 && Math.abs(own - right) <= 0.25) setChild(ownStyle(it), 'PaddingRight', `${Math.round(right * 720) / 10}pt`);
+        if (Math.abs(own - right) > 0.005 && Math.abs(own - right) <= 0.45) setChild(ownStyle(it), 'PaddingRight', `${Math.round(right * 720) / 10}pt`);
       } else if (it.name === 'Rectangle') {
         const lines = childElements(child(it, 'ReportItems') ?? el('x'), 'Line');
         for (const line of lines) {
           const end = widths[c]! - right;
           const left = len(line, 'Left');
           const now = left + len(line, 'Width');
-          if (len(line, 'Height') === 0 && Math.abs(now - end) > 0.005 && Math.abs(now - end) <= 0.25 && end > left) setChild(line, 'Width', inch(end - left));
+          if (len(line, 'Height') === 0 && Math.abs(now - end) > 0.005 && Math.abs(now - end) <= 0.45 && end > left) setChild(line, 'Width', inch(end - left));
         }
       }
     }
