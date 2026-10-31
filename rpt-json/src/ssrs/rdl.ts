@@ -3284,6 +3284,16 @@ class RdlBuilder {
           }
         }
       }
+      const bare = (r: string) => r.replace(/[{}\s]/g, '').toLowerCase();
+      const ranking = this.definition.formulas.find((f) => f.kind === 'internal' && /^Group #\d+ Order$/i.test(f.name) && !!f.referencedFields[0] && bare(f.referencedFields[0]) === bare(field));
+      const ranks = new Set([...(ranking?.text ?? '').matchAll(/\b(?:then|else)\s*(-?\d+(?:\.\d+)?)/gi)].map((m) => Number(m[1])));
+      if (ranking && ranks.size > 1 && sortValue === `=${expression}`) {
+        const ranked = translateFormula(ranking.text, this.formulaContext);
+        if (!ranked.code && !ranked.issues.length && ranked.expression !== '=Nothing') {
+          sortValue = ranked.expression;
+          descending = false;
+        }
+      }
       const groupSelection = level === levels ? this.groupSelectionFilter() : null;
       if (groupSelection) filters.push(groupSelection);
       if (level === 1 && this.isConstantGroup(field) && !filters.length) {

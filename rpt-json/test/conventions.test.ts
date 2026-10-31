@@ -907,3 +907,34 @@ describe('the rules over a total stay on its page', () => {
     assert.equal(textOf(child(wrapper, 'KeepTogether')), 'true');
   });
 });
+
+describe('groups in an order of the report\'s own', () => {
+  const T = 'Lots';
+  const box = (x: number) => ({ position: { x, y: 0 }, size: { width: 1800, height: 240 } });
+  const off = (name: string) => ({ name, sections: [{ name: name.slice(0, 2), height: 0, suppressed: true, objects: [] }] });
+  const def = {
+    ...emptyDefinition(), groups: ['@Whole', `${T}.code`],
+    formulas: [
+      { kind: 'formula', name: 'Whole', index: 1, text: 'WhileReadingRecords; "All"', referencedFields: [], valueType: 'string' },
+      { kind: 'internal', name: 'Group #1 Order', index: 2, text: 'if IsNull ({@Whole}) then 2 else 2', referencedFields: ['@Whole'] },
+      { kind: 'internal', name: 'Group #2 Order', index: 3, text: `if IsNull ({${T}.code}) then 0 else if {${T}.code} = 4 then -4 else if {${T}.code} = 8 then -3 else if {${T}.code} = 5 then -2 else 0`, referencedFields: [`${T}.code`] },
+    ],
+    layout: [
+      off('PageHeaderArea1'), off('PageFooterArea1'), off('ReportHeaderArea1'), off('ReportFooterArea1'),
+      { name: 'GroupHeaderArea1', sections: [{ name: 'GH1', height: 240, objects: [{ kind: 'text', name: 'Title', text: 'Lots', ...box(0) }] }] },
+      off('GroupFooterArea1'),
+      { name: 'GroupHeaderArea2', sections: [{ name: 'GH2', height: 240, objects: [{ kind: 'field', name: 'G', field: 'Group #2 Name', ...box(0) }] }] },
+      off('GroupFooterArea2'),
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [{ kind: 'field', name: 'A', field: `${T}.name`, ...box(2000) }] }] },
+    ],
+  } as unknown as ReportDefinition;
+  const lots: DataSourceInfo = { connections: [], links: [], tables: [{ alias: T, name: T, kind: 'table', fields: [{ name: 'code', type: 'number' }, { name: 'name', type: 'string' }] }] };
+
+  it('sorts the groups by the order the report gives them first', () => {
+    const { rdl } = convertToRdl(def, lots, { reportName: 'Lots' });
+    const group = descendants(parseXml(rdl)).find((e) => e.name === 'TablixMember' && textOf(child(e, 'Group/GroupExpressions/GroupExpression')) === '=Fields!code.Value')!;
+    const sorts = descendants(child(group, 'SortExpressions')!).filter((e) => e.name === 'Value').map(textOf);
+    assert.match(sorts[0]!, /= 4\), \(-\(4\)\)/);
+    assert.equal(sorts[1], '=Fields!code.Value');
+  });
+});
