@@ -2618,6 +2618,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       note.message = renamed(note.message);
     }
   }
+  for (const tablix of descendants(report).filter((e) => e.name === 'Tablix')) totalsKeptWithRules(tablix);
   return { rdl: toXml(withFunctions(root, extra.sqlFunctions ?? [])), review, settled: conv.dataSource ? ['Data source'] : [], ...(page && conv.pageBands === 'drop' ? { settles: /^Page header$| in Page (Header|Footer)\b/ } : {}), ...(Object.keys(files).length ? { files } : {}) };
 }
 
@@ -3698,6 +3699,54 @@ function alignTotals(tablix: XmlElement): void {
       setChild(st, 'VerticalAlign', 'Top');
       setChild(st, 'PaddingTop', top);
     }
+  });
+}
+
+function totalsKeptWithRules(tablix: XmlElement): void {
+  const rows = rowsOf(tablix);
+  const leaves = rowLeaves(tablix);
+  if (leaves.length !== rows.length) return;
+  const drawn = (e: XmlElement) => /solid|dashed|dotted|double/i.test(textOf(child(e, 'Style')));
+  const ruleOnly = (row: XmlElement) => {
+    let lines = 0;
+    for (const cell of cellsOf(row)) {
+      const item = cellItem(cell);
+      if (!item) continue;
+      if (item.name === 'Textbox') {
+        if (!isBlank(item)) return false;
+        if (descendants(item).some((e) => /Border$/.test(e.name) && drawn(e))) lines++;
+      } else if (item.name === 'Rectangle') {
+        const inside = childElements(child(item, 'ReportItems') ?? el('x'));
+        if (inside.some((e) => e.name !== 'Line')) return false;
+        lines += inside.length;
+      } else return false;
+    }
+    return lines > 0;
+  };
+  const parents = new Map<XmlElement, XmlElement>();
+  for (const e of descendants(child(tablix, 'TablixRowHierarchy') ?? el('x'))) for (const c of childElements(e, 'TablixMember')) parents.set(c, e);
+  const plain = (m: XmlElement) => !child(m, 'Group') && !child(m, 'TablixMembers') && !child(m, 'TablixHeader');
+  const done = new Set<number>();
+  leaves.forEach((leaf, i) => {
+    if ((leaf.kind !== 'total' && leaf.kind !== 'subtotal') || done.has(i) || !plain(leaf.member)) return;
+    const holder = parents.get(leaf.member);
+    if (!holder) return;
+    const siblings = childElements(holder, 'TablixMember');
+    const near = (k: number) => k >= 0 && k < rows.length && !done.has(k) && plain(leaves[k]!.member) && parents.get(leaves[k]!.member) === holder && ruleOnly(rows[k]!);
+    let first = i;
+    let last = i;
+    while (near(first - 1) && siblings.indexOf(leaves[first - 1]!.member) === siblings.indexOf(leaves[first]!.member) - 1) first--;
+    while (near(last + 1) && siblings.indexOf(leaves[last + 1]!.member) === siblings.indexOf(leaves[last]!.member) + 1) last++;
+    if (first === last) return;
+    const members = leaves.slice(first, last + 1).map((l) => l.member);
+    for (let k = first; k <= last; k++) done.add(k);
+    const keep = textOf(child(leaf.member, 'KeepWithGroup'));
+    const repeat = members.some((m) => textOf(child(m, 'RepeatOnNewPage')) === 'true');
+    for (const m of members) removeChildren(m, ['KeepWithGroup', 'RepeatOnNewPage', 'KeepTogether']);
+    const wrapper = el('TablixMember', el('TablixMembers', ...members), keep ? el('KeepWithGroup', keep) : null, repeat ? el('RepeatOnNewPage', 'true') : null, el('KeepTogether', 'true'));
+    const at = holder.children.indexOf(members[0]!);
+    holder.children = holder.children.filter((c) => !members.includes(c as XmlElement));
+    holder.children.splice(at, 0, wrapper);
   });
 }
 

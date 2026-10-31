@@ -850,3 +850,60 @@ describe('figures listed in a group header, with totals in the report footer', (
     assert.equal(textOf(child(details, 'Visibility/Hidden')), 'true');
   });
 });
+
+describe('the rules over a total stay on its page', () => {
+  const T = 'Lots';
+  const box = (x: number, y: number, w: number, h: number) => ({ position: { x, y }, size: { width: w, height: h } });
+  const text = (name: string, value: string, x: number, y: number, w: number, h = 240, extra: Partial<ReportObject> = {}): ReportObject => ({ kind: 'text', name, text: value, style: { size: 8 }, ...box(x, y, w, h), ...extra } as ReportObject);
+  const num = { align: 'right', format: { number: { decimals: 2, thousands: true, leadingZero: true, negative: 1, symbolType: 0, symbol: '$', symbolPosition: 0 } } } as Partial<ReportObject>;
+  const field = (name: string, f: string, x: number, y: number, w: number, h = 228, extra: Partial<ReportObject> = {}): ReportObject => ({ kind: 'field', name, field: /^(@|Sum of|Group #)/.test(f) ? f : `${T}.${f}`, style: { size: 8 }, ...box(x, y, w, h), ...extra } as ReportObject);
+  const rule = (name: string, x: number, y: number, w: number): ReportObject => ({ kind: 'line', name, ...box(x, y, w, 0), border: { sides: [0, 0, 1, 0], width: 60 } } as ReportObject);
+  const over = { border: { sides: [0, 0, 1, 0], width: 20 } } as Partial<ReportObject>;
+  const off = (name: string) => ({ name, sections: [{ name: name.slice(0, 2), height: 0, suppressed: true, objects: [] }] });
+  const centred = { align: 'center' } as Partial<ReportObject>;
+  const def = {
+    ...emptyDefinition(), groups: ['@Whole', '@Again', `${T}.kind`],
+    formulas: [
+      { kind: 'formula', name: 'Whole', index: 1, text: 'WhileReadingRecords; "All"', referencedFields: [], valueType: 'string' },
+      { kind: 'formula', name: 'Again', index: 2, text: 'WhileReadingRecords; "All"', referencedFields: [], valueType: 'string' },
+      { kind: 'internal', name: 'Group #1 Order', index: 3, text: 'if IsNull ({@Whole}) then 2 else 2', referencedFields: ['@Whole'] },
+      { kind: 'internal', name: 'Group #2 Order', index: 4, text: 'if IsNull ({@Again}) then 2 else 2', referencedFields: ['@Again'] },
+      { kind: 'internal', name: 'Group #3 Order', index: 5, text: `if IsNull ({${T}.kind}) then 2 else 2`, referencedFields: [`${T}.kind`] },
+    ],
+    layout: [
+      off('PageHeaderArea1'), off('PageFooterArea1'), off('ReportHeaderArea1'), { name: 'ReportFooterArea1', sections: [{ name: 'RF', height: 228, objects: [] }] },
+      { name: 'GroupHeaderArea1', sections: [{ name: 'GH1', height: 288, objects: [text('Title', 'Lots in Hand', 90, 0, 15206, 288, centred)] }] },
+      off('GroupFooterArea1'),
+      { name: 'GroupHeaderArea2', sections: [{ name: 'GH2', height: 780, objects: [
+        rule('R1', 0, 0, 15263), text('NameHead', 'Name', 390, 240, 3405, 240, centred), text('CodeHead', 'Code', 4200, 240, 1695, 240, centred),
+        text('AmountHead', 'Amount', 8640, 240, 1710, 210, centred), text('WorthHead', 'Worth', 13770, 240, 1110, 240, centred), rule('R2', 0, 720, 15263)] }] },
+      off('GroupFooterArea2'),
+      { name: 'GroupHeaderArea3', sections: [{ name: 'GH3', height: 240, objects: [field('Kind', 'Group #3', 90, 0, 2508)] }] },
+      { name: 'GroupFooterArea3', sections: [{ name: 'GF3', height: 375, objects: [
+        text('Tot', 'TOTALS:', 705, 60, 1320, 180), rule('Under', 30, 315, 15233),
+        field('SumA', `Sum of ${T}.amount`, 8700, 40, 1635, 192, { ...over, ...num }), field('SumW', `Sum of ${T}.worth`, 13356, 60, 1644, 192, { ...over, ...num })] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 264, objects: [
+        field('Name', 'name', 390, 0, 3690), field('Code', 'code', 4200, 0, 1695), field('Amount', 'amount', 8700, 0, 1650, 192, num), field('Worth', 'worth', 13740, 24, 1260, 192, num)] }] },
+    ],
+  } as unknown as ReportDefinition;
+  const lots: DataSourceInfo = { connections: [], links: [], tables: [{ alias: T, name: T, kind: 'table', fields: ['name', 'code', 'amount', 'worth', 'kind'].map((name) => ({ name, type: ['amount', 'worth'].includes(name) ? 'number' : 'string' })) }] };
+  const converted = convertToRdl(def, lots, { reportName: 'Lots', formulasInQuery: true, rulesAsText: true });
+  const conv = readConventions(JSON.stringify({ names: { table: '{S}_Tab_{n}', heading: '{T}_{col}_ColTxt', value: '{T}_{col}_ColVal' } }));
+  const root = parseXml(applyConventions(converted.rdl, 'Lots', conv).rdl);
+
+  it('keeps the row of rules over the totals and the totals together', () => {
+    const tablix = descendants(root).find((e) => e.name === 'Tablix')!;
+    const rows = childElements(child(tablix, 'TablixBody/TablixRows')!, 'TablixRow');
+    const leaves: XmlElement[] = [];
+    const walk = (m: XmlElement) => { const nested = child(m, 'TablixMembers'); if (nested) childElements(nested, 'TablixMember').forEach(walk); else leaves.push(m); };
+    childElements(child(tablix, 'TablixRowHierarchy/TablixMembers')!, 'TablixMember').forEach(walk);
+    const at = rows.findIndex((r) => descendants(r).some((v) => v.name === 'Value' && textOf(v) === '=Sum(Fields!amount.Value)'));
+    assert.ok(at > 0);
+    assert.ok(descendants(rows[at - 1]!).some((e) => e.name === 'Line'), 'a row of rules over the totals');
+    const parentOf = (m: XmlElement) => descendants(tablix).find((e) => e.name === 'TablixMembers' && childElements(e, 'TablixMember').includes(m));
+    const holder = parentOf(leaves[at]!)!;
+    assert.equal(holder, parentOf(leaves[at - 1]!));
+    const wrapper = descendants(tablix).find((e) => e.name === 'TablixMember' && child(e, 'TablixMembers') === holder)!;
+    assert.equal(textOf(child(wrapper, 'KeepTogether')), 'true');
+  });
+});
