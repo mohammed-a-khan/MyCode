@@ -85,7 +85,10 @@ export function padColumn(tablix: XmlElement, index: 'first' | 'last', amount: n
       if (textOf(child(own, side)).startsWith('=')) continue;
       setChild(own, side, `${Math.round(((points(textOf(child(own, side))) ?? 2) + amount) * 10) / 10}pt`);
     } else if (content.name === 'Rectangle' && index === 'first') {
+      const across = Number(textOf(child(child(cell, 'CellContents')!, 'ColSpan')) || 1) === cells.length && cells.length > 1;
       for (const c of childElements(child(content, 'ReportItems') ?? el('ReportItems'))) {
+        const align = textOf(descendants(c).find((e) => e.name === 'TextAlign'));
+        if (across && c.name === 'Textbox' && (!align || /^(left|general)$/i.test(align)) && (lengthInPoints(textOf(child(c, 'Left'))) ?? 0) <= 4) continue;
         const left = lengthInPoints(textOf(child(c, 'Left')));
         if (left !== undefined) setChild(c, 'Left', `${Math.round(((left + amount) / 72) * 1000) / 1000}in`);
       }

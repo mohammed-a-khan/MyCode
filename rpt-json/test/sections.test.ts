@@ -517,6 +517,16 @@ describe('edges lined up', () => {
     assert.ok(parseFloat(textOf(child(childElements(at(out, 'Grid_0'), 'Style')[0] ?? at(out, 'Grid_0'), 'PaddingLeft'))) > 14);
   });
 
+  it('moves a label held in a box on the table\'s edge with the table too', () => {
+    const label = `<TablixRow><Height>0.2in</Height><TablixCells><TablixCell><CellContents><Rectangle Name="Holder"><ReportItems><Textbox Name="Label"><Paragraphs><Paragraph><TextRuns><TextRun><Value>Label</Value></TextRun></TextRuns></Paragraph></Paragraphs><Top>0in</Top><Left>0.03in</Left><Height>0.2in</Height><Width>2in</Width></Textbox></ReportItems></Rectangle><ColSpan>2</ColSpan></CellContents></TablixCell><TablixCell /></TablixCells></TablixRow>`;
+    const grid = table('Grid', [2, 7.8]).replace('<TablixRows>', `<TablixRows>${label}`).replace('<TablixRowHierarchy><TablixMembers>', '<TablixRowHierarchy><TablixMembers><TablixMember />')
+      .replace('<Left>0in</Left><Height>0.2in</Height>', '<Left>0.2in</Left><Height>0.4in</Height>');
+    const out = parseXml(doc(grid));
+    alignToRules(out);
+    assert.ok(num(at(out, 'Grid'), 'Left') < 0.001);
+    assert.equal(textOf(child(at(out, 'Label'), 'Left')), '0.03in');
+  });
+
   it('starts a row of frames at the rule\'s left end, a frame in the same place moving with its twin', () => {
     const hidden = '<Visibility><Hidden>=Parameters!k.Value = 1</Hidden></Visibility>';
     const out = parseXml(doc(box('Row', 0.12, 0.2, 9.88, 2, box('First', 0, 0, 3, 2) + box('FirstEmpty', 0, 0, 3, 2, '', 'Solid', hidden) + box('Second', 3, 0, 6.88, 2), 'None')));

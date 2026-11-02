@@ -1032,12 +1032,15 @@ describe('a framed table under a title and a label', () => {
     const note = detail.objects.find((o: any) => o.name === 'Nothing');
     note.position = { x: 1700, y: 0 };
     note.size = { width: 6500, height: 240 };
+    note.text = 'Nothing closed by {${T}.day}';
+    note.embeddedFields = [`${T}.day`];
+    note.runs = [{ text: 'Nothing closed by ' }, { field: `${T}.day` }];
     const plain = convertToRdl(wide, moves, { reportName: 'Moves' }).rdl;
     const hidden = descendants(parseXml(plain)).filter((e) => e.name === 'TablixMember').map((m) => textOf(child(m, 'Visibility/Hidden')));
     assert.ok(!hidden.some((h) => /^=CountRows\(\) = 0$/.test(h)));
     const out = parseXml(applyConventions(plain, 'Moves', readConventions(JSON.stringify({ names: { table: '{S}_Tab_{n}', noData: '{T}_Empty' } }))).rdl);
     const message = descendants(out).find((e) => e.name === 'Textbox' && e.attributes.Name === 'Moves_Tab_1_Empty')!;
-    assert.equal(textOf(descendants(message).find((e) => e.name === 'Value')), 'Nothing closed yet');
+    assert.match(textOf(descendants(message).find((e) => e.name === 'Value')), /^="Nothing closed by "/);
   });
 
   it('lays the framed headings and totals out a cell per column, as merging needs, with white lines between dark headings', () => {

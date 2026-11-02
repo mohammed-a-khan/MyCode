@@ -792,6 +792,8 @@ const stackedRows = new WeakSet<XmlElement>();
 const widened = new WeakSet<XmlElement>();
 const leftBlank = new WeakSet<XmlElement>();
 const labelRows = new WeakSet<XmlElement>();
+const labelBoxes = new Set<XmlElement>();
+const labelPads = new Map<XmlElement, string>();
 const messageAreas = new WeakMap<XmlElement, { at: number; within: number }>();
 const groupLabels = new WeakSet<XmlElement>();
 const summaryNames = new WeakMap<XmlElement, string>();
@@ -1355,7 +1357,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
         for (const l of blank) {
           const shown = descendants(all[l.i]!).filter((e) => e.name === 'Textbox' && !isBlank(e));
           const said = shown.find((e) => /CountRows\(\)\s*(>|&gt;)\s*0/.test(textOf(child(e, 'Visibility/Hidden'))))
-            ?? (shown.length === 1 && fixedText(shown[0]!) !== undefined && /CountRows\(\)\s*(>|&gt;)\s*0[\s\S]*CountRows\(\)\s*(>|&gt;)\s*0/.test(textOf(child(l.member, 'Visibility/Hidden'))) ? shown[0] : undefined);
+            ?? (shown.length === 1 && (fixedText(shown[0]!) !== undefined || /^=[\s\S]*"[^"]{3,}"/.test(valueOf(shown[0]!))) && /CountRows\(\)\s*(>|&gt;)\s*0[\s\S]*CountRows\(\)\s*(>|&gt;)\s*0/.test(textOf(child(l.member, 'Visibility/Hidden'))) ? shown[0] : undefined);
           if (said && !ownMessage) {
             ownMessage = valueOf(said);
             const cells = cellsOf(all[l.i]!);
@@ -1463,11 +1465,13 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
           rename(tb, 'text', { T });
         }
         roles.set(tb, label ? 'text' : 'title');
+        if (label) labelBoxes.add(tb);
         if (label) labelRows.add(first!);
         tableCells.add(tb);
         for (const label of labels) {
           rename(label, 'text', { T });
           roles.set(label, 'text');
+          labelBoxes.add(label);
           tableCells.add(label);
           const row = rowsOf(tablix).find((r) => descendants(r).includes(label));
           if (row) labelRows.add(row);
@@ -2276,6 +2280,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
         el('Style', el('Border', el('Style', 'None'))));
       items.children = [wrapper];
     }
+    for (const tb of labelBoxes) labelPads.set(tb, textOf(child(ownStyle(tb), 'PaddingLeft')));
     roomForDates(body, reportWidth);
     rulesAsLines(body);
     oneOfAlternates(body);
@@ -2456,6 +2461,9 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     review.push({ item: `Charts (${charts})`, message: `keep their own colours and plain titles: the conventions file has no ${missing}, so the style dataset's chart looks are not applied` });
   }
   if (conv.style && body) alignToRules(report);
+  for (const [tb, padding] of labelPads) if (padding) setChild(ownStyle(tb), 'PaddingLeft', padding);
+  labelPads.clear();
+  labelBoxes.clear();
   const grownRows = new Set<XmlElement>();
   for (const [tb, role] of roles) {
     if (role !== 'title') continue;
