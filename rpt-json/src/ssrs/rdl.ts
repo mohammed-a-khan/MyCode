@@ -1964,13 +1964,13 @@ class RdlBuilder {
           // Crystal draws a thick line's width down from its place (SSRS around it): a horizontal one is moved down by
           // half its width, so a rule at a section's foot still meets what follows.
           el('Top', inches(box.top + (obj.size?.height ? 0 : twipsToInches(thickHalf(obj))))), el('Left', inches(box.left)),
-          el('Height', inches(obj.size ? box.height : 0)), el('Width', inches(box.width)),
+          el('Height', inches(obj.size ? box.height : 0)), el('Width', inches(obj.size?.height && !obj.size.width ? 0 : box.width)),
           visibility,
           el('Style', el('Border',
             el('Color', obj.border?.color ?? 'Black'),
             el('Style', BORDER_STYLES[Math.max(...(obj.border?.sides ?? [1]))] ?? 'Solid'),
             // A line running down a table is as wide as the table's cell borders that continue it.
-            el('Width', `${Math.max(0.25, ((obj.border?.width ?? 20) + (this.runOn.has(obj) ? 10 : 0)) / 20).toFixed(2)}pt`))));
+            el('Width', `${Math.max(0.25, ((obj.border?.width ?? 20) + (this.runOn.has(obj) || (scope === 'row' && !!obj.size?.height && !obj.size.width) ? 10 : 0)) / 20).toFixed(2)}pt`))));
       case 'box':
         return el('Rectangle', { Name: name() },
           el('KeepTogether', 'true'),

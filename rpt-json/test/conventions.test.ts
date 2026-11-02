@@ -1030,7 +1030,7 @@ describe('a framed table under a title and a label', () => {
     const conv = readConventions(JSON.stringify({
       names: { table: '{S}_Tab_{n}', heading: '{T}_{col}_ColTxt', value: '{T}_{col}_ColVal', noData: '{T}_Empty' },
       style: { dataset: 'Looks', command: 'dbo.Looks', field: '{role}_{prop}', props: { BackgroundColor: 'fill' },
-        roles: { heading: 'Head', headingFirst: 'HeadFirst', body: 'Body' }, border: 'Edge_{side}' },
+        roles: { heading: 'Head', headingFirst: 'HeadFirst', body: 'Body', totalLabel: 'TotLabel', totalValue: 'TotValue', footer: 'Foot' }, border: 'Edge_{side}' },
     }));
     const out = parseXml(applyConventions(rdl, 'Moves', conv).rdl);
     const message = descendants(out).find((e) => e.name === 'Textbox' && e.attributes.Name === 'Moves_Tab_1_Empty')!;
@@ -1055,5 +1055,11 @@ describe('a framed table under a title and a label', () => {
       && descendants(table).some((x) => x.name === 'CellContents' && childElements(x).some((r) => r.name === 'Rectangle' && childElements(child(r, 'ReportItems') ?? el('x')).includes(e))));
     assert.ok(downLines.length >= 6);
     for (const line of downLines) assert.ok(edges.some((x) => Math.abs(x - parseFloat(textOf(child(line, 'Left')))) < 0.002), `line at ${textOf(child(line, 'Left'))} off the column edges ${edges.join(', ')}`);
+    assert.ok(downLines.every((l) => textOf(child(l, 'Width')) === '0in'));
+    const sum = descendants(out).find((e) => e.name === 'Textbox' && /Sum\(Fields!size/.test(descendants(e).map((x) => (x.name === 'Value' ? textOf(x) : '')).join('')))!;
+    const box = descendants(out).find((e) => e.name === 'Rectangle' && childElements(child(e, 'ReportItems') ?? el('x')).includes(sum))!;
+    const boxLeft = parseFloat(textOf(child(box, 'Left')));
+    assert.ok(edges.some((x) => Math.abs(x - boxLeft - parseFloat(textOf(child(sum, 'Left')))) < 0.002));
+    assert.ok(Math.abs(parseFloat(textOf(child(sum, 'Left'))) + parseFloat(textOf(child(sum, 'Width'))) - parseFloat(textOf(child(box, 'Width'))) + 0.02) < 0.002);
   });
 });

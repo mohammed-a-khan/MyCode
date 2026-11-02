@@ -2678,6 +2678,8 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       note.message = renamed(note.message);
     }
   }
+  for (const tablix of descendants(report).filter((e) => e.name === 'Tablix')) linesOnColumnEdges(tablix);
+  for (const tablix of descendants(report).filter((e) => e.name === 'Tablix')) valuesReachTheirLines(tablix);
   for (const tablix of descendants(report).filter((e) => e.name === 'Tablix')) {
     const ws = widthsOf(tablix);
     const upTo = (k: number) => ws.slice(0, k).reduce((a, b) => a + b, 0);
@@ -3143,6 +3145,88 @@ function widenNarrow(tablix: XmlElement): void {
   const fromThen = wanted * give - fromFirst;
   columns.forEach((c, k) => setChild(c, 'Width', inch(widths[k]! + short[k]! * give - (firstSpare ? first[k]! * fromFirst / firstSpare : 0) - (thenSpare ? then[k]! * fromThen / thenSpare : 0))));
   followColumns(tablix, widths);
+}
+
+function valuesReachTheirLines(tablix: XmlElement): void {
+  for (const cell of rowsOf(tablix).flatMap((row) => cellsOf(row))) {
+    const item = cellItem(cell);
+    if (item?.name !== 'Rectangle') continue;
+    const top = childElements(child(item, 'ReportItems') ?? el('x')).filter((x) => ITEMS.has(x.name) && child(x, 'Left'));
+    for (const holder of top.filter((e) => e.name === 'Rectangle' && textOf(child(ownStyle(e), 'BackgroundColor')).startsWith('='))) {
+      const fill = textOf(child(ownStyle(holder), 'BackgroundColor'));
+      const hl = len(holder, 'Left');
+      const ht = len(holder, 'Top');
+      const hb = ht + len(holder, 'Height');
+      const marks = [0, len(holder, 'Width'), ...top.filter((e) => e.name === 'Line' && len(e, 'Width') < 0.02 && len(e, 'Top') < hb && len(e, 'Top') + len(e, 'Height') > ht).map((e) => len(e, 'Left') - hl)];
+      for (const tb of childElements(child(holder, 'ReportItems') ?? el('x')).filter((e) => e.name === 'Textbox' && child(e, 'Left'))) {
+        const own = textOf(child(ownStyle(tb), 'BackgroundColor'));
+        if (!own || own === fill) continue;
+        const l = len(tb, 'Left');
+        const r = l + len(tb, 'Width');
+        const from = Math.max(...marks.filter((x) => x <= l + 0.06));
+        const to = Math.min(...marks.filter((x) => x >= r - 0.06));
+        const crowded = childElements(child(holder, 'ReportItems') ?? el('x')).some((o) => o !== tb && o.name === 'Textbox' && child(o, 'Left') && len(o, 'Left') < to - 0.01 && len(o, 'Left') + len(o, 'Width') > from + 0.01);
+        if (!Number.isFinite(from) || !Number.isFinite(to) || crowded) continue;
+        const edge = 0.02;
+        const lo = from < 0.005 ? edge : from;
+        const hi = to > len(holder, 'Width') - 0.005 ? to - edge : to;
+        const t = len(tb, 'Top');
+        const b = t + len(tb, 'Height');
+        const inside = len(holder, 'Height') - edge;
+        const grow = t >= edge - 0.001 && b <= len(holder, 'Height') + 0.005;
+        pad(tb, { left: Math.max(0, l - lo), right: Math.max(0, hi - r), top: grow ? t - edge : 0, bottom: grow ? Math.max(0, inside - b) : 0 });
+        setChild(tb, 'Left', inch(lo));
+        setChild(tb, 'Width', inch(hi - lo));
+        if (grow) { setChild(tb, 'Top', inch(edge)); setChild(tb, 'Height', inch(inside - edge)); }
+      }
+    }
+  }
+}
+
+function linesOnColumnEdges(tablix: XmlElement): void {
+  const widths = widthsOf(tablix);
+  for (const row of rowsOf(tablix)) {
+    let c = 0;
+    for (const cell of cellsOf(row)) {
+      const contents = child(cell, 'CellContents');
+      if (!contents) continue;
+      const span = Number(textOf(child(contents, 'ColSpan')) || 1);
+      const item = cellItem(cell);
+      if (span > 1 && item?.name === 'Rectangle') {
+        const edges = widths.slice(c, c + span).map((_, k) => widths.slice(c, c + k + 1).reduce((a, b) => a + b, 0)).slice(0, -1);
+        const rowHeight = len(row, 'Height');
+        const cellWidth = widths.slice(c, c + span).reduce((a, b) => a + b, 0);
+        for (const box of childElements(child(item, 'ReportItems') ?? el('x')).filter((e) => e.name === 'Rectangle' && child(e, 'Top') && !childElements(child(e, 'ReportItems') ?? el('x')).length)) {
+          const top = len(box, 'Top');
+          const height = len(box, 'Height');
+          if (height > 0.1 || Math.abs(top + height - rowHeight) > 0.005) continue;
+          const l = len(box, 'Left');
+          const r = l + len(box, 'Width');
+          const onEdge = (x: number) => x < 0.005 || Math.abs(x - cellWidth) < 0.005 || edges.some((y) => Math.abs(y - x) < 0.005);
+          if (!onEdge(l)) {
+            removeChildren(ownStyle(box), ['LeftBorder']);
+            if (l <= 0.15) { setChild(box, 'Left', '0in'); setChild(box, 'Width', inch(r)); }
+          }
+          if (!onEdge(r)) {
+            removeChildren(ownStyle(box), ['RightBorder']);
+            if (cellWidth - r <= 0.15) setChild(box, 'Width', inch(cellWidth - len(box, 'Left')));
+          }
+        }
+        const walk = (holder: XmlElement, at: number) => {
+          for (const e of childElements(child(holder, 'ReportItems') ?? el('x')).filter((x) => ITEMS.has(x.name) && child(x, 'Left'))) {
+            const x = at + len(e, 'Left');
+            if (e.name === 'Line' && len(e, 'Width') < 0.02 && len(e, 'Height') > 0.02) {
+              const edge = edges.reduce((best, y) => (Math.abs(y - x) < Math.abs(best - x) ? y : best), Infinity);
+              if (Math.abs(edge - x) <= 0.1 && Math.abs(edge - x) > 0.0005) setChild(e, 'Left', inch(edge - at));
+            }
+            if (e.name === 'Rectangle') walk(e, x);
+          }
+        };
+        walk(item, 0);
+      }
+      c += span;
+    }
+  }
 }
 
 function followColumns(tablix: XmlElement, before: number[]): void {
