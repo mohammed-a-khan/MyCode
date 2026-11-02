@@ -2429,6 +2429,11 @@ class RdlBuilder {
     for (const x of this.tableRules) {
       const end = section ? this.tableRuleEnds.get(x) : undefined;
       if (end && end.after.has(section!)) continue;
+      let reach = end?.offset ?? 0;
+      if (end && end.section === section) {
+        const boxTop = section!.objects.filter((o) => o.kind === 'box').map((o) => o.position?.y ?? 0).find((y) => end.offset >= y - 30 && end.offset <= y + 90);
+        if (boxTop !== undefined) reach = boxTop;
+      }
       let best = -1;
       let distance = Infinity;
       columns.forEach((c, i) => {
@@ -2438,7 +2443,7 @@ class RdlBuilder {
       if (Math.abs(tableRight - x) < distance) {
         if (Math.abs(tableRight - x) <= 360) right.add(columns.length - 1);
       } else if (distance <= 360) {
-        if (end && end.section === section && !left.has(best)) short.set(best, Math.max(short.get(best) ?? 0, end.offset));
+        if (end && end.section === section && !left.has(best)) short.set(best, Math.max(short.get(best) ?? 0, reach));
         else short.delete(best);
         left.add(best);
       }
