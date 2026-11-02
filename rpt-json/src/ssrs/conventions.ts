@@ -1342,6 +1342,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
     // Crystal's blank band where there is no data (copies of the data rows, shown only then): the team's message row
     // takes its place, as in their templates (the copies would read as doubled rows in the designer).
     let ownMessage: string | undefined;
+    let ownPlace: { left: number; sides: XmlElement[] } | undefined;
     {
       const blank = rowLeaves(tablix).map((l, i) => ({ ...l, i })).filter((l) => l.kind === 'noData');
       if (blank.length) {
@@ -1350,7 +1351,17 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
         let dropped = 0;
         for (const l of blank) {
           const said = descendants(all[l.i]!).find((e) => e.name === 'Textbox' && !isBlank(e) && /CountRows\(\)\s*(>|&gt;)\s*0/.test(textOf(child(e, 'Visibility/Hidden'))));
-          if (said && !ownMessage) ownMessage = valueOf(said);
+          if (said && !ownMessage) {
+            ownMessage = valueOf(said);
+            const cells = cellsOf(all[l.i]!);
+            const c = cells.findIndex((cell) => descendants(cell).includes(said));
+            const firstItem = cells[0] ? cellItem(cells[0]) : undefined;
+            const lastItem = cells.length ? cellItem(cells[cells.length - 1]!) : undefined;
+            const sides = [firstItem && child(ownStyle(firstItem), 'LeftBorder'), lastItem && child(ownStyle(lastItem), 'RightBorder')]
+              .filter((b): b is XmlElement => !!b && !/^none$/i.test(textOf(child(b, 'Style')) || 'None'));
+            const within = cellItem(cells[c]!) !== said ? len(said, 'Left') : 0;
+            ownPlace = { left: widthsOf(tablix).slice(0, Math.max(0, c)).reduce((a, b) => a + b, 0) + within, sides };
+          }
           const holder = descendants(child(tablix, 'TablixRowHierarchy')!).find((e) => e.name === 'TablixMembers' && e.children.includes(l.member));
           // (Only where the row's member is not the last of its list: a list may not be left empty.)
           if (!holder || childElements(holder, 'TablixMember').length < 2) continue;
@@ -1423,6 +1434,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       const headingsUnder = (!!following[0] && headed(following[0])) || (block && headed(following[1]!)) || labels.length > 0;
       if (only && item && tb && words && words.trim().length > 3 && !/:\s*$/.test(words) && span >= 2 && headingsUnder
         && spanWidth >= 0.8 * tWidth && !child(item, 'Visibility')) {
+        const label = tablix !== tablixes[0] && item !== tb && textAlignOf(tb) !== 'Center' && textWidth(tb, true) < 0.5 * tWidth;
         if (item !== tb) {
           const own = ownStyle(tb);
           const from = childElements(item, 'Style')[0];
@@ -1444,7 +1456,8 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
         } else {
           rename(tb, 'text', { T });
         }
-        roles.set(tb, 'title');
+        roles.set(tb, label ? 'text' : 'title');
+        if (label) labelRows.add(first!);
         tableCells.add(tb);
         for (const label of labels) {
           rename(label, 'text', { T });
@@ -1469,7 +1482,12 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       const ownTitle = descendants(tablix).find((e) => e.name === 'Textbox' && roles.get(e) === 'title');
       const what = ((ownTitle && fixedText(ownTitle)) ?? titleText ?? reportName.replace(/_/g, ' ')).trim();
       const message = conv.noData.replace(/\{TITLE\}/g, what.toUpperCase()).replace(/\{title\}/g, what);
-      const row = spanningRow(0.2, newTextbox('__nodata', ownMessage ?? message), columns);
+      const box = newTextbox('__nodata', ownMessage ?? message);
+      if (ownPlace) {
+        pad(box, { left: ownPlace.left });
+        for (const side of ownPlace.sides) ownStyle(box).children.push(structuredClone(side));
+      }
+      const row = spanningRow(0.2, box, columns);
       child(tablix, 'TablixBody/TablixRows')!.children.splice(at, 0, row);
       const repeat = at > 0 && textOf(child(top[at - 1]!, 'RepeatOnNewPage')) === 'true';
       const member = el('TablixMember', el('KeepWithGroup', 'After'), repeat ? el('RepeatOnNewPage', 'true') : null, el('Visibility', el('Hidden', '=CountRows() > 0')));
@@ -1636,7 +1654,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
             tb = text;
           }
         }
-        if (span < 2 || span >= columns || !tb || tb.name !== 'Textbox' || fixedText(tb) === undefined || /_HdrTxt$/.test(summaryNames.get(tb) ?? '')) continue;
+        if (span < 2 || span >= columns || !tb || tb.name !== 'Textbox' || fixedText(tb) === undefined || /_HdrTxt$/.test(summaryNames.get(tb) ?? '') || labelRows.has(row)) continue;
         // (Too long for its first column: on more lines, where the row has room for them.)
         const lines = Math.ceil(textWidth(tb, true) / Math.max(0.01, widths[c]!) - 0.01);
         const sizes = descendants(tb).filter((e) => e.name === 'FontSize' && !textOf(e).startsWith('=')).map((e) => (inches(textOf(e)) ?? 0) * 72);
@@ -5422,9 +5440,33 @@ function applyStyleRoles(report: XmlElement, style: NonNullable<Conventions['sty
       if (!cur || /^(transparent|white|#ffffff|#00ffffff)$/i.test(cur)) setChild(s, 'BackgroundColor', painted);
     }
   }
+  const darkFills = new Set([style.roles.heading, style.roles.headingFirst].filter((r): r is string => !!r && !!style.props.BackgroundColor)
+    .map((r) => `=${expr(style.field.replace(/\{role\}/g, r).replace(/\{prop\}/g, style.props.BackgroundColor!))}`));
+  const onDark = new Set<XmlElement>();
+  for (const t of descendants(report).filter((e) => e.name === 'Tablix')) {
+    for (const row of rowsOf(t)) {
+      for (const cell of cellsOf(row)) {
+        const item = cellItem(cell);
+        if (!item || !darkFills.has(textOf(child(ownStyle(item), 'BackgroundColor')))) continue;
+        for (const inner of descendants(item).filter((e) => e !== item && (e.name === 'Line' || e.name === 'Rectangle'))) {
+          const st = childElements(inner, 'Style')[0];
+          if (st) onDark.add(st);
+        }
+      }
+    }
+  }
+  for (const st of onDark) {
+    for (const side of ['Border', ...BORDER_SIDES]) {
+      const b = child(st, side);
+      if (!b || /^none$/i.test(textOf(child(b, 'Style')) || 'None')) continue;
+      const color = textOf(child(b, 'Color'));
+      if (!color || /^(black|#000000|#000000ff)$/i.test(color)) setChild(b, 'Color', 'White');
+    }
+  }
   // Borders Crystal draws in black take the house's border colour.
   if (style.border) {
     for (const e of descendants(report).filter((x) => x.name === 'Style')) {
+      if (onDark.has(e)) continue;
       for (const side of ['Border', ...BORDER_SIDES]) {
         const b = child(e, side);
         if (!b) continue;

@@ -1016,4 +1016,30 @@ describe('a framed table under a title and a label', () => {
     assert.ok(names(rows[1]!).slice(1).every((n) => /blnk\d+_txt$/.test(n)));
     assert.ok(rows.some((row) => shown(row).includes('Nothing closed yet') && shown(row).length === 1));
   });
+
+  it('ends the column lines where the report ends them, short of the totals\' foot', () => {
+    const rows = rowsIn(rdl);
+    const totals = rows.find((row) => shown(row).includes('Totals'))!;
+    const height = parseFloat(textOf(child(totals, 'Height')));
+    const lines = descendants(totals).filter((e) => e.name === 'Line' && textOf(child(e, 'Top')) === '0in');
+    assert.ok(lines.length > 0);
+    assert.ok(lines.every((l) => parseFloat(textOf(child(l, 'Height'))) < height / 2));
+  });
+
+  it('places the report\'s own message inside the frame, where the report prints it, with white lines on the dark headings', () => {
+    const conv = readConventions(JSON.stringify({
+      names: { table: '{S}_Tab_{n}', heading: '{T}_{col}_ColTxt', value: '{T}_{col}_ColVal', noData: '{T}_Empty' },
+      style: { dataset: 'Looks', command: 'dbo.Looks', field: '{role}_{prop}', props: { BackgroundColor: 'fill' },
+        roles: { heading: 'Head', headingFirst: 'HeadFirst', body: 'Body' }, border: 'Edge_{side}' },
+    }));
+    const out = parseXml(applyConventions(rdl, 'Moves', conv).rdl);
+    const message = descendants(out).find((e) => e.name === 'Textbox' && e.attributes.Name === 'Moves_Tab_1_Empty')!;
+    const st = childElements(message, 'Style')[0]!;
+    assert.ok(parseFloat(textOf(child(st, 'PaddingLeft'))) > 60);
+    assert.ok(child(st, 'LeftBorder') && child(st, 'RightBorder'));
+    const dark = descendants(out).filter((e) => e.name === 'TablixRow').find((row) => descendants(row).some((e) => e.name === 'BackgroundColor' && /HeadFirst_fill|Head_fill/.test(textOf(e))) && shown(row).includes('Day'))!;
+    const inner = descendants(dark).filter((e) => e.name === 'Line');
+    assert.ok(inner.length > 0);
+    assert.ok(inner.every((l) => textOf(child(l, 'Style/Border/Color')) === 'White'));
+  });
 });

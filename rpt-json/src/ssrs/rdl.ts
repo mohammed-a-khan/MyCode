@@ -2421,11 +2421,14 @@ class RdlBuilder {
    * The table columns that take a border from a line running down the table (tableRules): the left border of
    * the column whose left edge is nearest the line, or the right border of the last column.
    */
-  private columnRules(columns: Column[]): { left: Set<number>; right: Set<number> } {
+  private columnRules(columns: Column[], section?: SectionInfo): { left: Set<number>; right: Set<number>; short: Map<number, number> } {
     const left = new Set<number>();
     const right = new Set<number>();
+    const short = new Map<number, number>();
     const tableRight = columns[columns.length - 1].x + inchesToTwips(columns[columns.length - 1].width);
     for (const x of this.tableRules) {
+      const end = section ? this.tableRuleEnds.get(x) : undefined;
+      if (end && end.after.has(section!)) continue;
       let best = -1;
       let distance = Infinity;
       columns.forEach((c, i) => {
@@ -2434,9 +2437,13 @@ class RdlBuilder {
       });
       if (Math.abs(tableRight - x) < distance) {
         if (Math.abs(tableRight - x) <= 360) right.add(columns.length - 1);
-      } else if (distance <= 360) left.add(best);
+      } else if (distance <= 360) {
+        if (end && end.section === section && !left.has(best)) short.set(best, Math.max(short.get(best) ?? 0, end.offset));
+        else short.delete(best);
+        left.add(best);
+      }
     }
-    return { left, right };
+    return { left, right, short };
   }
 
   /**
@@ -2702,9 +2709,9 @@ class RdlBuilder {
       // Lines running down the table (tableRules) cross this row too, at the column edges; not in the section
       // they start in, which draws them itself from where they start.
       const startsHere = section.objects.some((o) => this.runOn.has(o)) || this.aboveFrames.has(section);
-      const all = startsHere ? { left: new Set<number>(), right: new Set<number>() } : this.columnRules(columns);
+      const all = startsHere ? { left: new Set<number>(), right: new Set<number>(), short: new Map<number, number>() } : this.columnRules(columns, section);
       // Above a heading's rule only the frame's sides cross the row.
-      const rules = outerOnly ? { left: new Set([...all.left].filter((i) => i === 0)), right: all.right } : all;
+      const rules = outerOnly ? { left: new Set([...all.left].filter((i) => i === 0)), right: all.right, short: all.short } : all;
       const cells: XmlElement[] = [];
       for (const [first, last] of segments) {
         const left = columns[first].x;
@@ -2748,13 +2755,13 @@ class RdlBuilder {
           if (item) items.push(item);
         }
         // Lines down the table inside a cell that spans columns.
-        for (let i = first + 1; i <= last; i++) {
-          if (!rules.left.has(i)) continue;
+        for (let i = first; i <= last; i++) {
+          if (!rules.left.has(i) || (i === first && !rules.short.has(i))) continue;
           items.push(el('Line', { Name: this.itemNames.make(`${rowName}_Rule`) },
-            el('Top', '0in'), el('Left', inches(twipsToInches(columns[i].x - left))), el('Height', inches(height)), el('Width', '0in'),
+            el('Top', '0in'), el('Left', inches(twipsToInches(columns[i].x - left))), el('Height', inches(rules.short.has(i) ? Math.min(height, twipsToInches(rules.short.get(i)!)) : height)), el('Width', '0in'),
             el('Style', el('Border', el('Color', 'Black'), el('Style', 'Solid'), el('Width', `${((this.tableRuleWidth + 10) / 20).toFixed(2)}pt`)))));
         }
-        const ruled = { ...lines, left: rules.left.has(first), right: last === columns.length - 1 && rules.right.has(last) };
+        const ruled = { ...lines, left: rules.left.has(first) && !rules.short.has(first), right: last === columns.length - 1 && rules.right.has(last) };
         const rectangle = el('Rectangle', { Name: this.itemNames.make(`${rowName}_Area`) },
           items.length ? el('ReportItems', ...items) : null,
           el('KeepTogether', 'true'),
@@ -2767,7 +2774,7 @@ class RdlBuilder {
       return { row, height, hidden };
     }
 
-    const rules = this.columnRules(columns);
+    const rules = this.columnRules(columns, section);
     const cells: (ReportObject | undefined)[] = columns.map(() => undefined);
     let rowHeight = 0;
     const rowLines: ReportObject[] = [];
@@ -3835,7 +3842,8 @@ class RdlBuilder {
   }
 
   /** Group-header boxes and lines that run on into the table: their group level, and whether they reach its footer. */
-  private readonly groupSpans = new Map<ReportObject, { level: number; closes: boolean }>();
+  private readonly groupSpans = new Map<ReportObject, { level: number; closes: boolean; end?: { section: SectionInfo; offset: number; after: Set<SectionInfo> } }>();
+  private tableRuleEnds = new Map<number, { section: SectionInfo; offset: number; after: Set<SectionInfo> } | null>();
   /** Group levels whose footer closes a box framing the group: the table gets a closing row there. */
   private frameFooters = new Set<number>();
 
@@ -3858,15 +3866,17 @@ class RdlBuilder {
         if (remaining <= 0) continue;
         // Past the last section it closes the group too.
         let closes = true;
-        for (const next of design.slice(i + 1)) {
+        let end: { section: SectionInfo; offset: number; after: Set<SectionInfo> } | undefined;
+        for (const [k, next] of design.slice(i + 1).entries()) {
           const height = next.section.height ?? 0;
           if (remaining <= height) {
             closes = next.kind === 'footer' && next.level <= entry.level;
+            if (next.kind === 'footer') end = { section: next.section, offset: remaining, after: new Set(design.slice(i + k + 2).map((d) => d.section)) };
             break;
           }
           remaining -= height;
         }
-        this.groupSpans.set(o, { level: entry.level, closes });
+        this.groupSpans.set(o, { level: entry.level, closes, end });
       }
     });
   }
@@ -4343,6 +4353,14 @@ class RdlBuilder {
           const x = original.position?.x ?? 0;
           this.tableRules.push(x);
           this.tableRuleWidth = Math.max(this.tableRuleWidth, original.border?.width ?? 20);
+          const ends = (at: number) => {
+            const known = this.tableRuleEnds.get(at);
+            if (known === null) return;
+            if (!span.end) return void this.tableRuleEnds.set(at, null);
+            if (!known || known.after.has(span.end.section) || (known.section === span.end.section && span.end.offset > known.offset)) this.tableRuleEnds.set(at, span.end);
+          };
+          ends(x);
+          if (original.kind === 'box') ends(x + (original.size?.width ?? 0));
           if (original.kind === 'box') {
             this.tableRules.push(x + (original.size?.width ?? 0));
             if (span.closes) this.frameFooters.add(span.level);
@@ -4356,7 +4374,9 @@ class RdlBuilder {
       this.tableRuleWidth = Math.max(this.tableRuleWidth, frame.border?.width ?? 20);
       this.frameFooters.add(1);
     }
+    for (const x of this.tableRules) if (!this.tableRuleEnds.has(x)) this.tableRuleEnds.set(x, null);
     const table = this.buildTablix(areas, top);
+    this.tableRuleEnds = new Map();
     this.tableRules = [];
     this.tableRuleWidth = 20;
     this.frameFooters = new Set();
