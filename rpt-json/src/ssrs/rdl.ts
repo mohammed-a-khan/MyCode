@@ -2544,12 +2544,12 @@ class RdlBuilder {
   }
 
   private saysWhenEmpty(sections: SectionInfo[]): boolean {
-    return sections.some((section) => !section.suppressed && section.objects.some((o) => {
-      const name = o.conditions?.suppress?.name;
+    const counts = (name: string | undefined) => {
       const formula = name ? this.definition.formulas.find((f) => f.name.toLowerCase() === name.toLowerCase()) : undefined;
-      return (o.kind === 'text' || o.kind === 'field') && !o.suppressed && !!formula
-        && /^\s*(Distinct)?Count\s*\(\s*\{[^{}]+\}\s*\)\s*(>|<>)\s*0\s*$/i.test(formula.text);
-    }));
+      return !!formula && /^\s*(Distinct)?Count\s*\(\s*\{[^{}]+\}\s*\)\s*(>|<>)\s*0\s*$/i.test(formula.text);
+    };
+    return sections.some((section) => !section.suppressed && section.objects.some((o) => (o.kind === 'text' || o.kind === 'field') && !o.suppressed
+      && (counts(o.conditions?.suppress?.name) || (messageSections.has(section) && counts(section.conditions?.suppress?.name)))));
   }
 
   private readonly aboveFrames = new WeakSet<SectionInfo>();

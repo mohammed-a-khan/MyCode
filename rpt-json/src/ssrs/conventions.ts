@@ -1353,7 +1353,9 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
         const all = rowsOf(tablix);
         let dropped = 0;
         for (const l of blank) {
-          const said = descendants(all[l.i]!).find((e) => e.name === 'Textbox' && !isBlank(e) && /CountRows\(\)\s*(>|&gt;)\s*0/.test(textOf(child(e, 'Visibility/Hidden'))));
+          const shown = descendants(all[l.i]!).filter((e) => e.name === 'Textbox' && !isBlank(e));
+          const said = shown.find((e) => /CountRows\(\)\s*(>|&gt;)\s*0/.test(textOf(child(e, 'Visibility/Hidden'))))
+            ?? (shown.length === 1 && fixedText(shown[0]!) !== undefined && /CountRows\(\)\s*(>|&gt;)\s*0[\s\S]*CountRows\(\)\s*(>|&gt;)\s*0/.test(textOf(child(l.member, 'Visibility/Hidden'))) ? shown[0] : undefined);
           if (said && !ownMessage) {
             ownMessage = valueOf(said);
             const cells = cellsOf(all[l.i]!);
