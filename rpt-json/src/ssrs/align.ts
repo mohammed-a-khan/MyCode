@@ -78,6 +78,9 @@ export function padColumn(tablix: XmlElement, index: 'first' | 'last', amount: n
     if (content.name === 'Textbox') {
       const own = ownStyle(content);
       const side = index === 'first' ? 'PaddingLeft' : 'PaddingRight';
+      const across = Number(textOf(child(child(cell, 'CellContents')!, 'ColSpan')) || 1) === cells.length && cells.length > 1;
+      const align = textOf(descendants(content).find((e) => e.name === 'TextAlign'));
+      if (index === 'first' && across && (!align || /^(left|general)$/i.test(align)) && (points(textOf(child(own, side))) ?? 2) <= 4) continue;
       // (A padding worked out per record, placing the text by a formula, is left to it.)
       if (textOf(child(own, side)).startsWith('=')) continue;
       setChild(own, side, `${Math.round(((points(textOf(child(own, side))) ?? 2) + amount) * 10) / 10}pt`);
