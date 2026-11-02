@@ -1026,40 +1026,30 @@ describe('a framed table under a title and a label', () => {
     assert.ok(lines.every((l) => parseFloat(textOf(child(l, 'Height'))) < height / 2));
   });
 
-  it('places the report\'s own message inside the frame, where the report prints it, with white lines on the dark headings', () => {
+  it('lays the framed headings and totals out a cell per column, as merging needs, with white lines between dark headings', () => {
     const conv = readConventions(JSON.stringify({
-      names: { table: '{S}_Tab_{n}', heading: '{T}_{col}_ColTxt', value: '{T}_{col}_ColVal', noData: '{T}_Empty' },
+      names: { table: '{S}_Tab_{n}', heading: '{T}_{col}_ColTxt', value: '{T}_{col}_ColVal', noData: '{T}_Empty', totalText: '{T}_TotTxt', total: '{T}_{col}_TotVal' },
       style: { dataset: 'Looks', command: 'dbo.Looks', field: '{role}_{prop}', props: { BackgroundColor: 'fill' },
         roles: { heading: 'Head', headingFirst: 'HeadFirst', body: 'Body', totalLabel: 'TotLabel', totalValue: 'TotValue', footer: 'Foot' }, border: 'Edge_{side}' },
     }));
     const out = parseXml(applyConventions(rdl, 'Moves', conv).rdl);
-    const message = descendants(out).find((e) => e.name === 'Textbox' && e.attributes.Name === 'Moves_Tab_1_Empty')!;
-    assert.ok(parseFloat(textOf(child(childElements(message, 'Style')[0]!, 'PaddingLeft'))) > 60);
-    const area = descendants(out).filter((e) => e.name === 'Rectangle' && descendants(e).includes(message)).pop()!;
-    assert.ok(child(childElements(area, 'Style')[0]!, 'LeftBorder') && child(childElements(area, 'Style')[0]!, 'RightBorder'));
-    assert.equal(descendants(area).filter((e) => e.name === 'Line').length, 2);
-    const filled = descendants(out).find((e) => e.name === 'Rectangle' && /Head(First)?_fill/.test(textOf(child(childElements(e, 'Style')[0] ?? el('x'), 'BackgroundColor'))))!;
-    assert.ok(filled && !childElements(child(filled, 'ReportItems') ?? el('x')).length);
-    const cell = descendants(out).find((e) => e.name === 'CellContents' && descendants(e).includes(filled))!;
-    const items = childElements(child(childElements(cell).find((e) => e.name === 'Rectangle')!, 'ReportItems')!);
-    assert.equal(items[0], filled);
-    const inside = items.filter((e) => e.name === 'Line' && parseFloat(textOf(child(e, 'Top'))) >= parseFloat(textOf(child(filled, 'Top'))) - 0.01
-      && parseFloat(textOf(child(e, 'Top'))) + parseFloat(textOf(child(e, 'Height'))) <= parseFloat(textOf(child(filled, 'Top'))) + parseFloat(textOf(child(filled, 'Height'))) + 0.01);
-    assert.ok(inside.length > 0);
-    assert.ok(inside.every((l) => textOf(child(l, 'Style/Border/Color')) === 'White'));
     const table = descendants(out).find((e) => e.name === 'Tablix')!;
-    const widths = descendants(child(table, 'TablixBody/TablixColumns')!).filter((e) => e.name === 'Width').map((e) => parseFloat(textOf(e)));
-    const edges = widths.map((_, k) => widths.slice(0, k + 1).reduce((a, b) => a + b, 0)).slice(0, -1);
-    const downLines = descendants(table).filter((e) => e.name === 'Line' && parseFloat(textOf(child(e, 'Height'))) > 0.02 && parseFloat(textOf(child(e, 'Width'))) < 0.02
-      && childElements(descendants(table).find((x) => x.name === 'ReportItems' && x.children.includes(e))!).length > 0
-      && descendants(table).some((x) => x.name === 'CellContents' && childElements(x).some((r) => r.name === 'Rectangle' && childElements(child(r, 'ReportItems') ?? el('x')).includes(e))));
-    assert.ok(downLines.length >= 6);
-    for (const line of downLines) assert.ok(edges.some((x) => Math.abs(x - parseFloat(textOf(child(line, 'Left')))) < 0.002), `line at ${textOf(child(line, 'Left'))} off the column edges ${edges.join(', ')}`);
-    assert.ok(downLines.every((l) => textOf(child(l, 'Width')) === '0in'));
-    const sum = descendants(out).find((e) => e.name === 'Textbox' && /Sum\(Fields!size/.test(descendants(e).map((x) => (x.name === 'Value' ? textOf(x) : '')).join('')))!;
-    const box = descendants(out).find((e) => e.name === 'Rectangle' && childElements(child(e, 'ReportItems') ?? el('x')).includes(sum))!;
-    const boxLeft = parseFloat(textOf(child(box, 'Left')));
-    assert.ok(edges.some((x) => Math.abs(x - boxLeft - parseFloat(textOf(child(sum, 'Left')))) < 0.002));
-    assert.ok(Math.abs(parseFloat(textOf(child(sum, 'Left'))) + parseFloat(textOf(child(sum, 'Width'))) - parseFloat(textOf(child(box, 'Width'))) + 0.02) < 0.002);
+    const rows = descendants(child(table, 'TablixBody/TablixRows')!).filter((e) => e.name === 'TablixRow');
+    const items = (row: XmlElement) => descendants(child(row, 'TablixCells')!).filter((e) => e.name === 'CellContents').map((c) => childElements(c).find((x) => x.name !== 'ColSpan')!);
+    const heads = rows.find((row) => items(row).some((it) => /_day_ColTxt$/.test(it.attributes.Name ?? '')))!;
+    assert.deepEqual(items(heads).map((it) => it.name), ['Textbox', 'Textbox', 'Textbox']);
+    assert.deepEqual(items(heads).map((it) => it.attributes.Name), ['Moves_Tab_1_day_ColTxt', 'Moves_Tab_1_note_ColTxt', 'Moves_Tab_1_size_ColTxt']);
+    const color = (it: XmlElement, side: string) => textOf(child(childElements(it, 'Style')[0]!, `${side}/Color`));
+    assert.equal(color(items(heads)[1]!, 'LeftBorder'), 'White');
+    assert.equal(color(items(heads)[2]!, 'LeftBorder'), 'White');
+    const totals = rows.find((row) => items(row).some((it) => /_TotTxt$/.test(it.attributes.Name ?? '')))!;
+    assert.deepEqual(items(totals).map((it) => it.name), ['Textbox', 'Textbox', 'Textbox']);
+    assert.equal(items(totals)[0]!.attributes.Name, 'Moves_Tab_1_TotTxt');
+    assert.equal(items(totals)[2]!.attributes.Name, 'Moves_Tab_1_size_TotVal');
+    assert.ok(child(childElements(items(totals)[2]!, 'Style')[0]!, 'LeftBorder'));
+    const message = descendants(out).find((e) => e.name === 'Textbox' && e.attributes.Name === 'Moves_Tab_1_Empty')!;
+    const st = childElements(message, 'Style')[0]!;
+    assert.ok(parseFloat(textOf(child(st, 'PaddingLeft'))) > 60);
+    assert.ok(child(st, 'LeftBorder') && child(st, 'RightBorder'));
   });
 });
