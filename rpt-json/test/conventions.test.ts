@@ -952,7 +952,7 @@ describe('a framed table under a title and a label', () => {
   const T = 'Moves';
   const at = (x: number, y: number, width: number, height: number) => ({ position: { x, y }, size: { width, height } });
   const frame = (name: string, x: number, y: number, width: number, height: number) => ({ kind: 'box', name, ...at(x, y, width, height), border: { sides: [1, 1, 1, 1], width: 20 } });
-  const rule = (name: string, x: number, y: number, height: number) => ({ kind: 'line', name, ...at(x, y, 0, height), border: { sides: [1, 0, 0, 0], width: 20 } });
+  const rule = (name: string, x: number, y: number, height: number, width = 20) => ({ kind: 'line', name, ...at(x, y, 0, height), border: { sides: [1, 0, 0, 0], width } });
   const def = {
     ...emptyDefinition(), groups: ['@Whole'], sortFields: [`${T}.day`],
     formulas: [
@@ -976,7 +976,7 @@ describe('a framed table under a title and a label', () => {
       ] }] },
       { name: 'GroupFooterArea1', sections: [{ name: 'GF1', height: 600, objects: [
         frame('Sums', 1745, 120, 7775, 390), { kind: 'text', name: 'Totals', text: 'Totals', ...at(1830, 210, 5000, 189) },
-        rule('Split', 6930, 125, 375), { kind: 'field', name: 'SizeSum', field: `Sum of ${T}.size`, align: 'right', ...at(7000, 210, 1500, 189) },
+        rule('Split', 6930, 125, 375, 0), { kind: 'field', name: 'SizeSum', field: `Sum of ${T}.size`, align: 'right', ...at(7000, 210, 1500, 189) },
       ] }] },
       { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [
         { kind: 'field', name: 'Day', field: `${T}.day`, ...at(1830, 0, 900, 221) },
@@ -1046,7 +1046,10 @@ describe('a framed table under a title and a label', () => {
     assert.deepEqual(items(totals).map((it) => it.name), ['Textbox', 'Textbox', 'Textbox']);
     assert.equal(items(totals)[0]!.attributes.Name, 'Moves_Tab_1_TotTxt');
     assert.equal(items(totals)[2]!.attributes.Name, 'Moves_Tab_1_size_TotVal');
-    assert.ok(child(childElements(items(totals)[2]!, 'Style')[0]!, 'LeftBorder'));
+    const widthOf = (it: XmlElement) => textOf(child(childElements(it, 'Style')[0]!, 'LeftBorder/Width'));
+    const value = descendants(out).find((e) => e.name === 'Textbox' && e.attributes.Name === 'Moves_Tab_1_size_ColVal')!;
+    assert.ok(widthOf(items(totals)[2]!));
+    assert.equal(widthOf(items(totals)[2]!), widthOf(value));
     const message = descendants(out).find((e) => e.name === 'Textbox' && e.attributes.Name === 'Moves_Tab_1_Empty')!;
     const st = childElements(message, 'Style')[0]!;
     assert.ok(parseFloat(textOf(child(st, 'PaddingLeft'))) > 60);

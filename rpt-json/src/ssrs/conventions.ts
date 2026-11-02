@@ -3132,7 +3132,22 @@ function gridFromBoxes(tablix: XmlElement): void {
     const b = style ? child(style, side) ?? child(style, 'Border') : undefined;
     return b && !/^none$/i.test(textOf(child(b, 'Style')) || 'None') ? b : undefined;
   };
-  const sideAs = (name: string, from: XmlElement) => el(name, ...['Color', 'Style', 'Width'].map((k) => child(from, k)).filter((x): x is XmlElement => !!x).map((x) => el(x.name, textOf(x))));
+  const sideAs = (name: string, from: XmlElement, least = 0) => el(name, ...['Color', 'Style', 'Width'].map((k) => child(from, k)).filter((x): x is XmlElement => !!x)
+    .map((x) => el(x.name, x.name === 'Width' && least > (inches(textOf(x)) ?? 0) * 72 ? `${least.toFixed(2)}pt` : textOf(x))));
+  const ruleAt = new Map<number, number>();
+  for (const row of rowsOf(tablix)) {
+    let c = 0;
+    for (const cell of cellsOf(row)) {
+      const contents = child(cell, 'CellContents');
+      if (!contents) continue;
+      const span = Number(textOf(child(contents, 'ColSpan')) || 1);
+      const it = cellItem(cell);
+      const b = span === 1 && it ? drawnSide(ownStyle(it), 'LeftBorder') : undefined;
+      const w = b ? (inches(textOf(child(b, 'Width'))) ?? 0) * 72 : 0;
+      if (w > (ruleAt.get(c) ?? 0)) ruleAt.set(c, w);
+      c += span;
+    }
+  }
   for (const row of rowsOf(tablix)) {
     const height = len(row, 'Height');
     const cells = cellsOf(row);
@@ -3212,7 +3227,7 @@ function gridFromBoxes(tablix: XmlElement): void {
         st.children.unshift(el('Border', el('Style', 'None')));
         const left = j === first ? outerLeft : edges.get(j);
         const right = j === first + span - 1 ? outerRight : undefined;
-        if (left) st.children.push(sideAs('LeftBorder', left));
+        if (left) st.children.push(sideAs('LeftBorder', left, j === first ? 0 : ruleAt.get(j) ?? 0));
         if (right) st.children.push(sideAs('RightBorder', right));
         if (top) st.children.push(sideAs('TopBorder', top));
         if (bottom) st.children.push(sideAs('BottomBorder', bottom));
