@@ -68,6 +68,7 @@ export interface Conventions {
   pageBands: 'drop' | 'keep';
   noData: string;
   documentMap: boolean;
+  pagePerGroup: boolean;
   style?: {
     dataset: string;
     commandType?: string;
@@ -109,7 +110,7 @@ export function readConventions(json: string): Conventions {
     if (typeof value !== 'string' || !value.trim()) throw new Error(`"${key}" must be a non-empty text`);
     return value.trim();
   };
-  const o = object('', raw, ['names', 'prefixes', 'dataset', 'dataSource', 'parameters', 'page', 'pageBands', 'noData', 'documentMap', 'style'])!;
+  const o = object('', raw, ['names', 'prefixes', 'dataset', 'dataSource', 'parameters', 'page', 'pageBands', 'noData', 'documentMap', 'pagePerGroup', 'style'])!;
   const pre = object('prefixes', o.prefixes) ?? {};
   const prefixes = Object.fromEntries(Object.entries(pre).map(([k, v]) => [k.toLowerCase(), text(`prefixes.${k}`, v)!]));
   const names = { ...DEFAULT_NAMES };
@@ -132,6 +133,7 @@ export function readConventions(json: string): Conventions {
   });
   if (o.pageBands !== undefined && o.pageBands !== 'drop' && o.pageBands !== 'keep') throw new Error('"pageBands" must be "drop" or "keep"');
   if (o.documentMap !== undefined && typeof o.documentMap !== 'boolean') throw new Error('"documentMap" must be true or false');
+  if (o.pagePerGroup !== undefined && typeof o.pagePerGroup !== 'boolean') throw new Error('"pagePerGroup" must be true or false');
   const s = object('style', o.style, ['dataset', 'commandType', 'command', 'field', 'props', 'roles', 'rowBands', 'border', 'chart']);
   let style: Conventions['style'];
   if (s) {
@@ -169,6 +171,7 @@ export function readConventions(json: string): Conventions {
     pageBands: (o.pageBands as 'drop' | 'keep' | undefined) ?? 'drop',
     noData: text('noData', o.noData) ?? 'No {title} data',
     documentMap: (o.documentMap as boolean | undefined) ?? false,
+    pagePerGroup: (o.pagePerGroup as boolean | undefined) ?? false,
     style,
   };
 }
@@ -787,6 +790,7 @@ function restack(tablix: XmlElement, whole = false): void {
 const stackedRows = new WeakSet<XmlElement>();
 const widened = new WeakSet<XmlElement>();
 const leftBlank = new WeakSet<XmlElement>();
+const labelRows = new WeakSet<XmlElement>();
 const groupLabels = new WeakSet<XmlElement>();
 const summaryNames = new WeakMap<XmlElement, string>();
 const underRule = new WeakSet<XmlElement>();
@@ -1337,6 +1341,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
 
     // Crystal's blank band where there is no data (copies of the data rows, shown only then): the team's message row
     // takes its place, as in their templates (the copies would read as doubled rows in the designer).
+    let ownMessage: string | undefined;
     {
       const blank = rowLeaves(tablix).map((l, i) => ({ ...l, i })).filter((l) => l.kind === 'noData');
       if (blank.length) {
@@ -1344,6 +1349,8 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
         const all = rowsOf(tablix);
         let dropped = 0;
         for (const l of blank) {
+          const said = descendants(all[l.i]!).find((e) => e.name === 'Textbox' && !isBlank(e) && /CountRows\(\)\s*(>|&gt;)\s*0/.test(textOf(child(e, 'Visibility/Hidden'))));
+          if (said && !ownMessage) ownMessage = valueOf(said);
           const holder = descendants(child(tablix, 'TablixRowHierarchy')!).find((e) => e.name === 'TablixMembers' && e.children.includes(l.member));
           // (Only where the row's member is not the last of its list: a list may not be left empty.)
           if (!holder || childElements(holder, 'TablixMember').length < 2) continue;
@@ -1407,7 +1414,13 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       const following = rowsOf(tablix).slice(1).filter((r) => !emptyRow(r) && descendants(r).some((e) => e.name === 'Textbox' && !isBlank(e)));
       const block = following.length > 1 && descendants(following[0]!).filter((e) => e.name === 'Textbox' && !isBlank(e)).length === 2
         && descendants(following[0]!).some((e) => e.name === 'Textbox' && /Fields!\w+\.Value/.test(valueOf(e)));
-      const headingsUnder = (!!following[0] && headed(following[0])) || (block && headed(following[1]!));
+      const labelOf = (row: XmlElement) => {
+        const under = descendants(row).filter((e) => e.name === 'Textbox' && !isBlank(e));
+        return under.length === 1 && fixedText(under[0]!) !== undefined && !/:\s*$/.test(fixedText(under[0]!)!) ? under[0] : undefined;
+      };
+      const firstHeaded = following.findIndex((r) => headed(r));
+      const labels = firstHeaded > 0 && following.slice(0, firstHeaded).every((r) => !!labelOf(r)) ? following.slice(0, firstHeaded).map((r) => labelOf(r)!) : [];
+      const headingsUnder = (!!following[0] && headed(following[0])) || (block && headed(following[1]!)) || labels.length > 0;
       if (only && item && tb && words && words.trim().length > 3 && !/:\s*$/.test(words) && span >= 2 && headingsUnder
         && spanWidth >= 0.8 * tWidth && !child(item, 'Visibility')) {
         if (item !== tb) {
@@ -1433,6 +1446,13 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
         }
         roles.set(tb, 'title');
         tableCells.add(tb);
+        for (const label of labels) {
+          rename(label, 'text', { T });
+          roles.set(label, 'text');
+          tableCells.add(label);
+          const row = rowsOf(tablix).find((r) => descendants(r).includes(label));
+          if (row) labelRows.add(row);
+        }
       }
     }
 
@@ -1449,7 +1469,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       const ownTitle = descendants(tablix).find((e) => e.name === 'Textbox' && roles.get(e) === 'title');
       const what = ((ownTitle && fixedText(ownTitle)) ?? titleText ?? reportName.replace(/_/g, ' ')).trim();
       const message = conv.noData.replace(/\{TITLE\}/g, what.toUpperCase()).replace(/\{title\}/g, what);
-      const row = spanningRow(0.2, newTextbox('__nodata', message), columns);
+      const row = spanningRow(0.2, newTextbox('__nodata', ownMessage ?? message), columns);
       child(tablix, 'TablixBody/TablixRows')!.children.splice(at, 0, row);
       const repeat = at > 0 && textOf(child(top[at - 1]!, 'RepeatOnNewPage')) === 'true';
       const member = el('TablixMember', el('KeepWithGroup', 'After'), repeat ? el('RepeatOnNewPage', 'true') : null, el('Visibility', el('Hidden', '=CountRows() > 0')));
@@ -2032,7 +2052,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
             return name;
           }
           if ((item.name === 'Rectangle' && groupLabels.has(item)) || groupLabels.has(tb)) return rename(tb, 'text', { T });
-          if (leftBlank.has(tb)) return rename(tb, 'blank', { T, col: colNames[c] ?? `col${c + 1}` });
+          if (leftBlank.has(tb) || (labelRows.has(row) && isBlank(tb))) return rename(tb, 'blank', { T, col: colNames[c] ?? `col${c + 1}` });
           const col = fieldOf(tb) ?? colNames[c] ?? ownWord(tb) ?? `col${c + 1}`;
           if (kind === 'noData') return rename(tb, 'noData', { T });
           const across = Number(textOf(child(child(cell, 'CellContents') ?? el('x'), 'ColSpan')) || 1);
@@ -2618,6 +2638,7 @@ export function applyConventions(rdl: string, reportName: string, conv: Conventi
       note.message = renamed(note.message);
     }
   }
+  if (conv.pagePerGroup) for (const tablix of descendants(report).filter((e) => e.name === 'Tablix')) groupsOnNewPages(tablix);
   for (const tablix of descendants(report).filter((e) => e.name === 'Tablix')) totalsKeptWithRules(tablix);
   return { rdl: toXml(withFunctions(root, extra.sqlFunctions ?? [])), review, settled: conv.dataSource ? ['Data source'] : [], ...(page && conv.pageBands === 'drop' ? { settles: /^Page header$| in Page (Header|Footer)\b/ } : {}), ...(Object.keys(files).length ? { files } : {}) };
 }
@@ -3700,6 +3721,33 @@ function alignTotals(tablix: XmlElement): void {
       setChild(st, 'PaddingTop', top);
     }
   });
+}
+
+function groupsOnNewPages(tablix: XmlElement): void {
+  const rows = rowsOf(tablix);
+  const leaves = rowLeaves(tablix);
+  if (leaves.length !== rows.length) return;
+  const dynamic = descendants(child(tablix, 'TablixRowHierarchy') ?? el('x')).filter((e) => e.name === 'TablixMember'
+    && /Fields!/.test(textOf(child(e, 'Group/GroupExpressions/GroupExpression'))));
+  const inner = dynamic.filter((m) => !descendants(m).some((d) => d !== m && dynamic.includes(d)));
+  for (const member of inner) {
+    const group = child(member, 'Group')!;
+    if (!child(group, 'PageBreak')) {
+      const at = group.children.indexOf(child(group, 'GroupExpressions')!);
+      group.children.splice(at + 1, 0, el('PageBreak', el('BreakLocation', 'Between')));
+    }
+    if (child(member, 'Visibility')) continue;
+    const inside = new Set(descendants(member));
+    const lead = leaves.flatMap((leaf, i) => (leaf.kind === 'detail' && inside.has(leaf.member) ? [rows[i]!] : []))
+      .flatMap((row) => descendants(row).filter((e) => e.name === 'Textbox'))
+      .map((tb) => /^=Fields!(\w+)\.Value$/.exec(valueOf(tb).trim())?.[1])
+      .find((f): f is string => !!f);
+    if (!lead) continue;
+    const value = `Fields!${lead}.Value`;
+    const after = child(member, 'TablixMembers') ?? child(member, 'SortExpressions') ?? group;
+    member.children.splice(member.children.indexOf(after) + 1, 0,
+      el('Visibility', el('Hidden', `=Sum(IIf(IsNothing(${value}) OrElse Len(Trim(CStr(${value}))) = 0, 0, 1)) = 0`)));
+  }
 }
 
 function totalsKeptWithRules(tablix: XmlElement): void {

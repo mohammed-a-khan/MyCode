@@ -891,6 +891,15 @@ describe('the rules over a total stay on its page', () => {
   const conv = readConventions(JSON.stringify({ names: { table: '{S}_Tab_{n}', heading: '{T}_{col}_ColTxt', value: '{T}_{col}_ColVal' } }));
   const root = parseXml(applyConventions(converted.rdl, 'Lots', conv).rdl);
 
+  it('starts each group with records on a new page when asked to, and leaves out a group without any', () => {
+    const paged = parseXml(applyConventions(converted.rdl, 'Lots', readConventions(JSON.stringify({ names: { table: '{S}_Tab_{n}' }, pagePerGroup: true }))).rdl);
+    const kinds = descendants(paged).find((e) => e.name === 'TablixMember' && textOf(child(e, 'Group/GroupExpressions/GroupExpression')) === `=Fields!kind.Value`)!;
+    assert.equal(textOf(child(kinds, 'Group/PageBreak/BreakLocation')), 'Between');
+    assert.match(textOf(child(kinds, 'Visibility/Hidden')), /^=Sum\(IIf\(IsNothing\(Fields!name\.Value\)/);
+    const plain = descendants(root).find((e) => e.name === 'TablixMember' && textOf(child(e, 'Group/GroupExpressions/GroupExpression')) === `=Fields!kind.Value`)!;
+    assert.ok(!child(plain, 'Group/PageBreak') && !child(plain, 'Visibility'), 'unchanged without the setting');
+  });
+
   it('keeps the row of rules over the totals and the totals together', () => {
     const tablix = descendants(root).find((e) => e.name === 'Tablix')!;
     const rows = childElements(child(tablix, 'TablixBody/TablixRows')!, 'TablixRow');
@@ -936,5 +945,75 @@ describe('groups in an order of the report\'s own', () => {
     const sorts = descendants(child(group, 'SortExpressions')!).filter((e) => e.name === 'Value').map(textOf);
     assert.match(sorts[0]!, /= 4\), \(-\(4\)\)/);
     assert.equal(sorts[1], '=Fields!code.Value');
+  });
+});
+
+describe('a framed table under a title and a label', () => {
+  const T = 'Moves';
+  const at = (x: number, y: number, width: number, height: number) => ({ position: { x, y }, size: { width, height } });
+  const frame = (name: string, x: number, y: number, width: number, height: number) => ({ kind: 'box', name, ...at(x, y, width, height), border: { sides: [1, 1, 1, 1], width: 20 } });
+  const rule = (name: string, x: number, y: number, height: number) => ({ kind: 'line', name, ...at(x, y, 0, height), border: { sides: [1, 0, 0, 0], width: 20 } });
+  const def = {
+    ...emptyDefinition(), groups: ['@Whole'], sortFields: [`${T}.day`],
+    formulas: [
+      { kind: 'formula', name: 'Whole', index: 1, text: 'WhileReadingRecords; "All"', referencedFields: [], valueType: 'string' },
+      { kind: 'internal', name: 'Group #1 Order', index: 2, text: 'if IsNull ({@Whole}) then 2 else 2', referencedFields: ['@Whole'] },
+      { kind: 'conditionalFormat', name: 'Any', index: 3, text: `Count ({${T}.id}) > 0`, referencedFields: [`${T}.id`] },
+    ],
+    layout: [
+      { name: 'PageHeaderArea1', sections: [{ name: 'PH', height: 0, suppressed: true, objects: [] }] },
+      { name: 'PageFooterArea1', sections: [{ name: 'PF', height: 0, suppressed: true, objects: [] }] },
+      { name: 'ReportHeaderArea1', sections: [{ name: 'RH', height: 220, suppressed: true, objects: [] }] },
+      { name: 'ReportFooterArea1', sections: [{ name: 'RF', height: 220, suppressed: true, objects: [] }] },
+      { name: 'GroupHeaderArea1', sections: [{ name: 'GH1', height: 2096, objects: [
+        { kind: 'text', name: 'Title', text: 'Monthly Movements', align: 'center', ...at(1635, 120, 8000, 326) },
+        { kind: 'text', name: 'Label', text: 'Closed Movements', ...at(1635, 915, 2535, 300) },
+        frame('Outer', 1635, 1260, 8000, 1800), frame('Heads', 1755, 1350, 7760, 600), frame('Rows', 1740, 2040, 7775, 465),
+        { kind: 'text', name: 'DayHead', text: 'Day', ...at(1830, 1530, 900, 225) },
+        { kind: 'text', name: 'NoteHead', text: 'Note', ...at(2880, 1530, 4000, 225) },
+        { kind: 'text', name: 'SizeHead', text: 'Size', ...at(7000, 1530, 1500, 225) },
+        rule('Up1', 2790, 1350, 600), rule('Up2', 6930, 1350, 600), rule('Down1', 2790, 2040, 457), rule('Down2', 6930, 2040, 457),
+      ] }] },
+      { name: 'GroupFooterArea1', sections: [{ name: 'GF1', height: 600, objects: [
+        frame('Sums', 1745, 120, 7775, 390), { kind: 'text', name: 'Totals', text: 'Totals', ...at(1830, 210, 5000, 189) },
+        rule('Split', 6930, 125, 375), { kind: 'field', name: 'SizeSum', field: `Sum of ${T}.size`, align: 'right', ...at(7000, 210, 1500, 189) },
+      ] }] },
+      { name: 'DetailArea1', sections: [{ name: 'D', height: 240, objects: [
+        { kind: 'field', name: 'Day', field: `${T}.day`, ...at(1830, 0, 900, 221) },
+        { kind: 'field', name: 'Note', field: `${T}.note`, ...at(2880, 0, 4000, 221) },
+        { kind: 'field', name: 'Size', field: `${T}.size`, align: 'right', ...at(7000, 0, 1500, 221) },
+        { kind: 'text', name: 'Nothing', text: 'Nothing closed yet', conditions: { suppress: { name: 'Any', index: 3 } }, ...at(2880, 0, 4000, 240) },
+      ] }] },
+    ],
+  } as unknown as ReportDefinition;
+  const moves: DataSourceInfo = { connections: [], links: [], tables: [{ alias: T, name: T, kind: 'table', fields: [
+    { name: 'day', type: 'date' }, { name: 'note', type: 'string' }, { name: 'size', type: 'number' }, { name: 'id', type: 'number' }] }] };
+  const { rdl } = convertToRdl(def, moves, { reportName: 'Moves' });
+  const rowsIn = (xml: string) => descendants(descendants(parseXml(xml)).find((e) => e.name === 'TablixRows')!).filter((e) => e.name === 'TablixRow');
+  const shown = (row: XmlElement) => descendants(row).filter((e) => e.name === 'Value').map(textOf).filter(Boolean);
+
+  it('gives the title and the label rows of their own above the framed headings, with no column lines through them', () => {
+    const rows = rowsIn(rdl);
+    assert.deepEqual(shown(rows[0]!), ['Monthly Movements']);
+    assert.deepEqual(shown(rows[1]!), ['Closed Movements']);
+    assert.ok(shown(rows[2]!).includes('Day') && shown(rows[2]!).includes('Size'));
+    assert.ok(!descendants(rows[0]!).some((e) => e.name === 'Line'));
+    assert.ok(!descendants(rows[1]!).some((e) => e.name === 'Line'));
+  });
+
+  it('keeps the totals where the report prints its own message for no data', () => {
+    const members = childElements(descendants(parseXml(rdl)).find((e) => e.name === 'TablixRowHierarchy')!.children.find((c) => typeof c === 'object' && (c as XmlElement).name === 'TablixMembers') as XmlElement, 'TablixMember');
+    assert.ok(members.length > 3);
+    assert.ok(members.every((m) => !/CountRows\(\) = 0/.test(textOf(child(m, 'Visibility/Hidden')))));
+  });
+
+  it('styles the title and the label apart from the headings and shows the report\'s own message', () => {
+    const conv = readConventions(JSON.stringify({ names: { table: '{S}_Tab_{n}', heading: '{T}_{col}_ColTxt', value: '{T}_{col}_ColVal', blank: '{T}_blnk{n}_txt' } }));
+    const out = applyConventions(rdl, 'Moves', conv).rdl;
+    const rows = rowsIn(out);
+    const names = (row: XmlElement) => descendants(row).filter((e) => e.name === 'Textbox').map((e) => e.attributes.Name ?? '');
+    assert.ok(!names(rows[1]!).some((n) => /ColTxt$/.test(n)));
+    assert.ok(names(rows[1]!).slice(1).every((n) => /blnk\d+_txt$/.test(n)));
+    assert.ok(rows.some((row) => shown(row).includes('Nothing closed yet') && shown(row).length === 1));
   });
 });

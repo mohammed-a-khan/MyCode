@@ -2531,6 +2531,51 @@ class RdlBuilder {
     };
   }
 
+  private saysWhenEmpty(sections: SectionInfo[]): boolean {
+    return sections.some((section) => !section.suppressed && section.objects.some((o) => {
+      const name = o.conditions?.suppress?.name;
+      const formula = name ? this.definition.formulas.find((f) => f.name.toLowerCase() === name.toLowerCase()) : undefined;
+      return (o.kind === 'text' || o.kind === 'field') && !o.suppressed && !!formula
+        && /^\s*(Distinct)?Count\s*\(\s*\{[^{}]+\}\s*\)\s*(>|<>)\s*0\s*$/i.test(formula.text);
+    }));
+  }
+
+  private readonly aboveFrames = new WeakSet<SectionInfo>();
+
+  private splitAboveFrame(columns: Column[], section: SectionInfo): { upper: SectionInfo; lower: SectionInfo } | null {
+    if (!section.height || this.isTabular(columns, section)) return null;
+    const tableWidth = inchesToTwips(columns.reduce((sum, c) => sum + c.width, 0));
+    const top = (o: ReportObject) => o.position?.y ?? 0;
+    const bottom = (o: ReportObject) => top(o) + (o.size?.height ?? 0);
+    const frame = section.objects
+      .filter((o) => o.kind === 'box' && (o.size?.width ?? 0) >= tableWidth * 0.8)
+      .sort((a, b) => top(a) - top(b))[0];
+    if (!frame || top(frame) <= 60) return null;
+    const writing = (o: ReportObject) => o.kind === 'text' || o.kind === 'field';
+    const above = section.objects.filter((o) => bottom(o) <= top(frame) + 30);
+    if (!above.length || !above.every(writing) || above.some((o) => this.runOn.has(o))) return null;
+    const firstEnd = Math.min(...above.map(bottom));
+    const cuts = [...new Set(section.objects.map(top))]
+      .filter((y) => y > firstEnd - 30 && y <= top(frame))
+      .filter((y) => section.objects.every((o) => bottom(o) <= y + 30 || top(o) >= y - 30))
+      .sort((a, b) => a - b);
+    const cut = cuts[0];
+    if (cut === undefined) return null;
+    const { conditions, ...base } = section;
+    const upper = { ...section, height: cut, objects: section.objects.filter((o) => top(o) < cut - 30) };
+    this.aboveFrames.add(upper);
+    return {
+      upper,
+      lower: { ...base, conditions: conditions?.backColor ? { backColor: conditions.backColor } : undefined, name: `${section.name}_Below`, height: section.height - cut,
+        objects: section.objects.filter((o) => top(o) >= cut - 30).map((o) => {
+          const moved = { ...o, position: { x: o.position?.x ?? 0, y: Math.max(top(o) - cut, 0) } };
+          const spanning = this.runOn.get(o);
+          if (spanning) this.runOn.set(moved, spanning);
+          return moved;
+        }) },
+    };
+  }
+
   /** Whether a section fits a plain table row: one line of fields/text, at most one per column. */
   private isTabular(columns: Column[], section: SectionInfo): boolean {
     const cellObjects = section.objects.filter((o) => o.kind === 'field' || o.kind === 'text');
@@ -2565,6 +2610,13 @@ class RdlBuilder {
     // The part below a title's rule may still end at a rule of its own (the one under the column headings).
     // Below the first rule, any further rule across the middle splits the rest again (a rule between a block of figures
     // and the column headings under it).
+    const banded = this.splitAboveFrame(columns, section);
+    if (banded) {
+      const upper = this.tableRow(columns, banded.upper, rowName, area, minHeight, false, true);
+      const lower = this.tableRow(columns, banded.lower, `${rowName}_Below`, area, minHeight, false, splitDone);
+      const lowerOwn = lower.height - (lower.more ?? []).reduce((h, m) => h + m.height, 0);
+      return { row: upper.row, height: upper.height + lower.height, hidden: upper.hidden, more: [{ row: lower.row, height: lowerOwn }, ...(lower.more ?? [])] };
+    }
     const atRule = splitDone === true ? null : this.splitAtRule(columns, section);
     const split = atRule ?? (splitDone === true ? null : this.splitBelowRule(columns, section));
     if (split) {
@@ -2649,7 +2701,7 @@ class RdlBuilder {
       const height = sectionHeight > 0 ? sectionHeight : Math.max(bottom, MIN_ROW_HEIGHT);
       // Lines running down the table (tableRules) cross this row too, at the column edges; not in the section
       // they start in, which draws them itself from where they start.
-      const startsHere = section.objects.some((o) => this.runOn.has(o));
+      const startsHere = section.objects.some((o) => this.runOn.has(o)) || this.aboveFrames.has(section);
       const all = startsHere ? { left: new Set<number>(), right: new Set<number>() } : this.columnRules(columns);
       // Above a heading's rule only the frame's sides cross the row.
       const rules = outerOnly ? { left: new Set([...all.left].filter((i) => i === 0)), right: all.right } : all;
@@ -3194,7 +3246,7 @@ class RdlBuilder {
     for (let level = levels; level >= 1; level--) {
       this.ungroupedRows = level === 1 && this.isConstantGroup(this.groupFields[0]);
       footerMembers[level - 1] = addRows(areas.groupFooters.get(level), `Group${level}Footer`, `Group Footer ${level}`, 'Before');
-      if (this.ungroupedRows) {
+      if (this.ungroupedRows && !this.saysWhenEmpty(areas.detail)) {
         footerMembers[0] = footerMembers[0].map((m) => {
           const own = (m.children.find((c) => typeof c === 'object' && c !== null && (c as XmlElement).name === 'Visibility') as XmlElement | undefined)
             ?.children.map((c) => (typeof c === 'object' && c !== null ? String((c as XmlElement).children[0] ?? '') : '')).find(Boolean);

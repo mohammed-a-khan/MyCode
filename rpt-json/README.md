@@ -273,6 +273,9 @@ The file gives the team's names and patterns; everything it leaves out keeps a p
 }
 ```
 
+`"pagePerGroup": true` starts each group that has records on a new page (the column headings repeat at its top) and
+leaves out a group whose records are all blank.
+
 `dataSource` names the team's shared data source on the report server (`reference`). To preview on a machine
 not connected to the report server, give the database instead: `{ "name": "Shared", "connectString": "Data
 Source=server;Initial Catalog=database" }` (Windows sign-in).
